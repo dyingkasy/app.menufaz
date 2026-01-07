@@ -1,0 +1,7 @@
+{
+  "name": "MenuFaz",
+  "description": "Uma plataforma moderna de delivery para conectar estabelecimentos e clientes.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
