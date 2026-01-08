@@ -2,6 +2,7 @@
 import React from 'react';
 import { X, ShoppingBag, Trash2, ChevronRight } from 'lucide-react';
 import { CartItem, Store } from '../types';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface CartDrawerProps {
   isOpen: boolean;
@@ -25,7 +26,7 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
   if (!isOpen) return null;
 
   const cartSubtotal = cartItems.reduce((sum, item) => sum + item.totalPrice, 0);
-  const deliveryFee = store?.deliveryFee || 0;
+  const deliveryFee = Number(store?.deliveryFee) || 0;
   const cartTotal = cartSubtotal + deliveryFee;
 
   return (
@@ -76,7 +77,7 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
                                     <div className="flex-1">
                                         <div className="flex justify-between items-start">
                                             <h4 className="font-bold text-slate-800 dark:text-white text-sm pr-6 leading-snug">{item.product.name}</h4>
-                                            <p className="text-sm font-bold text-slate-900 dark:text-white whitespace-nowrap">R$ {item.totalPrice.toFixed(2)}</p>
+                                            <p className="text-sm font-bold text-slate-900 dark:text-white whitespace-nowrap">{formatCurrencyBRL(item.totalPrice)}</p>
                                         </div>
                                         
                                         {item.options.length > 0 && (
@@ -108,15 +109,15 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
                     <div className="space-y-3 mb-6 text-sm">
                         <div className="flex justify-between text-gray-500 dark:text-gray-400">
                             <span>Subtotal</span>
-                            <span>R$ {cartSubtotal.toFixed(2)}</span>
+                            <span>{formatCurrencyBRL(cartSubtotal)}</span>
                         </div>
                         <div className="flex justify-between text-gray-500 dark:text-gray-400 pb-3 border-b border-gray-100 dark:border-slate-800">
                             <span>Taxa de entrega</span>
-                            <span>{deliveryFee === 0 ? 'Grátis' : `R$ ${deliveryFee.toFixed(2)}`}</span>
+                            <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
                         </div>
                         <div className="flex justify-between font-bold text-xl text-slate-800 dark:text-white">
                             <span>Total</span>
-                            <span>R$ {cartTotal.toFixed(2)}</span>
+                            <span>{formatCurrencyBRL(cartTotal)}</span>
                         </div>
                     </div>
                     

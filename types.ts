@@ -10,12 +10,13 @@ export enum ViewState {
   CHECKOUT = 'CHECKOUT',
   CLIENT_PROFILE = 'CLIENT_PROFILE',
   FINISH_SIGNUP = 'FINISH_SIGNUP',
-  COURIER_DASHBOARD = 'COURIER_DASHBOARD'
+  COURIER_DASHBOARD = 'COURIER_DASHBOARD',
+  TABLE_TRACKING = 'TABLE_TRACKING'
 }
 
 export type UserRole = 'GUEST' | 'CLIENT' | 'BUSINESS' | 'ADMIN' | 'COURIER';
 
-export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES';
+export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES' | 'TABLES';
 
 export interface Coordinates {
   lat: number;
@@ -32,9 +33,12 @@ export interface ClosedPeriod {
 
 export interface ScheduleDay {
   day: string; // 'Domingo', 'Segunda', etc.
-  openTime: string; // '18:00'
-  closeTime: string; // '23:00'
-  isOpen: boolean; // Se funciona nesse dia
+  morningOpenTime: string; // '00:00'
+  morningCloseTime: string; // '12:00'
+  afternoonOpenTime: string; // '12:01'
+  afternoonCloseTime: string; // '23:59'
+  isMorningOpen: boolean; // Se funciona de manhã
+  isAfternoonOpen: boolean; // Se funciona de tarde
 }
 
 export interface Store {
@@ -44,12 +48,22 @@ export interface Store {
   description?: string;
   rating: number;
   deliveryTime: string;
+  pickupTime?: string;
   deliveryFee: number;
   minOrderValue?: number; 
   imageUrl: string;
   isPopular: boolean;
   isActive: boolean;
   coordinates: Coordinates;
+  phone?: string;
+  whatsapp?: string;
+  email?: string;
+  cep?: string;
+  street?: string;
+  number?: string;
+  district?: string;
+  state?: string;
+  complement?: string;
   closedPeriods?: ClosedPeriod[];
   schedule?: ScheduleDay[];
   autoOpenClose?: boolean;
@@ -57,10 +71,13 @@ export interface Store {
   // Novas configurações
   acceptsDelivery: boolean;
   acceptsPickup: boolean; 
+  acceptsTableOrders?: boolean;
+  tableCount?: number;
   // Endereço para filtro
   city?: string;
   state?: string;
   ownerId?: string;
+  customUrl?: string;
 
   // Dados de Bloqueio Administrativo
   blockReason?: string;
@@ -70,6 +87,7 @@ export interface Store {
 
   // Segurança
   adminPassword?: string; // Senha administrativa para exclusões
+  logoUrl?: string;
 }
 
 export interface StoreRequest {
@@ -77,7 +95,14 @@ export interface StoreRequest {
   ownerName: string;
   storeName: string;
   phone: string;
+  whatsapp?: string;
   email: string; // Novo campo
+  cep?: string;
+  street?: string;
+  number?: string;
+  district?: string;
+  state?: string;
+  complement?: string;
   city: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   createdAt: string;
@@ -194,7 +219,9 @@ export interface Order {
     refundReason?: string;
     chat?: ChatMessage[];
     
-    type?: 'DELIVERY' | 'PICKUP';
+    type?: 'DELIVERY' | 'PICKUP' | 'TABLE';
+    tableNumber?: string;
+    tableSessionId?: string;
     
     // Dados opcionais do cliente
     cpf?: string;
@@ -293,4 +320,19 @@ export interface AppSettings {
     emailJsServiceId?: string;
     emailJsTemplateId?: string;
     emailJsPublicKey?: string;
+    errorNotifyEmailEnabled?: boolean;
+    errorNotifyEmailTo?: string;
+    errorNotifyEmailTemplateId?: string;
+    errorNotifyCooldownSec?: number;
+}
+
+export interface ErrorLogEntry {
+    id: string;
+    source: string;
+    level: string;
+    message: string;
+    stack?: string | null;
+    context: Record<string, unknown>;
+    createdAt: string;
+    resolved: boolean;
 }

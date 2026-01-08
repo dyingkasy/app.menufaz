@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { MapPin, Search, ShoppingBag, Menu, X, User, Building2, ChevronDown, ShieldCheck, Moon, Sun, ClipboardList } from 'lucide-react';
 import { ViewState, UserRole } from '../types';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface HeaderProps {
   onNavigate: (view: ViewState) => void;
@@ -128,7 +129,7 @@ const Header: React.FC<HeaderProps> = ({
                             {cartItemCount}
                         </span>
                     </div>
-                    <span className="hidden lg:inline">R$ {cartTotal.toFixed(2)}</span>
+                    <span className="hidden lg:inline">{formatCurrencyBRL(cartTotal)}</span>
                 </button>
             )}
 

@@ -31,6 +31,7 @@ const isValidCPF = (cpf: string) => {
 };
 
 const luhnCheck = (val: string) => {
+    if (!val) return false;
     let checksum = 0;
     let j = 1;
     for (let i = val.length - 1; i >= 0; i--) {
@@ -107,6 +108,10 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
           });
       }
   }, [user]);
+
+  const displayName = user?.name?.trim() || user?.email || 'Cliente';
+  const displayEmail = user?.email || '';
+  const displayInitial = displayName.charAt(0).toUpperCase();
 
   // Carregar cartões reais ao entrar na aba ou montar
   useEffect(() => {
@@ -594,11 +599,11 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
               <div className="absolute top-0 right-0 w-64 h-64 bg-white opacity-5 rounded-full -translate-y-1/2 translate-x-1/4 pointer-events-none"></div>
               <div className="flex items-center gap-6 relative z-10">
                   <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center text-slate-900 text-3xl font-bold border-4 border-white/20 shadow-md">
-                      {user.name.charAt(0).toUpperCase()}
+                      {displayInitial}
                   </div>
                   <div>
-                      <h2 className="text-2xl font-bold">{user.name}</h2>
-                      <p className="text-slate-300 text-sm mb-2">{user.email}</p>
+                      <h2 className="text-2xl font-bold">{displayName}</h2>
+                      <p className="text-slate-300 text-sm mb-2">{displayEmail}</p>
                       <div className="inline-flex items-center gap-1 px-3 py-1 bg-white/10 rounded-full text-xs font-bold backdrop-blur-sm border border-white/10">
                           <User size={12} /> Cliente VIP
                       </div>

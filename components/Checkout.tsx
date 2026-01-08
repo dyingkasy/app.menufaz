@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, Wifi, ShoppingBag, Bike, Plus, Loader2, CheckCircle, ShieldCheck, AlertCircle, User } from 'lucide-react';
+import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, Wifi, ShoppingBag, Bike, Plus, Loader2, CheckCircle, ShieldCheck, AlertCircle, User, Utensils } from 'lucide-react';
 import { CartItem, Store, Address } from '../types';
 import { createOrder, getUserCards, saveUserCard, EncryptedCard } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface CheckoutProps {
   store: Store;
@@ -11,6 +12,10 @@ interface CheckoutProps {
   onBack: () => void;
   onOrderPlaced: () => void;
   onChangeAddress: () => void;
+  tableContext?: {
+    tableNumber: string;
+    sessionId: string;
+  };
 }
 
 // --- Validation Helpers ---
@@ -32,6 +37,7 @@ const isValidCPF = (cpf: string) => {
 };
 
 const luhnCheck = (val: string) => {
+    if (!val) return false;
     let checksum = 0;
     let j = 1;
     for (let i = val.length - 1; i >= 0; i--) {
@@ -68,14 +74,18 @@ const Checkout: React.FC<CheckoutProps> = ({
   address, 
   onBack, 
   onOrderPlaced,
-  onChangeAddress 
+  onChangeAddress,
+  tableContext
 }) => {
   const { user } = useAuth();
-  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>('CREDIT');
+  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(tableContext ? 'MONEY' : 'CREDIT');
   const [cardPaymentType, setCardPaymentType] = useState<'ONLINE' | 'DELIVERY'>('ONLINE');
-  const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
+  const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(tableContext ? 'TABLE' : 'DELIVERY');
+  const [tableNumber, setTableNumber] = useState(tableContext?.tableNumber || '');
   const [cpf, setCpf] = useState('');
   const [cpfError, setCpfError] = useState('');
+  const isTableFlow = !!tableContext;
+  const canUseCard = !!user;
   
   // Discount & Processing
   const [couponCode, setCouponCode] = useState('');
@@ -108,6 +118,28 @@ const Checkout: React.FC<CheckoutProps> = ({
           }
       }
   }, [user, paymentMethod, cardPaymentType]);
+
+  useEffect(() => {
+      if (isTableFlow) return;
+      if (!store.acceptsTableOrders && orderType === 'TABLE') {
+          setOrderType(store.acceptsPickup ? 'PICKUP' : 'DELIVERY');
+      }
+  }, [store.acceptsPickup, store.acceptsTableOrders, orderType, isTableFlow]);
+
+  useEffect(() => {
+      if (tableContext) {
+          setOrderType('TABLE');
+          setTableNumber(tableContext.tableNumber);
+      }
+  }, [tableContext]);
+
+  useEffect(() => {
+      if (isTableFlow) {
+          setPaymentMethod('MONEY');
+      } else if (!canUseCard && paymentMethod === 'CREDIT') {
+          setPaymentMethod('PIX');
+      }
+  }, [canUseCard, isTableFlow, paymentMethod]);
 
   const getCardBrand = (number: string) => {
       const n = number.replace(/\D/g, '');
@@ -189,7 +221,9 @@ const Checkout: React.FC<CheckoutProps> = ({
 
   // Calculations
   const subtotal = cartItems.reduce((acc, item) => acc + item.totalPrice, 0);
-  const finalDeliveryFee = orderType === 'DELIVERY' ? store.deliveryFee : 0;
+  const deliveryFee = Number(store.deliveryFee) || 0;
+  const pickupTime = store.pickupTime || store.deliveryTime;
+  const finalDeliveryFee = orderType === 'DELIVERY' ? deliveryFee : 0;
   const total = subtotal + finalDeliveryFee - discount;
 
   const handlePlaceOrder = async () => {
@@ -197,7 +231,11 @@ const Checkout: React.FC<CheckoutProps> = ({
       alert('Por favor, selecione um endereço de entrega.');
       return;
     }
-    if (!user) {
+    if (orderType === 'TABLE' && !tableNumber.trim()) {
+      alert('Informe o número da mesa.');
+      return;
+    }
+    if (!user && !isTableFlow) {
       alert('Você precisa estar logado.');
       return;
     }
@@ -208,7 +246,7 @@ const Checkout: React.FC<CheckoutProps> = ({
         return;
     }
 
-    if (paymentMethod === 'CREDIT' && cardPaymentType === 'ONLINE') {
+    if (!isTableFlow && paymentMethod === 'CREDIT' && cardPaymentType === 'ONLINE') {
         if (savedCards.length === 0 && !showAddCard) {
             alert("Adicione um cartão para pagar online.");
             return;
@@ -232,7 +270,9 @@ const Checkout: React.FC<CheckoutProps> = ({
         });
 
         let paymentDescription = '';
-        if (paymentMethod === 'CREDIT') {
+        if (orderType === 'TABLE') {
+            paymentDescription = 'Pagamento na mesa';
+        } else if (paymentMethod === 'CREDIT') {
             if (cardPaymentType === 'ONLINE') {
                 const card = savedCards.find(c => c.id === selectedCardId);
                 paymentDescription = `Online: ${card?.brand} final ${card?.last4}`;
@@ -245,20 +285,23 @@ const Checkout: React.FC<CheckoutProps> = ({
             paymentDescription = `Dinheiro${moneyChange ? ` (Troco p/ ${moneyChange})` : ''}`;
         }
 
+        const tableValue = tableNumber.trim();
         await createOrder({
             storeId: store.id,
-            userId: user.uid,
-            customerName: user.name,
+            userId: user?.uid,
+            customerName: user?.name || `Mesa ${tableValue}`,
             items: itemsDescription,
             total: total,
             time: new Date().toLocaleTimeString(),
-            notes: orderType === 'PICKUP' ? 'RETIRADA NO BALCÃO' : '', 
+            notes: orderType === 'PICKUP' ? 'RETIRADA NO BALCÃO' : orderType === 'TABLE' ? `MESA ${tableValue}` : '', 
             paymentMethod: paymentDescription,
             refundStatus: 'NONE',
             storeCity: store.city, 
             storeCoordinates: store.coordinates,
             deliveryCoordinates: orderType === 'DELIVERY' && address ? address.coordinates : undefined,
             type: orderType,
+            tableNumber: orderType === 'TABLE' ? tableValue : undefined,
+            tableSessionId: orderType === 'TABLE' ? tableContext?.sessionId : undefined,
             cpf: cpf 
         });
 
@@ -285,7 +328,9 @@ const Checkout: React.FC<CheckoutProps> = ({
         <p className="text-gray-500 dark:text-gray-400 mb-8 text-lg">
           A loja <span className="font-bold text-slate-800 dark:text-white">{store.name}</span> já recebeu seu pedido e começará o preparo em instantes.
         </p>
-        <p className="text-sm text-gray-400 animate-pulse">Redirecionando para Meus Pedidos...</p>
+        <p className="text-sm text-gray-400 animate-pulse">
+          {isTableFlow ? 'Abrindo acompanhamento da mesa...' : 'Redirecionando para Meus Pedidos...'}
+        </p>
       </div>
     );
   }
@@ -304,7 +349,10 @@ const Checkout: React.FC<CheckoutProps> = ({
             </button>
             <h1 className="text-xl font-bold text-slate-800 dark:text-white">Finalizar Pedido</h1>
           </div>
-          <div className="text-sm font-bold text-gray-500 dark:text-gray-400 hidden sm:block">
+          <div className="text-sm font-bold text-gray-500 dark:text-gray-400 hidden sm:flex items-center gap-2">
+             {store.logoUrl && (
+                <img src={store.logoUrl} alt={`Logo ${store.name}`} className="w-6 h-6 rounded-full object-cover border border-gray-200 dark:border-slate-700" />
+             )}
              {store.name}
           </div>
         </div>
@@ -313,32 +361,40 @@ const Checkout: React.FC<CheckoutProps> = ({
       <main className="max-w-3xl mx-auto px-4 py-6 space-y-6">
         
         {/* DELIVERY TYPE TOGGLE */}
-        {store.acceptsPickup && (
-            <section className="bg-white dark:bg-slate-900 p-1.5 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 flex">
-                <button 
-                    onClick={() => setOrderType('DELIVERY')}
-                    className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'DELIVERY' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
-                >
-                    <Bike size={18} /> Entrega
-                </button>
-                <button 
-                    onClick={() => setOrderType('PICKUP')}
-                    className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'PICKUP' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
-                >
-                    <ShoppingBag size={18} /> Retirada
-                </button>
-            </section>
+        {!isTableFlow && (
+          <section className="bg-white dark:bg-slate-900 p-1.5 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 flex">
+              <button 
+                  onClick={() => setOrderType('DELIVERY')}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'DELIVERY' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
+              >
+                  <Bike size={18} /> Entrega
+              </button>
+              <button 
+                  onClick={() => store.acceptsPickup && setOrderType('PICKUP')}
+                  disabled={!store.acceptsPickup}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'PICKUP' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'} disabled:opacity-50`}
+              >
+                  <ShoppingBag size={18} /> Retirada
+              </button>
+              <button 
+                  onClick={() => store.acceptsTableOrders && setOrderType('TABLE')}
+                  disabled={!store.acceptsTableOrders}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'TABLE' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'} disabled:opacity-50`}
+              >
+                  <Utensils size={18} /> Mesa
+              </button>
+          </section>
         )}
 
         {/* Delivery Address */}
         <section>
             <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <MapPin size={16} /> {orderType === 'DELIVERY' ? 'Endereço de Entrega' : 'Local de Retirada'}
+                <MapPin size={16} /> {orderType === 'DELIVERY' ? 'Endereço de Entrega' : orderType === 'TABLE' ? 'Mesa' : 'Local de Retirada'}
             </h3>
             <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-gray-200 dark:border-slate-800 shadow-sm flex items-center justify-between">
                 <div className="flex items-center gap-4">
                     <div className="w-12 h-12 bg-red-50 dark:bg-red-900/20 rounded-full flex items-center justify-center text-red-600 dark:text-red-400 shrink-0">
-                        {orderType === 'DELIVERY' ? <MapPin size={24} /> : <ShoppingBag size={24} />}
+                        {orderType === 'DELIVERY' ? <MapPin size={24} /> : orderType === 'TABLE' ? <Utensils size={24} /> : <ShoppingBag size={24} />}
                     </div>
                     <div>
                         {orderType === 'DELIVERY' ? (
@@ -350,10 +406,15 @@ const Checkout: React.FC<CheckoutProps> = ({
                             ) : (
                                 <p className="font-bold text-red-600">Selecione um endereço</p>
                             )
+                        ) : orderType === 'TABLE' ? (
+                            <>
+                                <p className="font-bold text-slate-800 dark:text-white text-sm">{store.name}</p>
+                                <p className="text-xs text-gray-500 dark:text-gray-400">Pedido na mesa</p>
+                            </>
                         ) : (
                             <>
                                 <p className="font-bold text-slate-800 dark:text-white text-sm">{store.name}</p>
-                                <p className="text-xs text-gray-500 dark:text-gray-400">Retirar no balcão da loja</p>
+                                <p className="text-xs text-gray-500 dark:text-gray-400">Retirar no balcão da loja • {pickupTime}</p>
                             </>
                         )}
                     </div>
@@ -367,6 +428,19 @@ const Checkout: React.FC<CheckoutProps> = ({
                     </button>
                 )}
             </div>
+            {orderType === 'TABLE' && (
+                <div className="mt-4">
+                    <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-2">Número da Mesa</label>
+                    <input
+                        type="text"
+                        value={tableNumber}
+                        onChange={(e) => setTableNumber(e.target.value)}
+                        readOnly={isTableFlow}
+                        className={`w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white ${isTableFlow ? 'opacity-80 cursor-not-allowed' : ''}`}
+                        placeholder="Ex: 12"
+                    />
+                </div>
+            )}
         </section>
 
         {/* Order Summary */}
@@ -391,19 +465,19 @@ const Checkout: React.FC<CheckoutProps> = ({
                                     )}
                                 </div>
                             </div>
-                            <p className="text-sm font-medium text-slate-800 dark:text-white">R$ {item.totalPrice.toFixed(2)}</p>
+                            <p className="text-sm font-medium text-slate-800 dark:text-white">{formatCurrencyBRL(item.totalPrice)}</p>
                         </div>
                     ))}
                 </div>
                 <div className="p-5 space-y-2 bg-white dark:bg-slate-900 border-t border-gray-100 dark:border-slate-800">
                     <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                         <span>Subtotal</span>
-                        <span>R$ {subtotal.toFixed(2)}</span>
+                        <span>{formatCurrencyBRL(subtotal)}</span>
                     </div>
                     <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                         <span>Taxa de Entrega</span>
                         {orderType === 'DELIVERY' ? (
-                            <span>{store.deliveryFee === 0 ? 'Grátis' : `R$ ${store.deliveryFee.toFixed(2)}`}</span>
+                            <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
                         ) : (
                             <span className="text-green-600 font-bold">Grátis (Retirada)</span>
                         )}
@@ -411,12 +485,12 @@ const Checkout: React.FC<CheckoutProps> = ({
                     {discount > 0 && (
                         <div className="flex justify-between text-sm text-green-600 font-bold">
                             <span>Desconto</span>
-                            <span>- R$ {discount.toFixed(2)}</span>
+                            <span>- {formatCurrencyBRL(discount)}</span>
                         </div>
                     )}
                     <div className="flex justify-between text-xl font-extrabold text-slate-800 dark:text-white pt-3 mt-2 border-t border-gray-100 dark:border-slate-800">
                         <span>Total</span>
-                        <span>R$ {total.toFixed(2)}</span>
+                        <span>{formatCurrencyBRL(total)}</span>
                     </div>
                 </div>
             </div>
@@ -448,13 +522,16 @@ const Checkout: React.FC<CheckoutProps> = ({
         </section>
 
         {/* Payment Methods UI */}
+        {!isTableFlow && (
         <section>
              <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <Banknote size={16} /> Pagamento
             </h3>
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
                 <div className="flex border-b border-gray-100 dark:border-slate-800">
-                    <button onClick={() => setPaymentMethod('CREDIT')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'CREDIT' ? 'text-red-600 bg-red-50 dark:bg-red-900/10 border-b-2 border-red-600' : 'text-gray-500'}`}><CreditCard size={18} /> Cartão</button>
+                    {canUseCard && (
+                        <button onClick={() => setPaymentMethod('CREDIT')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'CREDIT' ? 'text-red-600 bg-red-50 dark:bg-red-900/10 border-b-2 border-red-600' : 'text-gray-500'}`}><CreditCard size={18} /> Cartão</button>
+                    )}
                     <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><div className="w-4 h-4 rounded rotate-45 border-2 border-current"></div> Pix</button>
                     <button onClick={() => setPaymentMethod('MONEY')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'MONEY' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/10 border-b-2 border-blue-600' : 'text-gray-500'}`}><Banknote size={18} /> Dinheiro</button>
                 </div>
@@ -603,6 +680,15 @@ const Checkout: React.FC<CheckoutProps> = ({
                 </div>
             </div>
         </section>
+        )}
+        {isTableFlow && (
+            <section className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5">
+                <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-2 flex items-center gap-2">
+                    <Banknote size={16} /> Pagamento
+                </h3>
+                <p className="text-sm text-gray-600 dark:text-gray-300">Pagamento será realizado na mesa, direto com a equipe.</p>
+            </section>
+        )}
 
       </main>
 
@@ -611,7 +697,7 @@ const Checkout: React.FC<CheckoutProps> = ({
         <div className="max-w-3xl mx-auto flex flex-col sm:flex-row items-center gap-4">
             <div className="w-full sm:w-auto flex justify-between sm:block flex-1">
                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase font-bold">Total a Pagar</p>
-                <p className="text-2xl font-extrabold text-slate-900 dark:text-white">R$ {total.toFixed(2)}</p>
+                <p className="text-2xl font-extrabold text-slate-900 dark:text-white">{formatCurrencyBRL(total)}</p>
             </div>
             <button 
                 onClick={handlePlaceOrder}

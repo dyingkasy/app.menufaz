@@ -1,8 +1,9 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, MapPin, Heart, Share2, Sparkles, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock } from 'lucide-react';
+import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, MapPin, Heart, Share2, Sparkles, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
 import { Store, Product, CartItem, Review, PizzaFlavor } from '../types';
 import { getProductsByStore, getPizzaFlavorsByStore } from '../services/db';
+import { formatCurrencyBRL } from '../utils/format';
 import StoreReviews from './StoreReviews';
 
 interface StoreDetailsProps {
@@ -13,6 +14,8 @@ interface StoreDetailsProps {
   onRemoveFromCart: (id: string) => void;
   onClearCart: () => void;
   onOpenCart: () => void; 
+  tableNumber?: string;
+  onTrackTable?: () => void;
 }
 
 const StoreDetails: React.FC<StoreDetailsProps> = ({ 
@@ -20,7 +23,9 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     onBack, 
     onAddToCart, 
     cartItems, 
-    onOpenCart
+    onOpenCart,
+    tableNumber,
+    onTrackTable
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -43,7 +48,13 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
           try {
               const products = await getProductsByStore(store.id);
               const flavors = await getPizzaFlavorsByStore(store.id);
-              setStoreProducts(products);
+              setStoreProducts(
+                  products.map((product) => ({
+                      ...product,
+                      category: product.category || 'Lanches',
+                      isAvailable: product.isAvailable ?? true
+                  }))
+              );
               setStoreFlavors(flavors);
           } catch (e) {
               console.error("Erro ao carregar dados da loja", e);
@@ -80,7 +91,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   // Filtered by search
   const displayProducts = useMemo(() => {
       if (!searchTerm) return storeProducts;
-      return storeProducts.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()));
+      return storeProducts.filter(p => (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()));
   }, [storeProducts, searchTerm]);
 
   // Available flavors for the *currently selected product*
@@ -226,8 +237,11 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       onOpenCart(); 
   };
 
+  const deliveryFee = Number(store.deliveryFee) || 0;
   const cartSubtotal = cartItems.reduce((sum, item) => sum + item.totalPrice, 0);
-  const cartTotal = cartSubtotal + store.deliveryFee;
+  const cartTotal = cartSubtotal + deliveryFee;
+
+  const pickupTime = store.pickupTime || '';
 
   const scrollToSection = (id: string) => {
       const el = document.getElementById(id);
@@ -282,9 +296,18 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
             <div className="max-w-5xl mx-auto px-4 relative -mt-16 md:-mt-20 z-10">
                 <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl p-6 border border-gray-100 dark:border-slate-800">
                     <div className="flex justify-between items-start mb-4">
-                        <h1 className="text-2xl md:text-4xl font-extrabold text-slate-800 dark:text-white leading-tight">
-                            {store.name}
-                        </h1>
+                        <div className="flex items-center gap-4">
+                            {store.logoUrl && (
+                                <img
+                                    src={store.logoUrl}
+                                    alt={`Logo ${store.name}`}
+                                    className="w-14 h-14 rounded-full border border-white/80 shadow-md object-cover"
+                                />
+                            )}
+                            <h1 className="text-2xl md:text-4xl font-extrabold text-slate-800 dark:text-white leading-tight">
+                                {store.name}
+                            </h1>
+                        </div>
                         <button className="p-2 bg-gray-50 dark:bg-slate-800 rounded-full text-gray-400 hover:text-red-500 transition-colors">
                             <Heart size={24} />
                         </button>
@@ -311,17 +334,50 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                 <Clock size={16} className="text-gray-400" /> {store.deliveryTime}
                             </div>
                         </div>
+                        {store.acceptsPickup && pickupTime && (
+                            <>
+                                <div className="w-px h-8 bg-gray-100 dark:bg-slate-800"></div>
+                                <div className="flex-1">
+                                    <p className="text-xs text-gray-400 uppercase font-bold mb-1">Retirada</p>
+                                    <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
+                                        <Clock size={16} className="text-gray-400" /> {pickupTime}
+                                    </div>
+                                </div>
+                            </>
+                        )}
                         <div className="w-px h-8 bg-gray-100 dark:bg-slate-800"></div>
                         <div className="flex-1">
                             <p className="text-xs text-gray-400 uppercase font-bold mb-1">Taxa</p>
                             <div className="font-bold text-green-600">
-                                {store.deliveryFee === 0 ? 'Grátis' : `R$ ${store.deliveryFee.toFixed(2)}`}
+                                {deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
+
+        {tableNumber && onTrackTable && (
+            <div className="max-w-5xl mx-auto px-4">
+                <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 shadow-sm">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 flex items-center justify-center">
+                            <Utensils size={20} />
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-gray-400 uppercase">Mesa</p>
+                            <p className="text-lg font-extrabold text-slate-800 dark:text-white">{tableNumber}</p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={onTrackTable}
+                        className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold hover:opacity-90 shadow-sm"
+                    >
+                        Acompanhar mesa
+                    </button>
+                </div>
+            </div>
+        )}
 
         {/* Sticky Categories */}
         <div className="sticky top-[60px] z-40 bg-gray-50/95 dark:bg-slate-950/95 backdrop-blur-sm border-b border-gray-200 dark:border-slate-800">
@@ -358,7 +414,9 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                 <div className="py-20 text-center text-gray-500">Carregando cardápio...</div>
             ) : (
                 categories.map(cat => {
-                    const catProducts = displayProducts.filter(p => p.category === cat && p.isAvailable); // Only show available products
+                    const catProducts = displayProducts.filter(
+                        p => p.category === cat && (p.isAvailable ?? true)
+                    ); // Only show available products
                     if (catProducts.length === 0) return null;
 
                     return (
@@ -381,11 +439,11 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                             <div className="flex items-center gap-2 mt-auto">
                                                 {product.promoPrice ? (
                                                     <>
-                                                        <span className="text-green-600 font-bold">R$ {product.promoPrice.toFixed(2)}</span>
-                                                        <span className="text-xs text-gray-400 line-through">R$ {product.price.toFixed(2)}</span>
+                                                        <span className="text-green-600 font-bold">{formatCurrencyBRL(product.promoPrice)}</span>
+                                                        <span className="text-xs text-gray-400 line-through">{formatCurrencyBRL(product.price)}</span>
                                                     </>
                                                 ) : (
-                                                    <span className="text-slate-700 dark:text-gray-200 font-medium">R$ {product.price.toFixed(2)}</span>
+                                                    <span className="text-slate-700 dark:text-gray-200 font-medium">{formatCurrencyBRL(product.price)}</span>
                                                 )}
                                                 {product.isPizza && product.maxFlavors && product.maxFlavors > 1 && (
                                                     <span className="text-[10px] bg-orange-100 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 px-2 py-0.5 rounded-full flex items-center gap-1 font-bold">
@@ -433,7 +491,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                         <span>Ver Sacola</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <span>R$ {cartTotal.toFixed(2)}</span>
+                        <span>{formatCurrencyBRL(cartTotal)}</span>
                         <ChevronRight size={18} className="opacity-80" />
                     </div>
                 </button>
@@ -466,7 +524,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                              <div className="flex items-center justify-between mb-8 p-4 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900/30">
                                  <span className="text-sm font-bold text-green-800 dark:text-green-400">Preço do item</span>
                                  <span className="text-2xl font-extrabold text-green-600">
-                                     R$ {calculateTotal().toFixed(2)}
+                                     {formatCurrencyBRL(calculateTotal())}
                                  </span>
                              </div>
 
@@ -556,7 +614,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                      {splitCount > 1 && selectedProduct.splitSurcharge && (
                                          <div className="mt-4 flex items-center gap-2 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 p-2 rounded-lg">
                                              <Info size={14} />
-                                             <span>Acréscimo de R$ {selectedProduct.splitSurcharge.toFixed(2)} por divisão</span>
+                                            <span>Acréscimo de {formatCurrencyBRL(selectedProduct.splitSurcharge)} por divisão</span>
                                          </div>
                                      )}
                                  </div>
@@ -610,7 +668,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                                              </div>
                                                          </div>
                                                          <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                                                             {opt.price > 0 ? `+ R$ ${opt.price.toFixed(2)}` : 'Grátis'}
+                                                            {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
                                                          </span>
                                                      </div>
                                                  );
@@ -694,7 +752,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                     className="flex-1 w-full bg-red-600 hover:bg-red-700 text-white h-14 rounded-xl font-bold flex justify-between items-center px-6 transition-all shadow-lg shadow-red-600/20 hover:scale-[1.02]"
                                 >
                                     <span>Adicionar</span>
-                                    <span className="bg-red-800/40 px-3 py-1 rounded-lg">R$ {calculateTotal().toFixed(2)}</span>
+                                    <span className="bg-red-800/40 px-3 py-1 rounded-lg">{formatCurrencyBRL(calculateTotal())}</span>
                                 </button>
                              </>
                          ) : (

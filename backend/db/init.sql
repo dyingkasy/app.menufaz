@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS store_requests (
 CREATE TABLE IF NOT EXISTS products (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   data JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
@@ -86,6 +87,19 @@ CREATE TABLE IF NOT EXISTS courier_locations (
   lng DOUBLE PRECISION NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS error_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source TEXT NOT NULL,
+  level TEXT NOT NULL DEFAULT 'error',
+  message TEXT NOT NULL,
+  stack TEXT,
+  context JSONB NOT NULL DEFAULT '{}'::jsonb,
+  resolved BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
 
 CREATE INDEX IF NOT EXISTS idx_orders_store_id ON orders(store_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);

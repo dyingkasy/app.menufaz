@@ -24,8 +24,15 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
       ownerName: '',
       storeName: '',
       phone: '',
+      whatsapp: '',
       email: '',
-      city: ''
+      cep: '',
+      street: '',
+      number: '',
+      district: '',
+      city: '',
+      state: '',
+      complement: ''
   });
 
   // WhatsApp Link (Phone: 38998074444)
@@ -56,8 +63,15 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
               ownerName: formData.ownerName,
               storeName: formData.storeName,
               phone: formData.phone,
+              whatsapp: formData.whatsapp,
               email: formData.email,
-              city: formData.city
+              cep: formData.cep,
+              street: formData.street,
+              number: formData.number,
+              district: formData.district,
+              city: formData.city,
+              state: formData.state,
+              complement: formData.complement
           });
           setSuccess(true);
       } catch (error) {
@@ -143,6 +157,7 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
                                      <form onSubmit={handleSubmit} className="space-y-4">
                                         <div>
                                             <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Nome do Responsável</label>
+                                            <p className="text-xs text-gray-500 dark:text-gray-400">Nome completo de quem vai administrar a loja.</p>
                                             <div className="relative mt-1">
                                                 <input name="ownerName" value={formData.ownerName} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Seu nome completo" />
                                                 <User className="absolute left-3 top-3 text-gray-400" size={18} />
@@ -150,13 +165,15 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
                                         </div>
                                         <div>
                                             <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Nome do Restaurante</label>
+                                            <p className="text-xs text-gray-500 dark:text-gray-400">Esse nome aparece para os clientes no app.</p>
                                             <div className="relative mt-1">
                                                 <input name="storeName" value={formData.storeName} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Ex: Burger King da Esquina" />
                                                 <Store className="absolute left-3 top-3 text-gray-400" size={18} />
                                             </div>
                                         </div>
                                         <div>
-                                            <label className="text-sm font-bold text-gray-700 dark:text-gray-300">E-mail para contato</label>
+                                            <label className="text-sm font-bold text-gray-700 dark:text-gray-300">E-mail de Login</label>
+                                            <p className="text-xs text-gray-500 dark:text-gray-400">Será usado para acessar o painel da sua loja.</p>
                                             <div className="relative mt-1">
                                                 <input name="email" value={formData.email} onChange={handleChange} type="email" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="seu@email.com" />
                                                 <Mail className="absolute left-3 top-3 text-gray-400" size={18} />
@@ -164,16 +181,83 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
                                         </div>
                                         <div className="grid grid-cols-2 gap-4">
                                             <div>
-                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Telefone</label>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Telefone do Responsável</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Usado para contato do cadastro.</p>
                                                 <div className="relative mt-1">
                                                     <input name="phone" value={formData.phone} onChange={handleChange} type="tel" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="(00) 00000-0000" />
                                                     <Phone className="absolute left-3 top-3 text-gray-400" size={18} />
                                                 </div>
                                             </div>
                                             <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">WhatsApp do Comércio</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Número que vai receber os pedidos.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="whatsapp" value={formData.whatsapp} onChange={handleChange} type="tel" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="(00) 00000-0000" />
+                                                    <MessageCircle className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="pt-2">
+                                            <div className="flex items-center gap-2 text-sm font-bold text-gray-700 dark:text-gray-300">
+                                                <MapPin size={16} /> Endereço do Comércio
+                                            </div>
+                                            <p className="text-xs text-gray-500 dark:text-gray-400">Preencha o endereço completo para delivery e retirada.</p>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">CEP</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Usado para localizar sua loja no mapa.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="cep" value={formData.cep} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="00000-000" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Rua / Logradouro</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Nome da rua onde fica o comércio.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="street" value={formData.street} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Av. Principal" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Número</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Número do imóvel.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="number" value={formData.number} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="123" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Bairro</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Bairro onde fica a loja.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="district" value={formData.district} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Centro" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div>
                                                 <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Cidade</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Usamos essa cidade para entregas e cadastro.</p>
                                                 <div className="relative mt-1">
                                                     <input name="city" value={formData.city} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Sua cidade" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Estado</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Sigla do estado (ex: SP).</p>
+                                                <div className="relative mt-1">
+                                                    <input name="state" value={formData.state} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="UF" />
+                                                    <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
+                                                </div>
+                                            </div>
+                                            <div className="md:col-span-2">
+                                                <label className="text-sm font-bold text-gray-700 dark:text-gray-300">Complemento</label>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">Opcional: sala, bloco, referência.</p>
+                                                <div className="relative mt-1">
+                                                    <input name="complement" value={formData.complement} onChange={handleChange} type="text" className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="Ex: Sala 2" />
                                                     <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
                                                 </div>
                                             </div>

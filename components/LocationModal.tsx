@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, MapPin, Navigation, Search, Plus, Home, Briefcase, Check, Loader2, Tag, AlertCircle, ChevronLeft } from 'lucide-react';
 import { Address, Coordinates, SearchResult } from '../types';
-import { getReverseGeocoding, searchAddress, getCurrentLocation, fetchCepData } from '../utils/geo';
+import { getReverseGeocoding, searchAddress, getCurrentLocation, fetchCepData, GEO_API_ENABLED } from '../utils/geo';
 
 declare global {
   interface Window {
@@ -79,6 +79,24 @@ const LocationModal: React.FC<LocationModalProps> = ({
 
   useEffect(() => {
       const timer = setTimeout(async () => {
+          if (!GEO_API_ENABLED) {
+              if (searchText.length > 3) {
+                  setSearchResults([
+                      {
+                          street: searchText,
+                          district: '',
+                          fullAddress: searchText,
+                          coordinates: DEFAULT_COORDS,
+                          city: '',
+                          state: ''
+                      }
+                  ]);
+              } else {
+                  setSearchResults([]);
+              }
+              return;
+          }
+
           if (searchText.length >= 8) {
               // Verifica se é CEP (XXXXX-XXX ou XXXXXXXX)
               const cleanSearch = searchText.replace(/\D/g, '');
@@ -136,6 +154,10 @@ const LocationModal: React.FC<LocationModalProps> = ({
   }, [searchText]);
 
   const handleUseGPS = async () => {
+      if (!GEO_API_ENABLED) {
+          alert('Geolocalização desativada temporariamente.');
+          return;
+      }
       setIsLocatingUser(true);
       try {
           const coords = await getCurrentLocation();
@@ -181,6 +203,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
   // Init Map
   useEffect(() => {
       // Delay map initialization slightly to ensure DOM is ready
+      if (!GEO_API_ENABLED) return;
       if (isOpen && step === 'CONFIRM_PIN' && mapContainerRef.current) {
           if (!window.google) return;
 
@@ -228,6 +251,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
 
   // Sync Map with Coordinates State (Programmatic Move)
   useEffect(() => {
+      if (!GEO_API_ENABLED) return;
       if (isOpen && step === 'CONFIRM_PIN' && mapRef.current) {
           const currentCenter = mapRef.current.getCenter();
           const diff = Math.abs(currentCenter.lat() - mapCoordinates.lat) + Math.abs(currentCenter.lng() - mapCoordinates.lng);
@@ -240,6 +264,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
   }, [mapCoordinates, isOpen, step]);
 
   const updateAddressFromCoords = async (coords: Coordinates) => {
+      if (!GEO_API_ENABLED) return;
       setIsLoadingAddressDetails(true);
       try {
           const data = await getReverseGeocoding(coords.lat, coords.lng);
@@ -375,15 +400,19 @@ const LocationModal: React.FC<LocationModalProps> = ({
                     {/* GPS Button */}
                     <button 
                         onClick={handleUseGPS}
-                        disabled={isLocatingUser}
-                        className="w-full flex items-center gap-3 p-4 mb-6 bg-white dark:bg-slate-900 border border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl hover:bg-red-50 dark:hover:bg-slate-800 transition-all shadow-sm"
+                        disabled={!GEO_API_ENABLED || isLocatingUser}
+                        className={`w-full flex items-center gap-3 p-4 mb-6 bg-white dark:bg-slate-900 border border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl transition-all shadow-sm ${GEO_API_ENABLED ? 'hover:bg-red-50 dark:hover:bg-slate-800' : 'opacity-60 cursor-not-allowed'}`}
                     >
                         <div className="w-10 h-10 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center">
                             {isLocatingUser ? <Loader2 className="animate-spin" size={20}/> : <Navigation size={20} className="fill-current" />}
                         </div>
                         <div className="text-left">
-                            <p className="font-bold text-sm">Usar localização atual</p>
-                            <p className="text-xs opacity-80">Ativar GPS</p>
+                            <p className="font-bold text-sm">
+                                {GEO_API_ENABLED ? 'Usar localização atual' : 'Geolocalização desativada'}
+                            </p>
+                            <p className="text-xs opacity-80">
+                                {GEO_API_ENABLED ? 'Ativar GPS' : 'Recurso temporariamente indisponível'}
+                            </p>
                         </div>
                     </button>
 
@@ -414,16 +443,24 @@ const LocationModal: React.FC<LocationModalProps> = ({
                 <div className="flex-1 flex flex-col h-full relative bg-slate-100 dark:bg-slate-950">
                     {/* Map */}
                     <div className="relative w-full flex-grow min-h-[300px]">
-                        <div ref={mapContainerRef} className="absolute inset-0 w-full h-full" />
-                        
-                        {/* Center Pin */}
-                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none -mt-8 flex flex-col items-center">
-                            <div className={`bg-slate-900 text-white text-[10px] font-bold px-3 py-1 rounded-full shadow-lg mb-1 transition-opacity ${isMapDragging ? 'opacity-0' : 'opacity-100'}`}>
-                                {isLoadingAddressDetails ? 'Carregando...' : 'É aqui?'}
+                        {GEO_API_ENABLED ? (
+                            <>
+                                <div ref={mapContainerRef} className="absolute inset-0 w-full h-full" />
+                                
+                                {/* Center Pin */}
+                                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none -mt-8 flex flex-col items-center">
+                                    <div className={`bg-slate-900 text-white text-[10px] font-bold px-3 py-1 rounded-full shadow-lg mb-1 transition-opacity ${isMapDragging ? 'opacity-0' : 'opacity-100'}`}>
+                                        {isLoadingAddressDetails ? 'Carregando...' : 'É aqui?'}
+                                    </div>
+                                    <MapPin size={48} className="text-red-600 fill-red-600 drop-shadow-2xl" />
+                                    <div className="w-2 h-1 bg-black/20 rounded-full blur-[1px]"></div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="absolute inset-0 flex items-center justify-center bg-slate-200 dark:bg-slate-900 text-slate-600 dark:text-slate-300 text-sm font-semibold">
+                                Mapa desativado temporariamente
                             </div>
-                            <MapPin size={48} className="text-red-600 fill-red-600 drop-shadow-2xl" />
-                            <div className="w-2 h-1 bg-black/20 rounded-full blur-[1px]"></div>
-                        </div>
+                        )}
                     </div>
 
                     {/* Address Form Sheet */}

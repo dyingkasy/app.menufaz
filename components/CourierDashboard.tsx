@@ -4,7 +4,8 @@ import { Bike, MapPin, Navigation, CheckCircle, Clock, DollarSign, Settings, Log
 import { Order, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { getOpenOrdersForCity, acceptOrder, getCourierActiveOrders, updateCourierLocation, getCourierHistory, updateCourierCity } from '../services/db';
-import { calculateDistance, getCurrentLocation } from '../utils/geo';
+import { calculateDistance, GEO_API_ENABLED } from '../utils/geo';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface CourierDashboardProps {
     onLogout: () => void;
@@ -28,6 +29,10 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
     // Setup Geolocation & Data Fetching
     useEffect(() => {
         if (!user) return;
+        if (!GEO_API_ENABLED) {
+            setLocationPermission('GRANTED');
+            return;
+        }
 
         // 1. Check/Request Location
         if (navigator.permissions) {
@@ -66,7 +71,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
 
     // Data Listeners
     useEffect(() => {
-        if (!user || locationPermission !== 'GRANTED' || !user.city) return;
+        if (!user || (GEO_API_ENABLED && locationPermission !== 'GRANTED') || !user.city) return;
 
         const unsubscribeOpen = getOpenOrdersForCity(user.city, (orders) => {
             // Filter active only just in case
@@ -108,7 +113,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
 
     // --- RENDER ---
 
-    if (locationPermission !== 'GRANTED') {
+    if (GEO_API_ENABLED && locationPermission !== 'GRANTED') {
         return (
             <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-8 text-center text-white">
                 <div className="w-24 h-24 bg-red-600 rounded-full flex items-center justify-center mb-6 shadow-lg shadow-red-600/50 animate-pulse">
@@ -173,11 +178,11 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                 <div className="grid grid-cols-2 gap-4">
                     <div className="bg-slate-800 p-3 rounded-xl">
                         <p className="text-xs text-gray-400 uppercase font-bold">Hoje</p>
-                        <p className="text-xl font-bold text-green-400">R$ {todayEarnings.toFixed(2)}</p>
+                        <p className="text-xl font-bold text-green-400">{formatCurrencyBRL(todayEarnings)}</p>
                     </div>
                     <div className="bg-slate-800 p-3 rounded-xl">
                         <p className="text-xs text-gray-400 uppercase font-bold">Pendente</p>
-                        <p className="text-xl font-bold text-white">R$ {totalPending.toFixed(2)}</p>
+                        <p className="text-xl font-bold text-white">{formatCurrencyBRL(totalPending)}</p>
                     </div>
                 </div>
             </header>
@@ -212,7 +217,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                                             </div>
                                             <div className="text-right">
                                                 <p className="text-xs text-gray-400 uppercase font-bold">Ganho</p>
-                                                <p className="text-xl font-bold text-green-600">R$ {commission.toFixed(2)}</p>
+                                                <p className="text-xl font-bold text-green-600">{formatCurrencyBRL(commission)}</p>
                                             </div>
                                         </div>
                                         
@@ -271,7 +276,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                          <h2 className="font-bold text-slate-800 dark:text-white text-lg">Carteira</h2>
                          <div className="bg-gradient-to-r from-slate-800 to-slate-900 rounded-2xl p-6 text-white shadow-xl">
                              <p className="text-sm text-slate-400 mb-1">Saldo Total Disponível</p>
-                             <h3 className="text-3xl font-bold mb-4">R$ {(todayEarnings * 1.5).toFixed(2)}</h3> {/* Mock total */}
+                             <h3 className="text-3xl font-bold mb-4">{formatCurrencyBRL(todayEarnings * 1.5)}</h3> {/* Mock total */}
                              <button className="w-full bg-white/10 hover:bg-white/20 py-2 rounded-lg font-bold text-sm transition-colors">
                                  Solicitar Saque
                              </button>

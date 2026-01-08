@@ -1,6 +1,9 @@
 
 import { Coordinates, SearchResult } from '../types';
 
+export const GEO_API_ENABLED = true;
+const FALLBACK_COORDS: Coordinates = { lat: -23.561684, lng: -46.655981 };
+
 // Haversine formula to calculate distance between two coords in KM
 export function calculateDistance(coord1: Coordinates, coord2: Coordinates): number {
   const R = 6371; // Radius of the earth in km
@@ -24,6 +27,10 @@ function deg2rad(deg: number): number {
  * Implementa retry com baixa precisão se a alta precisão falhar.
  */
 export async function getCurrentLocation(): Promise<Coordinates> {
+    if (!GEO_API_ENABLED) {
+        return Promise.reject(new Error('Geolocalização desativada temporariamente.'));
+    }
+
     return new Promise((resolve, reject) => {
         if (!navigator.geolocation) {
             return reject(new Error('Geolocalização não suportada pelo navegador.'));
@@ -88,6 +95,8 @@ export interface AddressComponents {
  * Busca dados precisos de endereço via CEP (Brasil)
  */
 export async function fetchCepData(cep: string): Promise<AddressComponents | null> {
+    if (!GEO_API_ENABLED) return null;
+
     const cleanCep = cep.replace(/\D/g, '');
     if (cleanCep.length !== 8) return null;
 
@@ -115,6 +124,8 @@ export async function fetchCepData(cep: string): Promise<AddressComponents | nul
  * Usa o Google Geocoder para converter Lat/Lng em endereço legível e estruturado.
  */
 export async function getReverseGeocoding(lat: number, lng: number): Promise<AddressComponents | null> {
+    if (!GEO_API_ENABLED) return null;
+
     if (!window.google || !window.google.maps) {
         console.error("Google Maps API not loaded");
         return null;
@@ -183,6 +194,21 @@ export async function getReverseGeocoding(lat: number, lng: number): Promise<Add
  * Usa o Google Geocoder para buscar um endereço por texto.
  */
 export async function searchAddress(query: string): Promise<SearchResult[]> {
+    const normalized = query.trim();
+    if (!normalized) return [];
+    if (!GEO_API_ENABLED) {
+        return [
+            {
+                street: normalized,
+                district: '',
+                fullAddress: normalized,
+                coordinates: FALLBACK_COORDS,
+                city: '',
+                state: ''
+            }
+        ];
+    }
+
     if (!window.google || !window.google.maps) return [];
 
     const geocoder = new window.google.maps.Geocoder();

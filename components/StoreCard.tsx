@@ -2,6 +2,7 @@
 import React from 'react';
 import { Star, Clock, Lock } from 'lucide-react';
 import { Store } from '../types';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface StoreCardProps {
   store: Store;
@@ -51,10 +52,10 @@ const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
         <div className="mt-auto flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 border-t border-gray-100 dark:border-slate-700 pt-3 group-hover:border-red-100 dark:group-hover:border-red-900/30 transition-colors">
           <div className="flex items-center gap-1">
             <Clock size={14} />
-            {store.deliveryTime}
+            {store.deliveryTime}{store.acceptsPickup && store.pickupTime ? ` • Retirada ${store.pickupTime}` : ''}
           </div>
-          <div className={store.deliveryFee === 0 ? 'text-green-600 dark:text-green-400 font-bold' : ''}>
-            {store.deliveryFee === 0 ? 'Entrega Grátis' : `R$ ${store.deliveryFee.toFixed(2)}`}
+          <div className={(Number(store.deliveryFee) || 0) === 0 ? 'text-green-600 dark:text-green-400 font-bold' : ''}>
+            {(Number(store.deliveryFee) || 0) === 0 ? 'Entrega Grátis' : formatCurrencyBRL(Number(store.deliveryFee) || 0)}
           </div>
         </div>
       </div>

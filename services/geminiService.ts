@@ -1,7 +1,7 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 const fallbackRecommendation = (prompt: string) => {
-  const lower = prompt.toLowerCase();
+  const lower = String(prompt || '').toLowerCase();
   if (lower.includes('doce') || lower.includes('sobremesa')) {
     return { suggestion: 'Vai de um doce hoje?', recommendedCategory: 'Doces' };
   }

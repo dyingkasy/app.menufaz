@@ -15,12 +15,14 @@ import ClientOrders from './components/ClientOrders';
 import Checkout from './components/Checkout';
 import ClientProfile from './components/ClientProfile';
 import FinishSignup from './components/FinishSignup'; // Import
+import TableTracking from './components/TableTracking';
 import { ViewState, Address, UserRole, Store, CartItem } from './types';
 import { CATEGORIES } from './constants';
 import { calculateDistance } from './utils/geo';
 import { ArrowRight, ChevronRight, ShoppingBag, MapPinOff, Loader2, ShieldCheck, ClipboardList } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { getStores } from './services/db';
+import { logClientError } from './services/logging';
 
 // Inner App Component to access AuthContext
 const MenuFazApp: React.FC = () => {
@@ -32,6 +34,11 @@ const MenuFazApp: React.FC = () => {
   // Store Selection State
   const [selectedStore, setSelectedStore] = useState<Store | null>(null);
   const [stores, setStores] = useState<Store[]>([]);
+  const [tableContext, setTableContext] = useState<{ storeId: string; tableNumber: string; sessionId: string } | null>(null);
+  const [initialTableParam, setInitialTableParam] = useState(() => {
+      const params = new URLSearchParams(window.location.search);
+      return (params.get('mesa') || '').trim();
+  });
 
   // Admin Impersonation State
   const [adminTargetStoreId, setAdminTargetStoreId] = useState<string | null>(null);
@@ -45,11 +52,12 @@ const MenuFazApp: React.FC = () => {
 
   // Location State
   const [currentAddressObj, setCurrentAddressObj] = useState<Address | null>(null);
-  const [isLocationModalOpen, setIsLocationModalOpen] = useState(true);
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [savedAddresses, setSavedAddresses] = useState<Address[]>([]);
   
   // Signup Flow State
   const [pendingSignupRequestId, setPendingSignupRequestId] = useState<string | null>(null);
+  const [pendingStoreSlug, setPendingStoreSlug] = useState<string | null>(null);
 
   // Remove max radius limit as requested. We will filter by City.
   // const MAX_DELIVERY_RADIUS = 10.0; 
@@ -57,6 +65,73 @@ const MenuFazApp: React.FC = () => {
   const currentAddressString = currentAddressObj 
     ? `${currentAddressObj.street}${currentAddressObj.number ? `, ${currentAddressObj.number}` : ''}` 
     : 'Selecione um endereço';
+
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      logClientError({
+        message: event.message || 'Unhandled error',
+        stack: event.error?.stack,
+        context: {
+          filename: event.filename,
+          lineno: event.lineno,
+          colno: event.colno
+        }
+      });
+    };
+
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      logClientError({
+        message: reason?.message || String(reason),
+        stack: reason?.stack,
+        context: { type: 'unhandledrejection' }
+      });
+    };
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
+
+  const normalizeSlug = (value: string) =>
+      (value || '')
+          .toString()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)+/g, '');
+
+  const applyPath = (pathname: string) => {
+    const trimmed = pathname.replace(/^\/+|\/+$/g, '');
+    if (!trimmed) {
+      setCurrentView(ViewState.HOME);
+      return;
+    }
+
+    const viewMap: Record<string, ViewState> = {
+      login: ViewState.LOGIN,
+      admin: ViewState.ADMIN,
+      'cadastro-loja': ViewState.REGISTER_BUSINESS,
+      pedidos: ViewState.CLIENT_ORDERS,
+      perfil: ViewState.CLIENT_PROFILE,
+      checkout: ViewState.CHECKOUT,
+      'finalizar-cadastro': ViewState.FINISH_SIGNUP,
+      courier: ViewState.COURIER_DASHBOARD,
+      'acompanhar-mesa': ViewState.TABLE_TRACKING
+    };
+
+    if (viewMap[trimmed]) {
+      setCurrentView(viewMap[trimmed]);
+      return;
+    }
+
+    setPendingStoreSlug(trimmed);
+  };
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme');
@@ -76,9 +151,38 @@ const MenuFazApp: React.FC = () => {
         setPendingSignupRequestId(finishSignupId);
         setCurrentView(ViewState.FINISH_SIGNUP);
         // Clean URL
-        window.history.replaceState({}, document.title, window.location.pathname);
+        window.history.replaceState({}, document.title, '/finalizar-cadastro');
+        return;
     }
 
+    applyPath(window.location.pathname);
+
+  }, []);
+
+  const getTableParam = () => {
+      const params = new URLSearchParams(window.location.search);
+      return (params.get('mesa') || '').trim();
+  };
+
+  const getTableSessionId = (storeId: string, tableNumber: string) => {
+      const key = `table_session_${storeId}_${tableNumber}`;
+      let sessionId = localStorage.getItem(key);
+      if (!sessionId) {
+          sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+              ? crypto.randomUUID()
+              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+          localStorage.setItem(key, sessionId);
+      }
+      return sessionId;
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      applyPath(window.location.pathname);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   // Fetch Stores from DB
@@ -100,6 +204,77 @@ const MenuFazApp: React.FC = () => {
       };
       fetchStoresData();
   }, []);
+
+  useEffect(() => {
+      if (!pendingStoreSlug || stores.length === 0) return;
+
+      const slug = normalizeSlug(decodeURIComponent(pendingStoreSlug));
+      const found = stores.find((store) => {
+          const custom = store.customUrl ? normalizeSlug(store.customUrl) : '';
+          return custom === slug || normalizeSlug(store.name) === slug || store.id === pendingStoreSlug;
+      });
+
+      if (found) {
+          setSelectedStore(found);
+          setCurrentView(ViewState.STORE_DETAILS);
+      }
+      setPendingStoreSlug(null);
+  }, [pendingStoreSlug, stores]);
+
+  useEffect(() => {
+      if (!selectedStore) {
+          setTableContext(null);
+          return;
+      }
+      const tableParam = (initialTableParam || getTableParam()).trim();
+      if (!tableParam || !selectedStore.acceptsTableOrders) {
+          setTableContext(null);
+          return;
+      }
+      const sessionId = getTableSessionId(selectedStore.id, tableParam);
+      setTableContext({ storeId: selectedStore.id, tableNumber: tableParam, sessionId });
+      if (initialTableParam) {
+          setInitialTableParam('');
+      }
+  }, [selectedStore, initialTableParam]);
+
+  useEffect(() => {
+      if (pendingStoreSlug && !selectedStore) return;
+
+      const currentPath = window.location.pathname.replace(/^\/+|\/+$/g, '');
+      let nextPath = '';
+
+      if (currentView === ViewState.STORE_DETAILS && selectedStore) {
+          const custom = selectedStore.customUrl ? normalizeSlug(selectedStore.customUrl) : '';
+          nextPath = custom || normalizeSlug(selectedStore.name);
+      } else if (currentView === ViewState.TABLE_TRACKING) {
+          nextPath = 'acompanhar-mesa';
+      } else if (currentView === ViewState.LOGIN) {
+          nextPath = 'login';
+      } else if (currentView === ViewState.ADMIN) {
+          nextPath = 'admin';
+      } else if (currentView === ViewState.REGISTER_BUSINESS) {
+          nextPath = 'cadastro-loja';
+      } else if (currentView === ViewState.CLIENT_ORDERS) {
+          nextPath = 'pedidos';
+      } else if (currentView === ViewState.CLIENT_PROFILE) {
+          nextPath = 'perfil';
+      } else if (currentView === ViewState.CHECKOUT) {
+          nextPath = 'checkout';
+      } else if (currentView === ViewState.FINISH_SIGNUP) {
+          nextPath = 'finalizar-cadastro';
+      } else if (currentView === ViewState.COURIER_DASHBOARD) {
+          nextPath = 'courier';
+      }
+
+      if (nextPath !== currentPath) {
+          const mesaValue = tableContext?.tableNumber || initialTableParam;
+          const shouldKeepMesa = mesaValue && (currentView === ViewState.STORE_DETAILS || currentView === ViewState.TABLE_TRACKING);
+          const search = shouldKeepMesa ? `?mesa=${encodeURIComponent(mesaValue)}` : '';
+          const url = `/${nextPath}${search}`;
+          window.history.pushState({}, '', url);
+      }
+  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam]);
 
   // Auto-login behavior and redirection
   useEffect(() => {
@@ -187,7 +362,7 @@ const MenuFazApp: React.FC = () => {
   };
 
   const handleCheckout = () => {
-      if (!user) {
+      if (!user && !tableContext) {
           setCurrentView(ViewState.LOGIN);
       } else {
           setCurrentView(ViewState.CHECKOUT);
@@ -196,7 +371,7 @@ const MenuFazApp: React.FC = () => {
 
   const handleOrderPlaced = () => {
       setCartItems([]);
-      setCurrentView(ViewState.CLIENT_ORDERS);
+      setCurrentView(tableContext ? ViewState.TABLE_TRACKING : ViewState.CLIENT_ORDERS);
   };
 
   const handleLogout = async () => {
@@ -219,19 +394,20 @@ const MenuFazApp: React.FC = () => {
   const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
 
   const filteredStores = useMemo(() => {
-    if (!currentAddressObj) return [];
-
     let filtered = stores;
 
     // Calculate distance for sorting but NOT for strict filtering by radius (as requested by user)
     // Filter by City Match instead
-    const normalize = (s: string) => s?.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim() || "";
-    const userCity = normalize(currentAddressObj.city || "");
+    const normalize = (s: string) =>
+        String(s || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+    const userCity = normalize(currentAddressObj?.city || "");
 
-    filtered = filtered.map(store => {
-        const distance = calculateDistance(currentAddressObj.coordinates, store.coordinates);
-        return { ...store, _distance: distance }; 
-    });
+    if (currentAddressObj) {
+        filtered = filtered.map(store => {
+            const distance = calculateDistance(currentAddressObj.coordinates, store.coordinates);
+            return { ...store, _distance: distance }; 
+        });
+    }
 
     // Apply City Filter if user has a city defined.
     // If user doesn't have city (legacy address), we might fallback to radius or show all.
@@ -243,8 +419,10 @@ const MenuFazApp: React.FC = () => {
         });
     }
 
-    // Sort by distance
-    filtered.sort((a: any, b: any) => a._distance - b._distance);
+    // Sort by distance when available
+    if (currentAddressObj) {
+        filtered.sort((a: any, b: any) => a._distance - b._distance);
+    }
 
     if (selectedCategory !== 'Todos') {
         filtered = filtered.filter(store => store.category === selectedCategory);
@@ -253,7 +431,7 @@ const MenuFazApp: React.FC = () => {
     if (globalSearchTerm.trim()) {
         const lowerTerm = globalSearchTerm.toLowerCase();
         filtered = filtered.filter(store => {
-            const nameMatch = store.name.toLowerCase().includes(lowerTerm);
+            const nameMatch = (store.name || '').toLowerCase().includes(lowerTerm);
             return nameMatch;
         });
     }
@@ -319,6 +497,7 @@ const MenuFazApp: React.FC = () => {
   }
 
   if (currentView === ViewState.CHECKOUT && selectedStore) {
+      const activeTableContext = tableContext && tableContext.storeId === selectedStore.id ? tableContext : undefined;
       return (
           <Checkout 
             store={selectedStore}
@@ -327,6 +506,18 @@ const MenuFazApp: React.FC = () => {
             onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
             onOrderPlaced={handleOrderPlaced}
             onChangeAddress={() => setIsLocationModalOpen(true)}
+            tableContext={activeTableContext}
+          />
+      );
+  }
+
+  if (currentView === ViewState.TABLE_TRACKING && selectedStore && tableContext) {
+      return (
+          <TableTracking
+              store={selectedStore}
+              tableNumber={tableContext.tableNumber}
+              tableSessionId={tableContext.sessionId}
+              onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
           />
       );
   }
@@ -395,6 +586,8 @@ const MenuFazApp: React.FC = () => {
                 onRemoveFromCart={handleRemoveFromCart}
                 onClearCart={handleClearCart}
                 onOpenCart={() => setIsCartOpen(true)}
+                tableNumber={tableContext?.storeId === selectedStore.id ? tableContext.tableNumber : undefined}
+                onTrackTable={() => setCurrentView(ViewState.TABLE_TRACKING)}
             />
          ) : (
              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-10">
@@ -440,7 +633,7 @@ const MenuFazApp: React.FC = () => {
                       <p className="text-sm text-gray-500 dark:text-gray-400">
                          {currentAddressObj 
                                 ? `Mostrando lojas em ${currentAddressObj.city || 'sua cidade'}.`
-                                : `Informe seu endereço para ver as lojas.`}
+                                : `Mostrando todas as lojas cadastradas.`}
                       </p>
                   </div>
                 </div>
@@ -461,23 +654,13 @@ const MenuFazApp: React.FC = () => {
                         <MapPinOff size={40} />
                       </div>
                       <h3 className="text-lg font-bold text-gray-800 dark:text-white mb-2">
-                          {!currentAddressObj ? "Onde você está?" : "Nenhuma loja encontrada"}
+                          Nenhuma loja encontrada
                       </h3>
                       <p className="text-gray-500 dark:text-gray-400 max-w-md mx-auto mb-6">
-                          {!currentAddressObj 
-                            ? "Precisamos saber seu endereço para mostrar os melhores restaurantes perto de você." 
-                            : `Não encontramos lojas ativas em ${currentAddressObj.city} para esta categoria.`}
+                          {currentAddressObj 
+                            ? `Não encontramos lojas ativas em ${currentAddressObj.city} para esta categoria.` 
+                            : "Não encontramos lojas para esta categoria."}
                       </p>
-                      {!currentAddressObj && (
-                         <div className="flex gap-3">
-                            <button 
-                                onClick={() => setIsLocationModalOpen(true)}
-                                className="px-6 py-3 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-colors shadow-lg shadow-red-600/20"
-                            >
-                                Informar Endereço
-                            </button>
-                         </div>
-                      )}
                   </div>
                 )}
               </section>

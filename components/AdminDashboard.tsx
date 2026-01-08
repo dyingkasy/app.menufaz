@@ -5,13 +5,16 @@ import {
 import { 
     DollarSign, Users, ClipboardList, AlertTriangle, 
     CheckCircle, XCircle, ArrowLeft, LayoutDashboard, 
-    ShoppingBasket, UtensilsCrossed, Settings, LogOut, Menu, Search, Plus, Edit, Trash, CreditCard, Clock, Store, Image as ImageIcon, UploadCloud, Calendar, X, ChevronRight, Layers, Tag, Save, Copy, Timer, Percent, CalendarDays, Bike, UserPlus, ChevronLeft, Power, Banknote, Calculator, ChevronDown, Check, TrendingUp, TrendingDown, Activity, AlertCircle, Lock, Unlock, Phone, MapPin, User, Zap, Ticket, PieChart as PieChartIcon, Wallet, Upload, Trash2, Eye, Package, Trophy, Navigation, MessageSquare, ArrowUpCircle, ArrowDownCircle, Coins, Receipt, EyeOff, Send, ShieldAlert, ShieldCheck, Mail, ToggleLeft, ToggleRight, Slice, Database
+    ShoppingBasket, UtensilsCrossed, Settings, LogOut, Menu, Search, Plus, Edit, Trash, CreditCard, Clock, Store, Image as ImageIcon, UploadCloud, Calendar, X, ChevronRight, Layers, Tag, Save, Copy, Timer, Percent, CalendarDays, Bike, UserPlus, ChevronLeft, Power, Banknote, Calculator, ChevronDown, Check, TrendingUp, TrendingDown, Activity, AlertCircle, Lock, Unlock, Phone, MapPin, User, Zap, Ticket, PieChart as PieChartIcon, Wallet, Upload, Trash2, Eye, Package, Trophy, Navigation, MessageSquare, ArrowUpCircle, ArrowDownCircle, Coins, Receipt, EyeOff, Send, ShieldAlert, ShieldCheck, Mail, ToggleLeft, ToggleRight, Slice, Database, Table, Download
 } from 'lucide-react';
+import QRCode from 'qrcode';
+import JSZip from 'jszip';
 import { UserRole, DashboardSection, Product, Order, ProductOptionGroup, ProductOption, Courier, Store as StoreType, ScheduleDay, Coupon, FinancialTransaction, PaymentMethod, PizzaFlavor } from '../types';
+import { formatCurrencyBRL } from '../utils/format';
 import { useAuth } from '../contexts/AuthContext';
-import { getStoreById, updateStore, getProductsByStore, saveProduct, deleteProduct, subscribeToOrders, updateOrderStatus, getCouponsByStore, saveCoupon, deleteCoupon, getCouriersByStore, saveCourier, deleteCourier, getExpensesByStore, saveExpense, deleteExpense, deleteOrder, getPizzaFlavorsByStore, savePizzaFlavor, deletePizzaFlavor } from '../services/db';
+import { getStoreById, updateStore, getProductsByStore, saveProduct, deleteProduct, subscribeToOrders, updateOrderStatus, updateOrderPayment, getCouponsByStore, saveCoupon, deleteCoupon, getCouriersByStore, saveCourier, deleteCourier, getExpensesByStore, saveExpense, deleteExpense, deleteOrder, getPizzaFlavorsByStore, savePizzaFlavor, deletePizzaFlavor } from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
-import { searchAddress } from '../utils/geo';
+import { searchAddress, GEO_API_ENABLED } from '../utils/geo';
 
 interface AdminDashboardProps {
     onBack: () => void;
@@ -40,6 +43,32 @@ const TRANSACTION_CATEGORIES = [
     { id: 'OUTROS_ENTRADA', label: 'Outras Entradas', color: '#6EE7B7', type: 'INCOME' },
 ];
 
+const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }> = ({ className, children }) => {
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const [isReady, setIsReady] = useState(false);
+
+    useEffect(() => {
+        const element = containerRef.current;
+        if (!element) return;
+
+        const observer = new ResizeObserver((entries) => {
+            const rect = entries[0]?.contentRect;
+            if (rect && rect.width > 0 && rect.height > 0) {
+                setIsReady(true);
+            }
+        });
+
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, []);
+
+    return (
+        <div ref={containerRef} className={className}>
+            {isReady ? children : null}
+        </div>
+    );
+};
+
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targetStoreId, isDarkMode, toggleTheme }) => {
   const { user } = useAuth();
   const storeId = targetStoreId || user?.storeId;
@@ -50,6 +79,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   
   // Refs for File Uploads
   const storeLogoInputRef = useRef<HTMLInputElement>(null);
+  const storeCoverInputRef = useRef<HTMLInputElement>(null);
   const productInfoInputRef = useRef<HTMLInputElement>(null);
 
   // --- STORE SETTINGS STATE ---
@@ -121,6 +151,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [verificationCode, setVerificationCode] = useState('');
   const [inputCode, setInputCode] = useState('');
   const [isVerifyingCode, setIsVerifyingCode] = useState(false);
+  const tableCountValue = Math.max(0, Number(storeProfile.tableCount || 0));
+  const [isDownloadingTables, setIsDownloadingTables] = useState(false);
+  const [downloadingTable, setDownloadingTable] = useState<number | null>(null);
+  const [selectedTableKey, setSelectedTableKey] = useState<string | null>(null);
+  const [selectedTablePayment, setSelectedTablePayment] = useState('');
+  const [paymentOrderTarget, setPaymentOrderTarget] = useState<Order | null>(null);
+  const [paymentOrderMethod, setPaymentOrderMethod] = useState('');
 
   // --- INITIAL DATA LOADING ---
   useEffect(() => {
@@ -129,16 +166,39 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               try {
                   const storeData = await getStoreById(storeId);
                   if (storeData) {
-                      // Inicializa Schedule se não existir
-                      if (!storeData.schedule || storeData.schedule.length === 0) {
+                      const normalizeSchedule = (schedule?: ScheduleDay[]) => {
                           const days = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
-                          storeData.schedule = days.map(day => ({
-                              day,
-                              openTime: '18:00',
-                              closeTime: '23:00',
-                              isOpen: true
-                          }));
-                      }
+                          if (!schedule || schedule.length === 0) {
+                              return days.map(day => ({
+                                  day,
+                                  morningOpenTime: '00:00',
+                                  morningCloseTime: '12:00',
+                                  afternoonOpenTime: '12:01',
+                                  afternoonCloseTime: '23:59',
+                                  isMorningOpen: true,
+                                  isAfternoonOpen: true
+                              }));
+                          }
+                          return schedule.map((day, index) => {
+                              const fallbackDay = days[index] || day.day;
+                              const legacyOpen = (day as any).openTime;
+                              const legacyClose = (day as any).closeTime;
+                              return {
+                                  day: day.day || fallbackDay,
+                                  morningOpenTime: day.morningOpenTime || legacyOpen || '00:00',
+                                  morningCloseTime: day.morningCloseTime || legacyClose || '12:00',
+                                  afternoonOpenTime: day.afternoonOpenTime || '12:01',
+                                  afternoonCloseTime: day.afternoonCloseTime || '23:59',
+                                  isMorningOpen: day.isMorningOpen ?? day.isOpen ?? true,
+                                  isAfternoonOpen: day.isAfternoonOpen ?? day.isOpen ?? true
+                              };
+                          });
+                      };
+                      // Inicializa Schedule se não existir
+                      storeData.schedule = normalizeSchedule(storeData.schedule);
+                      storeData.acceptsTableOrders = storeData.acceptsTableOrders ?? false;
+                      storeData.tableCount = storeData.tableCount ?? 0;
+                      storeData.logoUrl = storeData.logoUrl || '';
 
                       setStoreProfile(storeData);
                       // Load extended address fields if they exist
@@ -162,7 +222,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   }
 
                   const productsData = await getProductsByStore(storeId);
-                  setProducts(productsData);
+                  setProducts(
+                      productsData.map((product) => ({
+                          ...product,
+                          category: product.category || 'Lanches',
+                          isAvailable: product.isAvailable ?? true
+                      }))
+                  );
 
                   const flavorsData = await getPizzaFlavorsByStore(storeId);
                   setPizzaFlavors(flavorsData);
@@ -272,14 +338,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'STORE' | 'PRODUCT') => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'STORE_LOGO' | 'STORE_COVER' | 'PRODUCT') => {
       const file = e.target.files?.[0];
       if (!file) return;
       if (file.size > 2 * 1024 * 1024) { alert("A imagem deve ter no máximo 2MB."); return; }
       const reader = new FileReader();
       reader.onload = (event) => {
           const base64 = event.target?.result as string;
-          if (target === 'STORE') { setStoreProfile(prev => ({ ...prev, imageUrl: base64 })); } 
+          if (target === 'STORE_LOGO') { setStoreProfile(prev => ({ ...prev, logoUrl: base64 })); } 
+          else if (target === 'STORE_COVER') { setStoreProfile(prev => ({ ...prev, imageUrl: base64 })); } 
           else { setNewProduct(prev => ({ ...prev, imageUrl: base64 })); }
       };
       reader.readAsDataURL(file);
@@ -314,8 +381,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const isPizza = !!newProduct.isPizza;
       const maxFlavors = isPizza ? (newProduct.maxFlavors || 1) : 1;
 
-      const productToSave: Product = {
-          id: newProduct.id || Date.now().toString(), storeId: storeId, name: newProduct.name, description: newProduct.description || '', price: Number(newProduct.price),
+      const productToSave: Omit<Product, 'id'> & { id?: string } = {
+          id: newProduct.id, storeId: storeId, name: newProduct.name, description: newProduct.description || '', price: Number(newProduct.price),
           promoPrice: newProduct.promoPrice ? Number(newProduct.promoPrice) : undefined, category: newProduct.category || 'Lanches', imageUrl: newProduct.imageUrl || '', 
           isAvailable: newProduct.isAvailable !== undefined ? newProduct.isAvailable : true, 
           isPizza: isPizza, 
@@ -325,7 +392,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           availableFlavorIds: newProduct.availableFlavorIds || [],
           optionGroups: newProduct.optionGroups || []
       };
-      try { await saveProduct(productToSave); if (newProduct.id) setProducts(products.map(p => p.id === productToSave.id ? productToSave : p)); else setProducts([productToSave, ...products]); setShowProductModal(false); } catch (e) { alert("Erro ao salvar produto."); }
+      try {
+          const savedProduct = await saveProduct(productToSave);
+          if (newProduct.id) setProducts(products.map(p => p.id === savedProduct.id ? savedProduct : p));
+          else setProducts([savedProduct, ...products]);
+          setShowProductModal(false);
+      } catch (e) { alert("Erro ao salvar produto."); }
   };
 
   const handleDeleteProduct = async (id: string) => {
@@ -338,16 +410,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const handleSaveFlavor = async () => {
       if (!storeId || !newFlavor.name) return;
       const flavorToSave: PizzaFlavor = {
-          id: newFlavor.id || Date.now().toString(),
+          id: newFlavor.id || '',
           storeId,
           name: newFlavor.name,
           description: newFlavor.description || '',
           isAvailable: newFlavor.isAvailable ?? true
       };
       try {
-          await savePizzaFlavor(flavorToSave);
-          if(newFlavor.id) setPizzaFlavors(prev => prev.map(f => f.id === flavorToSave.id ? flavorToSave : f));
-          else setPizzaFlavors(prev => [...prev, flavorToSave]);
+          const payload = newFlavor.id ? flavorToSave : { ...flavorToSave, id: undefined };
+          const savedFlavor = await savePizzaFlavor(payload as PizzaFlavor);
+          if(newFlavor.id) setPizzaFlavors(prev => prev.map(f => f.id === savedFlavor.id ? savedFlavor : f));
+          else setPizzaFlavors(prev => [...prev, savedFlavor]);
           setNewFlavor({}); 
           alert("Sabor salvo!");
       } catch (e) { alert("Erro ao salvar sabor."); }
@@ -365,23 +438,44 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       if (!storeId) return;
       if (!newTransaction.description || !newTransaction.amount) { alert("Descrição e valor são obrigatórios"); return; }
       const transactionToSave: FinancialTransaction & { storeId: string } = {
-          id: newTransaction.id || `trx_${Date.now()}`, storeId: storeId, description: newTransaction.description, type: newTransaction.type || 'EXPENSE',
+          id: newTransaction.id || '',
+          storeId: storeId,
+          description: newTransaction.description,
+          type: newTransaction.type || 'EXPENSE',
           amount: Number(newTransaction.amount), date: newTransaction.date || new Date().toISOString().split('T')[0], category: newTransaction.category || 'OUTROS_SAIDA', status: newTransaction.status || 'PAID'
       };
-      try { await saveExpense(transactionToSave); if (newTransaction.id) setTransactions(prev => prev.map(e => e.id === transactionToSave.id ? transactionToSave : e)); else setTransactions(prev => [...prev, transactionToSave]); setShowTransactionModal(false); } catch (e) { alert("Erro ao salvar transação."); }
+      try {
+          const payload = newTransaction.id ? transactionToSave : { ...transactionToSave, id: undefined };
+          const savedTransaction = await saveExpense(payload as FinancialTransaction & { storeId?: string });
+          if (newTransaction.id) setTransactions(prev => prev.map(e => e.id === savedTransaction.id ? savedTransaction : e));
+          else setTransactions(prev => [...prev, savedTransaction]);
+          setShowTransactionModal(false);
+      } catch (e) { alert("Erro ao salvar transação."); }
   };
   const handleSaveCourier = async () => {
       if (!storeId || !newCourier.name) return;
-      const courierToSave: Courier & { storeId: string } = { id: newCourier.id || Date.now().toString(), storeId, name: newCourier.name, phone: newCourier.phone || '', plate: newCourier.plate || '', commissionRate: Number(newCourier.commissionRate), isActive: newCourier.isActive ?? true };
-      try { await saveCourier(courierToSave); if (newCourier.id) setCouriers(prev => prev.map(c => c.id === courierToSave.id ? courierToSave : c)); else setCouriers(prev => [...prev, courierToSave]); setShowCourierModal(false); } catch (e) { alert("Erro ao salvar entregador."); }
+      const courierToSave: Courier & { storeId: string } = { id: newCourier.id || '', storeId, name: newCourier.name, phone: newCourier.phone || '', plate: newCourier.plate || '', commissionRate: Number(newCourier.commissionRate), isActive: newCourier.isActive ?? true };
+      try {
+          const payload = newCourier.id ? courierToSave : { ...courierToSave, id: undefined };
+          const savedCourier = await saveCourier(payload as Courier & { storeId?: string });
+          if (newCourier.id) setCouriers(prev => prev.map(c => c.id === savedCourier.id ? savedCourier : c));
+          else setCouriers(prev => [...prev, savedCourier]);
+          setShowCourierModal(false);
+      } catch (e) { alert("Erro ao salvar entregador."); }
   };
   const handleDeleteCourier = async (id: string) => {
       if(confirm('Excluir entregador?')) { try { await deleteCourier(id); setCouriers(prev => prev.filter(c => c.id !== id)); } catch(e) { alert("Erro ao excluir"); } }
   };
   const handleSaveCoupon = async () => {
       if (!editingCoupon.code || !editingCoupon.discountValue) return;
-      const couponToSave: Coupon = { id: editingCoupon.id || Date.now().toString(), code: editingCoupon.code.toUpperCase(), discountType: editingCoupon.discountType || 'PERCENTAGE', discountValue: Number(editingCoupon.discountValue), minOrderValue: Number(editingCoupon.minOrderValue) || 0, isActive: editingCoupon.isActive ?? true, description: editingCoupon.description || '', usageCount: editingCoupon.usageCount || 0, usageLimit: editingCoupon.usageLimit ? Number(editingCoupon.usageLimit) : undefined, expiresAt: editingCoupon.expiresAt };
-      try { await saveCoupon(couponToSave); if (editingCoupon.id) setCoupons(prev => prev.map(c => c.id === couponToSave.id ? couponToSave : c)); else setCoupons(prev => [...prev, couponToSave]); setShowCouponModal(false); } catch(e) { alert("Erro ao salvar cupom."); }
+      const couponToSave: Coupon = { id: editingCoupon.id || '', code: editingCoupon.code.toUpperCase(), discountType: editingCoupon.discountType || 'PERCENTAGE', discountValue: Number(editingCoupon.discountValue), minOrderValue: Number(editingCoupon.minOrderValue) || 0, isActive: editingCoupon.isActive ?? true, description: editingCoupon.description || '', usageCount: editingCoupon.usageCount || 0, usageLimit: editingCoupon.usageLimit ? Number(editingCoupon.usageLimit) : undefined, expiresAt: editingCoupon.expiresAt };
+      try {
+          const payload = editingCoupon.id ? couponToSave : { ...couponToSave, id: undefined };
+          const savedCoupon = await saveCoupon(payload as Coupon & { storeId?: string });
+          if (editingCoupon.id) setCoupons(prev => prev.map(c => c.id === savedCoupon.id ? savedCoupon : c));
+          else setCoupons(prev => [...prev, savedCoupon]);
+          setShowCouponModal(false);
+      } catch(e) { alert("Erro ao salvar cupom."); }
   };
   const handleDeleteCoupon = async (id: string) => {
       if(confirm("Excluir cupom?")) { try { await deleteCoupon(id); setCoupons(prev => prev.filter(c => c.id !== id)); } catch(e) { alert("Erro ao excluir"); } }
@@ -429,12 +523,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
   // Address Handlers
   const handleCepBlur = async () => {
+      if (!GEO_API_ENABLED) { alert("Busca de CEP desativada temporariamente."); return; }
       const cleanCep = addressForm.cep.replace(/\D/g, '');
       if (cleanCep.length === 8) {
           try { const response = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`); const data = await response.json(); if (!data.erro) { setAddressForm(prev => ({ ...prev, street: data.logradouro, district: data.bairro, city: data.localidade, state: data.uf })); } else { alert("CEP não encontrado."); } } catch (error) { alert("Erro ao buscar CEP."); }
       }
   };
   const handleGeocodeAddress = async () => {
+      if (!GEO_API_ENABLED) { alert("Geolocalização desativada temporariamente."); return; }
       if (!addressForm.street || !addressForm.number || !addressForm.city) { alert("Preencha Rua, Número e Cidade para buscar."); return; }
       const query = `${addressForm.street}, ${addressForm.number} - ${addressForm.district}, ${addressForm.city}`;
       try { const results = await searchAddress(query); if (results && results.length > 0) { setStoreProfile(prev => ({ ...prev, coordinates: results[0].coordinates })); alert("Localização atualizada com sucesso no mapa!"); } else { alert("Endereço não encontrado."); } } catch (e) { alert("Erro ao buscar localização."); }
@@ -444,6 +540,101 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       try { const payload = { ...storeProfile, ...addressForm, paymentMethods }; await updateStore(storeId, payload); alert("Configurações salvas com sucesso!"); } catch (e) { alert("Erro ao salvar configurações."); }
   };
   const handleTogglePaymentMethod = (id: string) => { setPaymentMethods(prev => prev.map(pm => pm.id === id ? { ...pm, active: !pm.active } : pm)); };
+  const normalizeSlug = (value: string) =>
+      (value || '')
+          .toString()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)+/g, '');
+  const getStoreSlug = () => {
+      const custom = storeProfile.customUrl ? normalizeSlug(storeProfile.customUrl) : '';
+      if (custom) return custom;
+      if (storeProfile.name) return normalizeSlug(storeProfile.name);
+      return storeProfile.id || storeId || '';
+  };
+  const getTableQrUrl = (tableNumber: number) => {
+      const slug = getStoreSlug();
+      const base = window.location.origin;
+      const path = slug ? `/${slug}` : '/';
+      return `${base}${path}?mesa=${tableNumber}`;
+  };
+  const downloadDataUrl = (dataUrl: string, filename: string) => {
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      link.download = filename;
+      link.click();
+  };
+  const dataUrlToBase64 = (dataUrl: string) => {
+      const split = dataUrl.split(',');
+      return split.length > 1 ? split[1] : dataUrl;
+  };
+  const buildTableQrDataUrl = async (tableNumber: number) => {
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, getTableQrUrl(tableNumber), { width: 512, margin: 2 });
+
+      const label = `${tableNumber}`;
+      const fontSize = 32;
+      const labelPadding = 24;
+      const labelOffset = 8;
+
+      const finalCanvas = document.createElement('canvas');
+      finalCanvas.width = qrCanvas.width;
+      finalCanvas.height = qrCanvas.height + fontSize + labelPadding;
+
+      const ctx = finalCanvas.getContext('2d');
+      if (!ctx) {
+          throw new Error('Canvas não suportado.');
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
+      ctx.drawImage(qrCanvas, 0, 0);
+      ctx.fillStyle = '#111827';
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(label, finalCanvas.width / 2, qrCanvas.height + labelOffset);
+
+      return finalCanvas.toDataURL('image/png');
+  };
+  const handleDownloadTableQr = async (tableNumber: number) => {
+      try {
+          setDownloadingTable(tableNumber);
+          const dataUrl = await buildTableQrDataUrl(tableNumber);
+          downloadDataUrl(dataUrl, `mesa-${tableNumber}.png`);
+      } catch (e) {
+          alert('Erro ao gerar QR Code da mesa.');
+      } finally {
+          setDownloadingTable(null);
+      }
+  };
+  const handleDownloadAllTableQrs = async () => {
+      if (!tableCountValue) {
+          alert('Defina a quantidade de mesas primeiro.');
+          return;
+      }
+      setIsDownloadingTables(true);
+      try {
+          const zip = new JSZip();
+          for (let i = 1; i <= tableCountValue; i++) {
+              const dataUrl = await buildTableQrDataUrl(i);
+              zip.file(`mesa-${i}.png`, dataUrlToBase64(dataUrl), { base64: true });
+          }
+          const blob = await zip.generateAsync({ type: 'blob' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = 'qrcodes-mesas.zip';
+          link.click();
+          URL.revokeObjectURL(url);
+      } catch (e) {
+          alert('Erro ao gerar QR Codes das mesas.');
+      } finally {
+          setIsDownloadingTables(false);
+      }
+  };
 
   // --- RENDERERS ---
 
@@ -457,7 +648,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               </div>
               <div className="p-8">
                   <div className="mb-8"><h2 className="text-sm font-bold text-gray-500 uppercase mb-2 flex items-center gap-2"><AlertTriangle size={16} className="text-red-600"/> Motivo do Bloqueio</h2><p className="text-slate-800 dark:text-white text-lg leading-relaxed">{storeProfile.blockReason || "Entre em contato com o suporte."}</p></div>
-                  {storeProfile.isFinancialBlock && (<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-900/50 rounded-xl p-6 mb-8"><h3 className="text-red-700 dark:text-red-400 font-bold mb-4 flex items-center gap-2"><Banknote size={20} /> Pendência Financeira</h3><div className="grid grid-cols-2 gap-6"><div><p className="text-xs font-bold text-gray-500 uppercase">Valor</p><p className="text-3xl font-extrabold text-slate-900 dark:text-white">R$ {storeProfile.financialValue?.toFixed(2)}</p></div><div><p className="text-xs font-bold text-gray-500 uppercase">Parcelas</p><p className="text-3xl font-extrabold text-slate-900 dark:text-white">{storeProfile.financialInstallments}x</p></div></div></div>)}
+                  {storeProfile.isFinancialBlock && (<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-900/50 rounded-xl p-6 mb-8"><h3 className="text-red-700 dark:text-red-400 font-bold mb-4 flex items-center gap-2"><Banknote size={20} /> Pendência Financeira</h3><div className="grid grid-cols-2 gap-6"><div><p className="text-xs font-bold text-gray-500 uppercase">Valor</p><p className="text-3xl font-extrabold text-slate-900 dark:text-white">{formatCurrencyBRL(storeProfile.financialValue)}</p></div><div><p className="text-xs font-bold text-gray-500 uppercase">Parcelas</p><p className="text-3xl font-extrabold text-slate-900 dark:text-white">{storeProfile.financialInstallments}x</p></div></div></div>)}
                   <div className="flex gap-4"><button onClick={onBack} className="flex-1 py-4 border border-gray-200 dark:border-slate-700 rounded-xl text-gray-600 dark:text-gray-300 font-bold hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors">Voltar</button><a href="https://wa.me/5538998074444" target="_blank" rel="noreferrer" className="flex-1 py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-green-600/20 transition-colors"><MessageSquare size={20} /> Falar com Suporte</a></div>
               </div>
           </div>
@@ -474,7 +665,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
                   <div className="w-14 h-14 bg-green-50 dark:bg-green-900/20 rounded-full flex items-center justify-center text-green-600"><DollarSign size={28} /></div>
-                  <div><p className="text-xs font-bold text-gray-500 uppercase">Faturamento Hoje</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">R$ {orders.filter(o => o.status !== 'CANCELLED' && new Date(o.createdAt || '').toDateString() === new Date().toDateString()).reduce((acc, o) => acc + o.total, 0).toFixed(2)}</h3></div>
+                  <div><p className="text-xs font-bold text-gray-500 uppercase">Faturamento Hoje</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">{formatCurrencyBRL(orders.filter(o => o.status !== 'CANCELLED' && new Date(o.createdAt || '').toDateString() === new Date().toDateString()).reduce((acc, o) => acc + o.total, 0))}</h3></div>
               </div>
               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
                   <div className="w-14 h-14 bg-blue-50 dark:bg-blue-900/20 rounded-full flex items-center justify-center text-blue-600"><ShoppingBasket size={28} /></div>
@@ -493,8 +684,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           <div className="grid lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                   <h3 className="font-bold text-slate-800 dark:text-white mb-6">Receita Semanal (Real)</h3>
-                  <div className="h-80">
-                      <ResponsiveContainer width="100%" height="100%">
+                  <ChartContainer className="h-80">
+                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                           <AreaChart data={weeklyRevenueData}>
                               <defs><linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#EF4444" stopOpacity={0.3} /><stop offset="95%" stopColor="#EF4444" stopOpacity={0} /></linearGradient></defs>
                               <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false} />
@@ -508,7 +699,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               <Area type="monotone" dataKey="value" stroke="#EF4444" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
                           </AreaChart>
                       </ResponsiveContainer>
-                  </div>
+                  </ChartContainer>
               </div>
               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                   <h3 className="font-bold text-slate-800 dark:text-white mb-6">Pedidos Recentes</h3>
@@ -519,7 +710,19 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           orders.slice(0, 5).map(order => (
                               <div key={order.id} className="flex items-center gap-3 pb-3 border-b border-gray-50 last:border-0">
                                   <div className="w-10 h-10 bg-gray-100 dark:bg-slate-800 rounded-lg flex items-center justify-center font-bold text-gray-500 text-xs">#{order.id.slice(0,4)}</div>
-                                  <div className="flex-1"><p className="font-bold text-sm text-slate-800 dark:text-white">{order.customerName}</p><p className="text-xs text-gray-400">{order.items.length} itens • {order.time}</p></div>
+                                  <div className="flex-1">
+                                      <p className="font-bold text-sm text-slate-800 dark:text-white">{order.customerName}</p>
+                                      <p className="text-xs text-gray-400">{order.items.length} itens • {order.time}</p>
+                                      {order.type && (
+                                          <p className="text-[11px] text-gray-400">
+                                              {order.type === 'TABLE'
+                                                  ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
+                                                  : order.type === 'PICKUP'
+                                                  ? 'Retirada'
+                                                  : 'Entrega'}
+                                          </p>
+                                      )}
+                                  </div>
                                   <span className={`text-xs font-bold px-2 py-1 rounded-full ${order.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' : order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{order.status === 'PENDING' ? 'Novo' : order.status}</span>
                               </div>
                           ))
@@ -541,6 +744,75 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
       return (
           <div className="h-[calc(100vh-140px)] flex flex-col">
+              {paymentOrderTarget && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+                      <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-800">
+                          <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
+                              <div>
+                                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Finalizar mesa</h3>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">Pedido #{paymentOrderTarget.id.slice(0, 5)}</p>
+                              </div>
+                              <button
+                                  onClick={() => { setPaymentOrderTarget(null); setPaymentOrderMethod(''); }}
+                                  className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800"
+                              >
+                                  <X size={18} className="text-slate-500" />
+                              </button>
+                          </div>
+                          <div className="p-5 space-y-4">
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Forma de pagamento</label>
+                                  <select
+                                      value={paymentOrderMethod}
+                                      onChange={(e) => setPaymentOrderMethod(e.target.value)}
+                                      className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900 text-slate-700 dark:text-white"
+                                  >
+                                      <option value="">Selecione</option>
+                                      {paymentMethods.filter(pm => pm.active).length > 0 ? (
+                                          paymentMethods.filter(pm => pm.active).map((pm) => (
+                                              <option key={pm.id} value={pm.name}>{pm.name}</option>
+                                          ))
+                                      ) : (
+                                          <>
+                                              <option value="Dinheiro">Dinheiro</option>
+                                              <option value="Pix">Pix</option>
+                                              <option value="Cartão">Cartão</option>
+                                          </>
+                                      )}
+                                  </select>
+                              </div>
+                          </div>
+                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex items-center justify-end gap-2">
+                              <button
+                                  onClick={() => { setPaymentOrderTarget(null); setPaymentOrderMethod(''); }}
+                                  className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700 text-slate-700 dark:text-white font-bold hover:border-red-300"
+                              >
+                                  Cancelar
+                              </button>
+                              <button
+                                  onClick={async () => {
+                                      if (!paymentOrderTarget) return;
+                                      if (!paymentOrderMethod) {
+                                          alert('Selecione a forma de pagamento.');
+                                          return;
+                                      }
+                                      try {
+                                          await updateOrderPayment(paymentOrderTarget.id, paymentOrderMethod);
+                                          await updateOrderStatus(paymentOrderTarget.id, 'COMPLETED');
+                                          setPaymentOrderTarget(null);
+                                          setPaymentOrderMethod('');
+                                      } catch (e) {
+                                          alert('Erro ao finalizar mesa.');
+                                      }
+                                  }}
+                                  className="px-4 py-2 rounded-xl bg-green-600 text-white font-bold hover:bg-green-700"
+                              >
+                                  Finalizar pedido
+                              </button>
+                          </div>
+                      </div>
+                  </div>
+              )}
               <div className="flex justify-between items-center mb-4 px-2">
                   <h3 className="font-bold text-lg text-gray-700 dark:text-gray-300">Quadro de Pedidos</h3>
                   <button 
@@ -580,20 +852,48 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           </div>
                                           
                                           <div className="flex justify-between items-center border-t border-gray-100 dark:border-slate-700 pt-3">
-                                              <span className="font-bold text-slate-800 dark:text-white text-sm">R$ {order.total.toFixed(2)}</span>
+                                              <div className="flex flex-col">
+                                                  <span className="font-bold text-slate-800 dark:text-white text-sm">{formatCurrencyBRL(order.total)}</span>
+                                                  {order.type && (
+                                                      <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                                          {order.type === 'TABLE'
+                                                              ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
+                                                              : order.type === 'PICKUP'
+                                                              ? 'Retirada'
+                                                              : 'Entrega'}
+                                                      </span>
+                                                  )}
+                                              </div>
                                               {col.id !== 'COMPLETED' && col.id !== 'DELIVERING' && col.id !== 'WAITING_COURIER' && (
                                                   <button 
-                                                    onClick={() => handleUpdateStatus(order.id, col.id === 'PENDING' ? 'PREPARING' : 'WAITING_COURIER')}
+                                                    onClick={() => handleUpdateStatus(
+                                                        order.id,
+                                                        col.id === 'PENDING'
+                                                            ? 'PREPARING'
+                                                            : order.type === 'TABLE'
+                                                            ? 'DELIVERING'
+                                                            : 'WAITING_COURIER'
+                                                    )}
                                                     className="px-3 py-1.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold rounded-lg hover:opacity-90 transition-opacity"
                                                   >
-                                                      {col.id === 'PENDING' ? 'Aceitar' : 'Chamar Motoboy'}
+                                                      {col.id === 'PENDING' ? 'Aceitar' : order.type === 'TABLE' ? 'Saiu para entrega' : 'Chamar Motoboy'}
                                                   </button>
                                               )}
                                               {col.id === 'WAITING_COURIER' && (
                                                   <span className="text-xs font-bold text-purple-600 animate-pulse">Aguardando...</span>
                                               )}
                                               {col.id === 'DELIVERING' && (
-                                                  <button onClick={() => handleUpdateStatus(order.id, 'COMPLETED')} className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700">
+                                                  <button
+                                                      onClick={() => {
+                                                          if (order.type === 'TABLE') {
+                                                              setPaymentOrderTarget(order);
+                                                              setPaymentOrderMethod('');
+                                                              return;
+                                                          }
+                                                          handleUpdateStatus(order.id, 'COMPLETED');
+                                                      }}
+                                                      className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700"
+                                                  >
                                                       Concluir
                                                   </button>
                                               )}
@@ -612,11 +912,294 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       );
   };
 
+  const renderTables = () => {
+      const tableOrders = orders.filter((order) => order.type === 'TABLE');
+      const grouped = tableOrders.reduce<Record<string, Order[]>>((acc, order) => {
+          const key = order.tableNumber || 'Sem mesa';
+          if (!acc[key]) acc[key] = [];
+          acc[key].push(order);
+          return acc;
+      }, {});
+      const groupKeys = Object.keys(grouped);
+      const selectedTableOrders = selectedTableKey ? grouped[selectedTableKey] || [] : [];
+      const activePaymentOptions = paymentMethods.filter((pm) => pm.active);
+
+      const handleFinalizeTable = async () => {
+          if (!selectedTableKey) return;
+          if (!selectedTablePayment) {
+              alert('Selecione a forma de pagamento.');
+              return;
+          }
+          const pendingOrders = selectedTableOrders.filter(
+              (order) => !['COMPLETED', 'CANCELLED'].includes(order.status)
+          );
+          if (pendingOrders.length === 0) {
+              setSelectedTableKey(null);
+              return;
+          }
+          if (!confirm(`Finalizar mesa ${selectedTableKey} com ${pendingOrders.length} pedido(s)?`)) return;
+          try {
+              await Promise.all(
+                  pendingOrders.map(async (order) => {
+                      await updateOrderPayment(order.id, selectedTablePayment);
+                      await updateOrderStatus(order.id, 'COMPLETED');
+                  })
+              );
+              setSelectedTableKey(null);
+              setSelectedTablePayment('');
+          } catch (e) {
+              alert('Erro ao finalizar mesa.');
+          }
+      };
+
+      const handlePrintTableBill = () => {
+          if (!selectedTableKey) return;
+          const total = selectedTableOrders.reduce((sum, order) => sum + (order.total || 0), 0);
+          const rows = selectedTableOrders
+              .map((order) => {
+                  const items = order.items
+                      .map((item) => {
+                          const match = item.match(/^(\d+)x\s(.+)/i);
+                          const quantity = match ? match[1] : '';
+                          const description = match ? match[2] : item;
+                          return `
+                            <div class="item-row">
+                              <div class="item-left">
+                                ${quantity ? `<span class="item-qty">${quantity}x</span>` : ''}
+                                <span class="item-desc">${description}</span>
+                              </div>
+                            </div>
+                          `;
+                      })
+                      .join('');
+                  const payment = order.paymentMethod || 'Pagamento na mesa';
+                  return `
+                    <div class="order">
+                      <div class="order-header">
+                        <span>Pedido #${order.id.slice(0, 5)}</span>
+                        <span>${order.time}</span>
+                      </div>
+                      <div class="order-name">${order.customerName || ''}</div>
+                      <div class="order-items">${items}</div>
+                      <div class="order-footer">
+                        <span>Pagamento: ${payment}</span>
+                        <span class="order-total">${formatCurrencyBRL(order.total)}</span>
+                      </div>
+                    </div>
+                  `;
+              })
+              .join('');
+          const now = new Date();
+          const printedAt = `${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+          const storePhone = storeProfile.phone || storeProfile.whatsapp || '';
+          const storeAddress = [
+              storeProfile.street,
+              storeProfile.number,
+              storeProfile.district,
+              storeProfile.city,
+              storeProfile.state
+          ]
+              .filter(Boolean)
+              .join(', ');
+          const html = `
+            <html>
+              <head>
+                <title>Conta Mesa ${selectedTableKey}</title>
+                <style>
+                  @page { size: 80mm 297mm; margin: 2mm; }
+                  * { box-sizing: border-box; }
+                  body { font-family: "Courier New", monospace; color: #111; margin: 0; }
+                  .ticket { width: 80mm; margin: 0; padding: 0 2mm; min-height: 293mm; display: flex; flex-direction: column; }
+                  .content { flex: 1; display: flex; flex-direction: column; }
+                  .center { text-align: center; }
+                  .title { font-size: 14px; font-weight: bold; letter-spacing: 1px; }
+                  .subtitle { font-size: 10px; margin-top: 2px; }
+                  .meta { font-size: 10px; margin-top: 6px; }
+                  .divider { border-top: 1px dashed #111; margin: 8px 0; }
+                  .order { border: 1px dashed #111; padding: 6px; margin-bottom: 8px; }
+                  .order-header { display: flex; justify-content: space-between; font-size: 10px; }
+                  .order-name { font-weight: bold; margin: 4px 0; font-size: 11px; }
+                  .order-items { display: grid; gap: 4px; font-size: 10px; }
+                  .item-row { display: flex; justify-content: space-between; }
+                  .item-left { display: flex; gap: 4px; }
+                  .item-qty { font-weight: bold; }
+                  .order-footer { display: flex; justify-content: space-between; font-size: 10px; margin-top: 6px; }
+                  .order-total { font-weight: bold; }
+                  .total { display: flex; justify-content: space-between; font-size: 12px; font-weight: bold; margin-top: 8px; }
+                  .note { font-size: 9px; margin-top: 8px; text-align: center; }
+                  @media print {
+                    body { margin: 0; }
+                    .ticket { width: 80mm; padding: 0 2mm; }
+                  }
+                </style>
+              </head>
+              <body>
+                <div class="ticket">
+                  <div class="center">
+                    <div class="title">${storeProfile.name || 'MenuFaz'}</div>
+                    ${storeAddress ? `<div class="subtitle">${storeAddress}</div>` : ''}
+                    ${storePhone ? `<div class="subtitle">Tel: ${storePhone}</div>` : ''}
+                    <div class="meta">Mesa ${selectedTableKey} • ${printedAt}</div>
+                  </div>
+                  <div class="divider"></div>
+                  <div class="content">
+                    ${rows || '<div class="center subtitle">Sem pedidos.</div>'}
+                  </div>
+                  <div class="divider"></div>
+                  <div class="total">
+                    <span>TOTAL</span>
+                    <span>${formatCurrencyBRL(total)}</span>
+                  </div>
+                  <div class="note">Comprovante nao fiscal</div>
+                </div>
+              </body>
+            </html>
+          `;
+          const printWindow = window.open('', '_blank', 'width=480,height=640');
+          if (!printWindow) {
+              alert('Não foi possível abrir a impressão.');
+              return;
+          }
+          printWindow.document.write(html);
+          printWindow.document.close();
+          printWindow.focus();
+          printWindow.print();
+      };
+
+      return (
+          <div className="animate-fade-in space-y-6">
+              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                      <div>
+                          <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Mesas</h2>
+                          <p className="text-sm text-gray-500 dark:text-gray-400">Acompanhe pedidos feitos direto na mesa.</p>
+                      </div>
+                      <button
+                          onClick={() => { setActiveSection('SETTINGS'); setSettingsTab('DELIVERY'); }}
+                          className="px-4 py-2 rounded-xl font-bold text-sm border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                      >
+                          Configurar mesas
+                      </button>
+                  </div>
+
+                  {groupKeys.length === 0 ? (
+                      <div className="bg-gray-50 dark:bg-slate-800/60 border border-dashed border-gray-200 dark:border-slate-700 rounded-xl p-6 text-sm text-gray-500">
+                          Nenhum pedido de mesa no momento.
+                      </div>
+                  ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                          {groupKeys.map((key) => (
+                              <button
+                                  key={key}
+                                  onClick={() => setSelectedTableKey(key)}
+                                  className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 p-4 text-left hover:border-red-300 dark:hover:border-red-600 transition-colors"
+                              >
+                                  <div className="flex items-center justify-between mb-3">
+                                      <div className="flex items-center gap-2">
+                                          <div className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-200">
+                                              <Table size={16} />
+                                          </div>
+                                          <div>
+                                              <p className="text-sm font-bold text-slate-800 dark:text-white">Mesa {key}</p>
+                                              <p className="text-xs text-gray-500 dark:text-gray-400">{grouped[key].length} pedidos</p>
+                                          </div>
+                                      </div>
+                                  </div>
+                                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                      {grouped[key].map((order) => (
+                                          <div key={order.id} className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl p-3">
+                                              <div className="flex items-center justify-between text-xs text-gray-400">
+                                                  <span>#{order.id.slice(0, 5)}</span>
+                                                  <span>{order.time}</span>
+                                              </div>
+                                              <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
+                                              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{order.items.length} itens • {formatCurrencyBRL(order.total)}</p>
+                                          </div>
+                                      ))}
+                                  </div>
+                              </button>
+                          ))}
+                      </div>
+                  )}
+              </div>
+              {selectedTableKey && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+                      <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-800">
+                          <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
+                              <div>
+                                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Mesa {selectedTableKey}</h3>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">{selectedTableOrders.length} pedidos</p>
+                              </div>
+                              <button onClick={() => { setSelectedTableKey(null); setSelectedTablePayment(''); }} className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800">
+                                  <X size={18} className="text-slate-500" />
+                              </button>
+                          </div>
+                          <div className="p-5 space-y-3 max-h-[60vh] overflow-y-auto">
+                              {selectedTableOrders.map((order) => (
+                                  <div key={order.id} className="border border-gray-200 dark:border-slate-800 rounded-xl p-4 bg-gray-50 dark:bg-slate-800/40">
+                                      <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                                          <span>#{order.id.slice(0, 5)}</span>
+                                          <span>{order.time}</span>
+                                      </div>
+                                      <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
+                                      <div className="mt-2 space-y-1 text-xs text-gray-600 dark:text-gray-300">
+                                          {order.items.map((item, idx) => (
+                                              <div key={`${order.id}-${idx}`}>• {item}</div>
+                                          ))}
+                                      </div>
+                                      <div className="text-right font-bold text-slate-800 dark:text-white mt-3">{formatCurrencyBRL(order.total)}</div>
+                                  </div>
+                              ))}
+                          </div>
+                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex flex-col gap-3">
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Forma de pagamento</label>
+                                  <select
+                                      value={selectedTablePayment}
+                                      onChange={(e) => setSelectedTablePayment(e.target.value)}
+                                      className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900 text-slate-700 dark:text-white"
+                                  >
+                                      <option value="">Selecione</option>
+                                      {activePaymentOptions.length > 0 ? (
+                                          activePaymentOptions.map((pm) => (
+                                              <option key={pm.id} value={pm.name}>{pm.name}</option>
+                                          ))
+                                      ) : (
+                                          <>
+                                              <option value="Dinheiro">Dinheiro</option>
+                                              <option value="Pix">Pix</option>
+                                              <option value="Cartão">Cartão</option>
+                                          </>
+                                      )}
+                                  </select>
+                              </div>
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                  <button
+                                      onClick={handlePrintTableBill}
+                                      className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700 text-slate-700 dark:text-white font-bold hover:border-red-300"
+                                  >
+                                      Imprimir conta
+                                  </button>
+                                  <button
+                                      onClick={handleFinalizeTable}
+                                      className="px-4 py-2 rounded-xl bg-green-600 text-white font-bold hover:bg-green-700"
+                                  >
+                                      Finalizar mesa
+                                  </button>
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+              )}
+          </div>
+      );
+  };
+
   const renderMenu = () => {
       const categories = Array.from(new Set(products.map(p => p.category)));
       const filteredProducts = products.filter(p => 
           (selectedCategoryTab === 'Todos' || p.category === selectedCategoryTab) &&
-          p.name.toLowerCase().includes(menuSearch.toLowerCase())
+          (p.name || '').toLowerCase().includes(menuSearch.toLowerCase())
       );
 
       return (
@@ -670,11 +1253,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   <div className="flex flex-col">
                                       {product.promoPrice ? (
                                           <>
-                                              <span className="text-xs text-gray-400 line-through">R$ {product.price.toFixed(2)}</span>
-                                              <span className="font-bold text-green-600">R$ {product.promoPrice.toFixed(2)}</span>
+                                              <span className="text-xs text-gray-400 line-through">{formatCurrencyBRL(product.price)}</span>
+                                              <span className="font-bold text-green-600">{formatCurrencyBRL(product.promoPrice)}</span>
                                           </>
                                       ) : (
-                                          <span className="font-bold text-slate-800 dark:text-white">R$ {product.price.toFixed(2)}</span>
+                                          <span className="font-bold text-slate-800 dark:text-white">{formatCurrencyBRL(product.price)}</span>
                                       )}
                                   </div>
                                   <label className="flex items-center cursor-pointer" title={product.isAvailable ? 'Disponível' : 'Indisponível'}>
@@ -762,41 +1345,43 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                    <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                        <p className="text-sm font-bold text-gray-500 uppercase mb-2">Receita Total</p>
-                       <h3 className="text-3xl font-extrabold text-green-600">R$ {totalRevenue.toFixed(2)}</h3>
+                       <h3 className="text-3xl font-extrabold text-green-600">{formatCurrencyBRL(totalRevenue)}</h3>
                        <div className="mt-2 text-xs text-gray-400">
-                           Vendas: R$ {orderSales.toFixed(2)} | Outros: R$ {manualIncome.toFixed(2)}
+                           Vendas: {formatCurrencyBRL(orderSales)} | Outros: {formatCurrencyBRL(manualIncome)}
                        </div>
                    </div>
                    <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                        <p className="text-sm font-bold text-gray-500 uppercase mb-2">Despesas</p>
-                       <h3 className="text-3xl font-extrabold text-red-600">R$ {totalExpenses.toFixed(2)}</h3>
+                       <h3 className="text-3xl font-extrabold text-red-600">{formatCurrencyBRL(totalExpenses)}</h3>
                        <p className="text-xs text-gray-400 mt-2">Total de saídas registradas</p>
                    </div>
                    <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                        <p className="text-sm font-bold text-gray-500 uppercase mb-2">Lucro Líquido</p>
-                       <h3 className={`text-3xl font-extrabold ${netProfit >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>R$ {netProfit.toFixed(2)}</h3>
+                       <h3 className={`text-3xl font-extrabold ${netProfit >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>{formatCurrencyBRL(netProfit)}</h3>
                        <p className="text-xs text-gray-400 mt-2">Saldo final</p>
                    </div>
                </div>
 
-               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm h-80">
+               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
                    <h3 className="font-bold text-slate-800 dark:text-white mb-6">Balanço Geral</h3>
-                   <ResponsiveContainer width="100%" height="100%">
-                       <BarChart data={barData}>
-                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
-                           <XAxis dataKey="name" axisLine={false} tickLine={false} />
-                           <YAxis axisLine={false} tickLine={false} />
-                           <Tooltip 
-                                cursor={{fill: 'transparent'}}
-                                contentStyle={{ backgroundColor: isDarkMode ? '#0f172a' : '#fff', border: isDarkMode ? '1px solid #1e293b' : 'none', borderRadius: '8px' }} 
-                           />
-                           <Bar dataKey="value" fill="#3B82F6" radius={[4, 4, 0, 0]}>
-                               {barData.map((entry, index) => (
-                                   <Cell key={`cell-${index}`} fill={entry.name === 'Entradas' ? '#10B981' : '#EF4444'} />
-                               ))}
-                           </Bar>
-                       </BarChart>
-                   </ResponsiveContainer>
+                   <ChartContainer className="h-80">
+                       <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                           <BarChart data={barData}>
+                               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                               <XAxis dataKey="name" axisLine={false} tickLine={false} />
+                               <YAxis axisLine={false} tickLine={false} />
+                               <Tooltip 
+                                    cursor={{fill: 'transparent'}}
+                                    contentStyle={{ backgroundColor: isDarkMode ? '#0f172a' : '#fff', border: isDarkMode ? '1px solid #1e293b' : 'none', borderRadius: '8px' }} 
+                               />
+                               <Bar dataKey="value" fill="#3B82F6" radius={[4, 4, 0, 0]}>
+                                   {barData.map((entry, index) => (
+                                       <Cell key={`cell-${index}`} fill={entry.name === 'Entradas' ? '#10B981' : '#EF4444'} />
+                                   ))}
+                               </Bar>
+                           </BarChart>
+                       </ResponsiveContainer>
+                   </ChartContainer>
                </div>
           </div>
       );
@@ -819,7 +1404,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">{new Date(t.date).toLocaleDateString()}</td>
                               <td className="px-6 py-4 font-bold text-slate-800 dark:text-white">{t.description}</td>
                               <td className="px-6 py-4 text-sm text-gray-500">{TRANSACTION_CATEGORIES.find(c => c.id === t.category)?.label || t.category}</td>
-                              <td className={`px-6 py-4 font-bold ${t.type === 'INCOME' ? 'text-green-600' : 'text-red-600'}`}>{t.type === 'INCOME' ? '+' : '-'} R$ {t.amount.toFixed(2)}</td>
+                              <td className={`px-6 py-4 font-bold ${t.type === 'INCOME' ? 'text-green-600' : 'text-red-600'}`}>{t.type === 'INCOME' ? '+' : '-'} {formatCurrencyBRL(t.amount)}</td>
                               <td className="px-6 py-4"><button onClick={() => { if(confirm('Excluir?')) deleteExpense(t.id); }} className="text-gray-400 hover:text-red-600"><Trash2 size={16}/></button></td>
                           </tr>
                       ))}
@@ -904,7 +1489,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           {new Date(order.createdAt || '').toLocaleString()}
                                       </td>
                                       <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-300">{order.paymentMethod}</td>
-                                      <td className="px-6 py-4 font-bold text-slate-800 dark:text-white text-sm">R$ {order.total.toFixed(2)}</td>
+                                      <td className="px-6 py-4 font-bold text-slate-800 dark:text-white text-sm">{formatCurrencyBRL(order.total)}</td>
                                       <td className="px-6 py-4">
                                           <span className={`px-2 py-1 rounded text-xs font-bold ${
                                               order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 
@@ -1004,26 +1589,43 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <div className="space-y-4">
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nome do Estabelecimento</label>
+                               <p className="text-xs text-gray-400 mb-1">Esse nome aparece para os clientes no app.</p>
                                <input type="text" value={storeProfile.name} onChange={(e) => setStoreProfile({...storeProfile, name: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Descrição / Bio</label>
+                               <p className="text-xs text-gray-400 mb-1">Fale sobre o estilo da loja e diferenciais.</p>
                                <textarea value={storeProfile.description} onChange={(e) => setStoreProfile({...storeProfile, description: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" rows={3} />
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Categoria Principal</label>
+                               <p className="text-xs text-gray-400 mb-1">Ajuda a loja aparecer nos filtros certos.</p>
                                <input type="text" value={storeProfile.category} onChange={(e) => setStoreProfile({...storeProfile, category: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
                        </div>
-                       <div>
-                           <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Logo / Imagem de Capa</label>
-                           <div 
-                               onClick={() => storeLogoInputRef.current?.click()}
-                               className="w-full h-48 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
-                           >
-                               {storeProfile.imageUrl ? <img src={storeProfile.imageUrl} alt="Store" className="w-full h-full object-cover absolute" /> : <><UploadCloud size={32} className="mb-2" /><span>Clique para enviar imagem</span></>}
+                       <div className="space-y-4">
+                           <div>
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Logo da Loja</label>
+                               <p className="text-xs text-gray-400 mb-2">Mostrada para o cliente durante o pedido.</p>
+                               <div 
+                                   onClick={() => storeLogoInputRef.current?.click()}
+                                   className="w-full h-32 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
+                               >
+                                   {storeProfile.logoUrl ? <img src={storeProfile.logoUrl} alt="Logo" className="w-24 h-24 object-cover rounded-full border border-gray-200 dark:border-slate-700" /> : <><UploadCloud size={28} className="mb-2" /><span>Enviar logo</span></>}
+                               </div>
+                               <input type="file" ref={storeLogoInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'STORE_LOGO')} accept="image/*" />
                            </div>
-                           <input type="file" ref={storeLogoInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'STORE')} accept="image/*" />
+                           <div>
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Capa da Loja</label>
+                               <p className="text-xs text-gray-400 mb-2">Imagem de destaque no topo da loja.</p>
+                               <div 
+                                   onClick={() => storeCoverInputRef.current?.click()}
+                                   className="w-full h-48 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
+                               >
+                                   {storeProfile.imageUrl ? <img src={storeProfile.imageUrl} alt="Capa" className="w-full h-full object-cover absolute" /> : <><UploadCloud size={32} className="mb-2" /><span>Enviar capa</span></>}
+                               </div>
+                               <input type="file" ref={storeCoverInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'STORE_COVER')} accept="image/*" />
+                           </div>
                        </div>
                    </div>
                )}
@@ -1048,12 +1650,92 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                {settingsTab === 'DELIVERY' && (
                    <div className="space-y-6">
                        <div className="grid grid-cols-2 gap-6">
-                           <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tempo Médio (min)</label><input type="text" value={storeProfile.deliveryTime} onChange={(e) => setStoreProfile({...storeProfile, deliveryTime: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: 40-50 min" /></div>
-                           <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa de Entrega (R$)</label><input type="number" value={storeProfile.deliveryFee} onChange={(e) => setStoreProfile({...storeProfile, deliveryFee: parseFloat(e.target.value)})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                   <div>
+                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tempo de Entrega</label>
+                       <p className="text-xs text-gray-400 mb-1">Mostrado para o cliente no checkout.</p>
+                       <input type="text" value={storeProfile.deliveryTime} onChange={(e) => setStoreProfile({...storeProfile, deliveryTime: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: 30-40 min" />
+                   </div>
+                   <div>
+                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tempo de Retirada</label>
+                       <p className="text-xs text-gray-400 mb-1">Visível quando o cliente escolhe retirada.</p>
+                       <input type="text" value={storeProfile.pickupTime || ''} onChange={(e) => setStoreProfile({...storeProfile, pickupTime: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: 20-30 min" />
+                   </div>
+                           <div>
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa de Entrega (R$)</label>
+                               <p className="text-xs text-gray-400 mb-1">Deixe 0 para entrega grátis.</p>
+                               <input type="number" value={storeProfile.deliveryFee} onChange={(e) => setStoreProfile({...storeProfile, deliveryFee: parseFloat(e.target.value)})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
+                           </div>
                        </div>
                        <div className="flex items-center gap-4">
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsDelivery} onChange={(e) => setStoreProfile({...storeProfile, acceptsDelivery: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Delivery</span></label>
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsPickup} onChange={(e) => setStoreProfile({...storeProfile, acceptsPickup: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Retirada</span></label>
+                       </div>
+                       <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-900/50 p-4 space-y-4">
+                           <div className="flex flex-wrap items-center justify-between gap-3">
+                               <div className="flex items-center gap-3">
+                                   <div className="w-10 h-10 rounded-xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-200">
+                                       <Table size={18} />
+                                   </div>
+                                   <div>
+                                       <p className="font-bold text-slate-700 dark:text-white">Pedidos Mesa</p>
+                                       <p className="text-xs text-gray-500 dark:text-gray-400">Ative para aceitar pedidos feitos diretamente na mesa.</p>
+                                   </div>
+                               </div>
+                               <label className="flex items-center gap-2 cursor-pointer bg-white dark:bg-slate-800 px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700">
+                                   <input
+                                       type="checkbox"
+                                       checked={!!storeProfile.acceptsTableOrders}
+                                       onChange={(e) => setStoreProfile({ ...storeProfile, acceptsTableOrders: e.target.checked })}
+                                       className="w-5 h-5 accent-red-600"
+                                   />
+                                   <span className="font-bold text-slate-700 dark:text-white">Aceita Mesa</span>
+                               </label>
+                           </div>
+                           {storeProfile.acceptsTableOrders && (
+                               <div className="space-y-3">
+                                   <div className="flex flex-wrap items-end gap-3">
+                                       <div className="flex-1 min-w-[200px]">
+                                           <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Mesas</label>
+                                           <input
+                                               type="number"
+                                               min="0"
+                                               value={tableCountValue}
+                                               onChange={(e) => setStoreProfile({ ...storeProfile, tableCount: Math.max(0, Number(e.target.value) || 0) })}
+                                               className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                           />
+                                       </div>
+                                       <button onClick={handleSaveStoreSettings} className="bg-slate-900 text-white px-5 py-3 rounded-xl font-bold hover:opacity-90 shadow-sm">
+                                           Salvar mesas
+                                       </button>
+                                       <button
+                                           onClick={handleDownloadAllTableQrs}
+                                           disabled={isDownloadingTables || tableCountValue === 0}
+                                           className="bg-white dark:bg-slate-800 text-slate-700 dark:text-white px-5 py-3 rounded-xl font-bold border border-gray-200 dark:border-slate-700 hover:border-red-300 disabled:opacity-60 flex items-center gap-2"
+                                       >
+                                           <Download size={16} />
+                                           {isDownloadingTables ? 'Gerando...' : 'Baixar QRCODE'}
+                                       </button>
+                                   </div>
+                                   <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
+                                       {Array.from({ length: Math.min(tableCountValue, 40) }, (_, index) => {
+                                           const tableLabel = index + 1;
+                                           return (
+                                               <button
+                                                   key={tableLabel}
+                                                   onClick={() => handleDownloadTableQr(tableLabel)}
+                                                   className="flex flex-col items-center justify-center gap-1 p-2 rounded-xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 shadow-sm hover:border-red-400 transition-colors"
+                                               >
+                                                   <Table size={18} className="text-slate-600 dark:text-slate-200" />
+                                                   <span className="text-[10px] font-bold text-gray-500">Mesa {tableLabel}</span>
+                                               </button>
+                                           );
+                                       })}
+                                   </div>
+                                   {tableCountValue > 40 && (
+                                       <p className="text-xs text-gray-400">Exibindo as 40 primeiras mesas.</p>
+                                   )}
+                               </div>
+                           )}
                        </div>
                    </div>
                )}
@@ -1063,11 +1745,89 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        {storeProfile.schedule?.map((day, idx) => (
                            <div key={idx} className="flex items-center gap-4 p-3 bg-gray-50 dark:bg-slate-800 rounded-lg border border-gray-200 dark:border-slate-700">
                                <div className="w-24 font-bold text-slate-700 dark:text-white">{day.day}</div>
-                               <label className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={day.isOpen} onChange={(e) => { const newSched = [...(storeProfile.schedule || [])]; newSched[idx].isOpen = e.target.checked; setStoreProfile({...storeProfile, schedule: newSched}); }} className="sr-only peer" /><div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div></label>
-                               <div className="flex items-center gap-2">
-                                   <input type="time" value={day.openTime} onChange={(e) => { const newSched = [...(storeProfile.schedule || [])]; newSched[idx].openTime = e.target.value; setStoreProfile({...storeProfile, schedule: newSched}); }} className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white" style={{ colorScheme: isDarkMode ? 'dark' : 'light' }} disabled={!day.isOpen} />
-                                   <span className="text-gray-400">-</span>
-                                   <input type="time" value={day.closeTime} onChange={(e) => { const newSched = [...(storeProfile.schedule || [])]; newSched[idx].closeTime = e.target.value; setStoreProfile({...storeProfile, schedule: newSched}); }} className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white" style={{ colorScheme: isDarkMode ? 'dark' : 'light' }} disabled={!day.isOpen} />
+                               <div className="flex flex-col gap-3">
+                                   <div className="flex items-center gap-2">
+                                       <label className="relative inline-flex items-center cursor-pointer">
+                                           <input
+                                               type="checkbox"
+                                               checked={day.isMorningOpen}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].isMorningOpen = e.target.checked;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="sr-only peer"
+                                           />
+                                           <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
+                                       </label>
+                                       <span className="text-xs font-bold text-gray-500 w-12">Manhã</span>
+                                       <input
+                                           type="time"
+                                           value={day.morningOpenTime}
+                                           onChange={(e) => {
+                                               const newSched = [...(storeProfile.schedule || [])];
+                                               newSched[idx].morningOpenTime = e.target.value;
+                                               setStoreProfile({ ...storeProfile, schedule: newSched });
+                                           }}
+                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                           disabled={!day.isMorningOpen}
+                                       />
+                                       <span className="text-gray-400">-</span>
+                                       <input
+                                           type="time"
+                                           value={day.morningCloseTime}
+                                           onChange={(e) => {
+                                               const newSched = [...(storeProfile.schedule || [])];
+                                               newSched[idx].morningCloseTime = e.target.value;
+                                               setStoreProfile({ ...storeProfile, schedule: newSched });
+                                           }}
+                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                           disabled={!day.isMorningOpen}
+                                       />
+                                   </div>
+                                   <div className="flex items-center gap-2">
+                                       <label className="relative inline-flex items-center cursor-pointer">
+                                           <input
+                                               type="checkbox"
+                                               checked={day.isAfternoonOpen}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].isAfternoonOpen = e.target.checked;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="sr-only peer"
+                                           />
+                                           <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
+                                       </label>
+                                       <span className="text-xs font-bold text-gray-500 w-12">Tarde</span>
+                                       <input
+                                           type="time"
+                                           value={day.afternoonOpenTime}
+                                           onChange={(e) => {
+                                               const newSched = [...(storeProfile.schedule || [])];
+                                               newSched[idx].afternoonOpenTime = e.target.value;
+                                               setStoreProfile({ ...storeProfile, schedule: newSched });
+                                           }}
+                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                           disabled={!day.isAfternoonOpen}
+                                       />
+                                       <span className="text-gray-400">-</span>
+                                       <input
+                                           type="time"
+                                           value={day.afternoonCloseTime}
+                                           onChange={(e) => {
+                                               const newSched = [...(storeProfile.schedule || [])];
+                                               newSched[idx].afternoonCloseTime = e.target.value;
+                                               setStoreProfile({ ...storeProfile, schedule: newSched });
+                                           }}
+                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                           disabled={!day.isAfternoonOpen}
+                                       />
+                                   </div>
                                </div>
                            </div>
                        ))}
@@ -1188,6 +1948,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                 {[
                     { id: 'OVERVIEW', icon: Activity, label: 'Visão Geral' },
                     { id: 'ORDERS', icon: ClipboardList, label: 'Pedidos', count: orders.filter(o => o.status === 'PENDING').length },
+                    { id: 'TABLES', icon: Table, label: 'Mesas' },
                     { id: 'SALES', icon: Receipt, label: 'Vendas' }, 
                     { id: 'FINANCE', icon: DollarSign, label: 'Financeiro' }, 
                     { id: 'EXPENSES', icon: Wallet, label: 'Retirada / Entrada' }, 
@@ -1230,7 +1991,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        activeSection === 'FINANCE' ? 'Financeiro' :
                        activeSection === 'EXPENSES' ? 'Retirada / Entrada' :
                        activeSection === 'SALES' ? 'Relatório de Vendas' :
-                       activeSection === 'SETTINGS' ? 'Configurações' : activeSection}
+                       activeSection === 'SETTINGS' ? 'Configurações' :
+                       activeSection === 'TABLES' ? 'Mesas' : activeSection}
                   </h1>
               </div>
               <div className="flex items-center gap-4">
@@ -1256,6 +2018,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               {activeSection === 'FINANCE' && renderFinance()}
               {activeSection === 'EXPENSES' && renderExpenses()}
               {activeSection === 'SALES' && renderSales()}
+              {activeSection === 'TABLES' && renderTables()}
           </main>
       </div>
 

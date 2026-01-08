@@ -4,6 +4,7 @@ import { ArrowLeft, Package, Clock, CheckCircle, AlertTriangle, MessageCircle, S
 import { Order, ChatMessage, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { subscribeToClientOrders, updateOrderRefundStatus, updateOrderChat, subscribeToCourier } from '../services/db';
+import { formatCurrencyBRL } from '../utils/format';
 
 interface ClientOrdersProps {
     onBack: () => void;
@@ -239,7 +240,7 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                     </div>
                                     <div className="text-right">
                                         <p className="text-xs font-bold text-gray-400 uppercase">Total</p>
-                                        <p className="text-xl font-extrabold text-red-600">R$ {selectedOrder.total.toFixed(2)}</p>
+                                        <p className="text-xl font-extrabold text-red-600">{formatCurrencyBRL(selectedOrder.total)}</p>
                                     </div>
                                 </div>
 
@@ -281,8 +282,12 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                             {/* Order Type Info */}
                             <div className="px-6 py-3 bg-slate-50 dark:bg-slate-900 border-b border-gray-100 dark:border-slate-800 flex items-center justify-between text-sm">
                                 <span className="font-bold text-slate-700 dark:text-gray-300 flex items-center gap-2">
-                                    {selectedOrder.type === 'PICKUP' ? <ShoppingBag size={16} /> : <Bike size={16} />}
-                                    {selectedOrder.type === 'PICKUP' ? 'Retirada no Balcão' : 'Entrega Delivery'}
+                                    {selectedOrder.type === 'PICKUP' ? <ShoppingBag size={16} /> : selectedOrder.type === 'TABLE' ? <Utensils size={16} /> : <Bike size={16} />}
+                                    {selectedOrder.type === 'PICKUP'
+                                        ? 'Retirada no Balcão'
+                                        : selectedOrder.type === 'TABLE'
+                                        ? `Mesa${selectedOrder.tableNumber ? ` ${selectedOrder.tableNumber}` : ''}`
+                                        : 'Entrega Delivery'}
                                 </span>
                                 {selectedOrder.paymentMethod && (
                                     <span className="text-gray-500 bg-white dark:bg-slate-800 px-2 py-1 rounded border border-gray-200 dark:border-slate-700 text-xs font-medium max-w-[200px] truncate">
@@ -432,7 +437,7 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                                 </p>
                                             </div>
                                         </div>
-                                        <span className="font-bold text-slate-800 dark:text-white">R$ {order.total.toFixed(2)}</span>
+                                        <span className="font-bold text-slate-800 dark:text-white">{formatCurrencyBRL(order.total)}</span>
                                     </div>
                                     
                                     {/* Mini Stepper for Active Orders */}

@@ -1,0 +1,80 @@
+  api:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgres://menufaz:${POSTGRES_PASSWORD}@postgres:5432/menufaz
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGIN: https://app.menufaz.com
+    depends_on:
+      - postgres
+    restart: unless-stopped
+      healthcheck:
+        test: ["CMD-SHELL", "wget -q -O - http://localhost:3001/api/health || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: menufaz
+      POSTGRES_USER: menufaz
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U menufaz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgres://menufaz:${POSTGRES_PASSWORD}@postgres:5432/menufaz
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGIN: https://app.menufaz.com
+    depends_on:
+      - postgres
+    restart: unless-stopped
+      healthcheck:
+        test: ["CMD-SHELL", "wget -q -O - http://localhost:3001/api/health || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  frontend:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: https://app.menufaz.com/api
+    depends_on:
+      - api
+    restart: unless-stopped
+      healthcheck:
+        test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/ || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

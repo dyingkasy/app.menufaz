@@ -5,13 +5,15 @@ const BASE_LAT = -23.561684;
 const BASE_LNG = -46.655981;
 
 export const CATEGORIES: Category[] = [
-  { id: '1', name: 'Lanches', icon: '🍔' },
-  { id: '2', name: 'Pizza', icon: '🍕' },
-  { id: '3', name: 'Japonesa', icon: '🍣' },
-  { id: '4', name: 'Brasileira', icon: '🥘' },
-  { id: '5', name: 'Açaí', icon: '🍧' },
-  { id: '6', name: 'Doces', icon: '🍰' },
-  { id: '7', name: 'Saudável', icon: '🥗' },
+  { id: '1', name: 'Padaria', icon: '🥖' },
+  { id: '2', name: 'Lanchonete', icon: '🥪' },
+  { id: '3', name: 'Restaurante', icon: '🍽️' },
+  { id: '4', name: 'Distribuidora', icon: '📦' },
+  { id: '5', name: 'Adega', icon: '🍷' },
+  { id: '6', name: 'Cafeteria', icon: '☕' },
+  { id: '7', name: 'Açaí', icon: '🍧' },
+  { id: '8', name: 'Hamburgueria', icon: '🍔' },
+  { id: '9', name: 'Água e gás', icon: '🧃' },
 ];
 
 // Dados mockados removidos para garantir uso de dados reais

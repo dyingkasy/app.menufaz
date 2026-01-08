@@ -4,6 +4,7 @@ import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { query, withClient } from './db.js';
+import { initErrorLogTable, logError } from './logger.js';
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -13,7 +14,66 @@ const corsOrigin = process.env.CORS_ORIGIN || '*';
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 
+initErrorLogTable().catch((error) => {
+  console.error('Failed to initialize error log table', error);
+});
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    if (res.statusCode < 400) return;
+    const durationMs = Date.now() - startedAt;
+    logError({
+      source: 'server',
+      level: res.statusCode >= 500 ? 'error' : 'warning',
+      message: `${req.method} ${req.originalUrl} -> ${res.statusCode}`,
+      context: {
+        status: res.statusCode,
+        durationMs,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] || ''
+      }
+    }).catch(() => {});
+  });
+  next();
+});
+
+process.on('unhandledRejection', (reason) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : null;
+  logError({ source: 'server', message, stack, context: { type: 'unhandledRejection' } }).catch(() => {});
+});
+
+process.on('uncaughtException', (error) => {
+  logError({
+    source: 'server',
+    message: error?.message || 'Uncaught exception',
+    stack: error?.stack,
+    context: { type: 'uncaughtException' }
+  }).catch(() => {});
+});
+
 const signToken = (payload) => jwt.sign(payload, jwtSecret, { expiresIn: '7d' });
+
+const getAuthPayload = (req) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace('Bearer ', '');
+  if (!token) return null;
+  try {
+    return jwt.verify(token, jwtSecret);
+  } catch {
+    return null;
+  }
+};
+
+const requireAdmin = (req, res, next) => {
+  const payload = getAuthPayload(req);
+  if (!payload || payload.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  req.user = payload;
+  return next();
+};
 
 const createUserResponse = (userId, role, profileData) => ({
   id: userId,
@@ -27,15 +87,20 @@ const getProfile = async (userId) => {
 };
 
 const upsertProfile = async (userId, data) => {
-  await query(
+  const { rows } = await query(
     `
+    WITH existing AS (
+      SELECT 1 FROM users WHERE id = $1
+    )
     INSERT INTO profiles (user_id, data)
-    VALUES ($1, $2)
+    SELECT $1, $2 FROM existing
     ON CONFLICT (user_id)
     DO UPDATE SET data = EXCLUDED.data
+    RETURNING user_id
     `,
     [userId, data]
   );
+  return rows.length > 0;
 };
 
 const normalizeId = (value) => (value || '').toString();
@@ -61,6 +126,11 @@ const parseOrderRow = (row) => {
 
 const parseOrderRows = (rows) => rows.map(parseOrderRow);
 
+const ensureUserExists = async (userId) => {
+  const { rows } = await query('SELECT id FROM users WHERE id = $1', [userId]);
+  return rows.length > 0;
+};
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
@@ -85,7 +155,10 @@ app.post('/api/auth/register', async (req, res) => {
     );
 
     const userId = rows[0].id;
-    await upsertProfile(userId, { email, role, ...profile, uid: userId });
+    const profileSaved = await upsertProfile(userId, { email, role, ...profile, uid: userId });
+    if (!profileSaved) {
+      throw new Error('failed to create profile');
+    }
 
     const token = signToken({ sub: userId, role: rows[0].role });
     const profileData = await getProfile(userId);
@@ -93,6 +166,12 @@ app.post('/api/auth/register', async (req, res) => {
     res.json({ token, user: createUserResponse(userId, rows[0].role, profileData) });
   } catch (error) {
     console.error(error);
+    await logError({
+      source: 'server',
+      message: 'failed to register',
+      stack: error?.stack,
+      context: { route: '/api/auth/register', email: req.body?.email }
+    });
     res.status(500).json({ error: 'failed to register' });
   }
 });
@@ -120,6 +199,12 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, user: createUserResponse(user.id, user.role, profileData) });
   } catch (error) {
     console.error(error);
+    await logError({
+      source: 'server',
+      message: 'failed to login',
+      stack: error?.stack,
+      context: { route: '/api/auth/login', email: req.body?.email }
+    });
     res.status(500).json({ error: 'failed to login' });
   }
 });
@@ -135,6 +220,12 @@ app.get('/api/auth/me', async (req, res) => {
     const profileData = await getProfile(payload.sub);
     res.json({ user: createUserResponse(payload.sub, payload.role, profileData) });
   } catch (error) {
+    await logError({
+      source: 'server',
+      message: 'invalid token',
+      stack: error?.stack,
+      context: { route: '/api/auth/me' }
+    });
     res.status(401).json({ error: 'invalid token' });
   }
 });
@@ -159,6 +250,63 @@ app.post('/api/stores', async (req, res) => {
     [payload.ownerId || null, payload.city || null, payload]
   );
   res.json({ id: rows[0].id, ...payload });
+});
+
+app.post('/api/stores/with-user', async (req, res) => {
+  const payload = req.body || {};
+  const ownerName = payload.ownerName || payload.storeName;
+  const email = payload.email;
+  const password = payload.password;
+  const phone = payload.phone;
+  const storeData = payload.store || {};
+
+  if (!email || !password || !ownerName) {
+    return res.status(400).json({ error: 'ownerName, email, and password are required' });
+  }
+
+  const existing = await query('SELECT id FROM users WHERE email = $1', [email]);
+  if (existing.rows.length > 0) {
+    return res.status(409).json({ error: 'email already exists' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  await withClient(async (client) => {
+    const userResult = await client.query(
+      'INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3) RETURNING id',
+      [email, passwordHash, 'BUSINESS']
+    );
+    const userId = userResult.rows[0].id;
+
+    await client.query(
+      'INSERT INTO profiles (user_id, data) VALUES ($1, $2)',
+      [
+        userId,
+        {
+          uid: userId,
+          name: ownerName,
+          email,
+          role: 'BUSINESS',
+          phone,
+          city: storeData.city
+        }
+      ]
+    );
+
+    const fullStoreData = {
+      ...storeData,
+      ownerId: userId,
+      city: storeData.city,
+      phone: storeData.whatsapp || storeData.phone || phone,
+      email
+    };
+
+    await client.query(
+      'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3)',
+      [userId, fullStoreData.city || null, fullStoreData]
+    );
+  });
+
+  res.json({ ok: true });
 });
 
 app.put('/api/stores/:id', async (req, res) => {
@@ -253,6 +401,7 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
       category: 'Lanches',
       rating: 5,
       deliveryTime: '30-40 min',
+      pickupTime: '20-30 min',
       deliveryFee: 5,
       imageUrl: '',
       isPopular: false,
@@ -260,6 +409,17 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
       coordinates: { lat: -23.561684, lng: -46.655981 },
       acceptsDelivery: true,
       acceptsPickup: true,
+      acceptsTableOrders: false,
+      tableCount: 0,
+      logoUrl: payload.logoUrl || '',
+      cep: payload.cep,
+      street: payload.street,
+      number: payload.number,
+      district: payload.district,
+      state: payload.state,
+      complement: payload.complement,
+      phone: payload.whatsapp || payload.phone,
+      email: payload.email,
       city: payload.city,
       ownerId: userId
     };
@@ -271,6 +431,114 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
   });
 
   res.json({ ok: true });
+});
+
+// --- Client Error Logs ---
+app.post('/api/logs/client', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    await logError({
+      source: 'client',
+      level: payload.level || 'error',
+      message: payload.message || 'Client error',
+      stack: payload.stack,
+      context: payload.context || {}
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to log client error' });
+  }
+});
+
+app.get('/api/logs', requireAdmin, async (req, res) => {
+  try {
+    const { source, level, search, from, to } = req.query;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const conditions = [];
+    const params = [];
+
+    if (source) {
+      params.push(source);
+      conditions.push(`source = $${params.length}`);
+    }
+    if (level) {
+      params.push(level);
+      conditions.push(`level = $${params.length}`);
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(`message ILIKE $${params.length}`);
+    }
+    if (from) {
+      params.push(from);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit);
+    params.push(offset);
+
+    const { rows } = await query(
+      `
+      SELECT id, source, level, message, stack, context, resolved, created_at,
+             COUNT(*) OVER() AS total_count
+      FROM error_logs
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}
+      `,
+      params
+    );
+
+    const total = rows[0] ? Number(rows[0].total_count) : 0;
+    const items = rows.map((row) => ({
+      id: row.id,
+      source: row.source,
+      level: row.level,
+      message: row.message,
+      stack: row.stack,
+      context: row.context || {},
+      createdAt: row.created_at,
+      resolved: row.resolved
+    }));
+
+    res.json({ items, total });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to load logs' });
+  }
+});
+
+app.put('/api/logs/:id/resolve', requireAdmin, async (req, res) => {
+  try {
+    const resolved = req.body?.resolved !== false;
+    const { rows } = await query(
+      'UPDATE error_logs SET resolved = $1 WHERE id = $2 RETURNING id',
+      [resolved, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true, resolved });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to update log' });
+  }
+});
+
+app.delete('/api/logs', requireAdmin, async (req, res) => {
+  try {
+    await query('DELETE FROM error_logs', []);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to clear logs' });
+  }
 });
 
 // --- Products ---
@@ -290,6 +558,26 @@ app.post('/api/products', async (req, res) => {
     [payload.storeId || null, payload]
   );
   res.json({ id: rows[0].id, ...payload });
+});
+
+app.post('/api/products/bulk', async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (items.length === 0) return res.status(400).json({ error: 'items required' });
+
+  try {
+    await withClient(async (client) => {
+      for (const item of items) {
+        await client.query('INSERT INTO products (store_id, data) VALUES ($1, $2)', [
+          item.storeId || null,
+          item
+        ]);
+      }
+    });
+    res.json({ inserted: items.length });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to import products' });
+  }
 });
 
 app.put('/api/products/:id', async (req, res) => {
@@ -471,7 +759,7 @@ app.delete('/api/expenses/:id', async (req, res) => {
 
 // --- Orders ---
 app.get('/api/orders', async (req, res) => {
-  const { storeId, userId, courierId, status, city } = req.query;
+  const { storeId, userId, courierId, status, city, tableNumber, tableSessionId } = req.query;
   const conditions = [];
   const params = [];
 
@@ -494,6 +782,14 @@ app.get('/api/orders', async (req, res) => {
   if (city) {
     params.push(city);
     conditions.push(`store_city = $${params.length}`);
+  }
+  if (tableNumber) {
+    params.push(String(tableNumber));
+    conditions.push(`data->>'tableNumber' = $${params.length}`);
+  }
+  if (tableSessionId) {
+    params.push(String(tableSessionId));
+    conditions.push(`data->>'tableSessionId' = $${params.length}`);
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -561,6 +857,16 @@ app.put('/api/orders/:id/chat', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.put('/api/orders/:id/payment', async (req, res) => {
+  const { paymentMethod } = req.body || {};
+  if (!paymentMethod) return res.status(400).json({ error: 'paymentMethod required' });
+  const { rows } = await query('SELECT data FROM orders WHERE id = $1', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const data = { ...(rows[0].data || {}), paymentMethod };
+  await query('UPDATE orders SET data = $1 WHERE id = $2', [data, req.params.id]);
+  res.json({ ok: true });
+});
+
 app.delete('/api/orders/:id', async (req, res) => {
   await query('DELETE FROM orders WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
@@ -574,9 +880,25 @@ app.get('/api/users/:id/profile', async (req, res) => {
 });
 
 app.put('/api/users/:id/profile', async (req, res) => {
-  const payload = { ...(req.body || {}), uid: normalizeId(req.params.id) };
-  await upsertProfile(req.params.id, payload);
-  res.json(payload);
+  try {
+    const userId = req.params.id;
+    const exists = await ensureUserExists(userId);
+    if (!exists) return res.status(404).json({ error: 'user not found' });
+
+    const payload = { ...(req.body || {}), uid: normalizeId(userId) };
+    const profileSaved = await upsertProfile(userId, payload);
+    if (!profileSaved) return res.status(404).json({ error: 'user not found' });
+    res.json(payload);
+  } catch (error) {
+    console.error(error);
+    await logError({
+      source: 'server',
+      message: 'failed to update profile',
+      stack: error?.stack,
+      context: { route: '/api/users/:id/profile', userId: req.params.id }
+    });
+    res.status(500).json({ error: 'failed to update profile' });
+  }
 });
 
 app.get('/api/users/exists', async (req, res) => {
@@ -587,18 +909,34 @@ app.get('/api/users/exists', async (req, res) => {
 });
 
 app.post('/api/users/:id/addresses', async (req, res) => {
-  const payload = req.body || {};
-  const profile = (await getProfile(req.params.id)) || { uid: req.params.id };
-  const addresses = Array.isArray(profile.addresses) ? [...profile.addresses] : [];
-  const existingIndex = addresses.findIndex((addr) => addr.id === payload.id);
-  if (existingIndex >= 0) {
-    addresses[existingIndex] = payload;
-  } else {
-    addresses.push(payload);
+  try {
+    const userId = req.params.id;
+    const exists = await ensureUserExists(userId);
+    if (!exists) return res.status(404).json({ error: 'user not found' });
+
+    const payload = req.body || {};
+    const profile = (await getProfile(userId)) || { uid: userId };
+    const addresses = Array.isArray(profile.addresses) ? [...profile.addresses] : [];
+    const existingIndex = addresses.findIndex((addr) => addr.id === payload.id);
+    if (existingIndex >= 0) {
+      addresses[existingIndex] = payload;
+    } else {
+      addresses.push(payload);
+    }
+    profile.addresses = addresses;
+    const profileSaved = await upsertProfile(userId, profile);
+    if (!profileSaved) return res.status(404).json({ error: 'user not found' });
+    res.json(profile);
+  } catch (error) {
+    console.error(error);
+    await logError({
+      source: 'server',
+      message: 'failed to save address',
+      stack: error?.stack,
+      context: { route: '/api/users/:id/addresses', userId: req.params.id }
+    });
+    res.status(500).json({ error: 'failed to save address' });
   }
-  profile.addresses = addresses;
-  await upsertProfile(req.params.id, profile);
-  res.json(profile);
 });
 
 // --- User Cards ---
@@ -608,12 +946,49 @@ app.get('/api/users/:id/cards', async (req, res) => {
 });
 
 app.post('/api/users/:id/cards', async (req, res) => {
-  const payload = req.body || {};
-  const { rows } = await query(
-    'INSERT INTO user_cards (user_id, data) VALUES ($1, $2) RETURNING id',
-    [req.params.id, payload]
-  );
-  res.json({ id: rows[0].id, ...payload });
+  try {
+    const userId = req.params.id;
+    const exists = await ensureUserExists(userId);
+    if (!exists) return res.status(404).json({ error: 'user not found' });
+
+    const payload = req.body || {};
+    const { rows } = await query(
+      'INSERT INTO user_cards (user_id, data) VALUES ($1, $2) RETURNING id',
+      [userId, payload]
+    );
+    res.json({ id: rows[0].id, ...payload });
+  } catch (error) {
+    console.error(error);
+    await logError({
+      source: 'server',
+      message: 'failed to save card',
+      stack: error?.stack,
+      context: { route: '/api/users/:id/cards', userId: req.params.id }
+    });
+    res.status(500).json({ error: 'failed to save card' });
+  }
+});
+
+// --- Error Handler ---
+app.use(async (err, req, res, _next) => {
+  try {
+    await logError({
+      source: 'server',
+      message: err?.message || 'Unhandled error',
+      stack: err?.stack,
+      context: {
+        route: req.originalUrl,
+        method: req.method,
+        params: req.params,
+        query: req.query,
+        body: req.body
+      }
+    });
+  } catch (error) {
+    console.error('Failed to log server error', error);
+  }
+
+  res.status(500).json({ error: 'internal server error' });
 });
 
 app.delete('/api/users/:id/cards/:cardId', async (req, res) => {
