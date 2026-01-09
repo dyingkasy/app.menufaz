@@ -113,6 +113,39 @@ const mapRow = (row) => {
 
 const mapRows = (rows) => rows.map(mapRow);
 
+const normalizeStoreRatings = (storeData = {}) => {
+  const rating = Number(storeData.rating);
+  const ratingCount = Number(storeData.ratingCount);
+  return {
+    ...storeData,
+    rating: Number.isFinite(rating) && rating >= 0 ? rating : 0,
+    ratingCount: Number.isFinite(ratingCount) && ratingCount >= 0 ? ratingCount : 0
+  };
+};
+
+const refreshStoreRating = async (client, storeId) => {
+  const { rows: reviewRows } = await client.query('SELECT data FROM reviews WHERE store_id = $1', [storeId]);
+  const ratings = reviewRows
+    .map((row) => Number(row.data?.rating))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const ratingCount = ratings.length;
+  const rating =
+    ratingCount > 0
+      ? Number((ratings.reduce((acc, value) => acc + value, 0) / ratingCount).toFixed(1))
+      : 0;
+
+  const { rows: storeRows } = await client.query('SELECT data, city FROM stores WHERE id = $1', [storeId]);
+  if (storeRows.length === 0) return;
+  const storeData = normalizeStoreRatings(storeRows[0].data || {});
+  storeData.rating = rating;
+  storeData.ratingCount = ratingCount;
+  await client.query('UPDATE stores SET data = $1, city = $2 WHERE id = $3', [
+    storeData,
+    storeData.city || null,
+    storeId
+  ]);
+};
+
 const parseOrderRow = (row) => {
   if (!row) return null;
   return {
@@ -245,11 +278,12 @@ app.get('/api/stores/:id', async (req, res) => {
 
 app.post('/api/stores', async (req, res) => {
   const payload = req.body || {};
+  const normalizedPayload = normalizeStoreRatings(payload);
   const { rows } = await query(
     'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3) RETURNING id',
-    [payload.ownerId || null, payload.city || null, payload]
+    [normalizedPayload.ownerId || null, normalizedPayload.city || null, normalizedPayload]
   );
-  res.json({ id: rows[0].id, ...payload });
+  res.json({ id: rows[0].id, ...normalizedPayload });
 });
 
 app.post('/api/stores/with-user', async (req, res) => {
@@ -292,13 +326,13 @@ app.post('/api/stores/with-user', async (req, res) => {
       ]
     );
 
-    const fullStoreData = {
+    const fullStoreData = normalizeStoreRatings({
       ...storeData,
       ownerId: userId,
       city: storeData.city,
       phone: storeData.whatsapp || storeData.phone || phone,
       email
-    };
+    });
 
     await client.query(
       'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3)',
@@ -399,7 +433,8 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
     const storeData = {
       name: payload.storeName,
       category: 'Lanches',
-      rating: 5,
+      rating: 0,
+      ratingCount: 0,
       deliveryTime: '30-40 min',
       pickupTime: '20-30 min',
       deliveryFee: 5,
@@ -661,6 +696,60 @@ app.put('/api/coupons/:id', async (req, res) => {
 app.delete('/api/coupons/:id', async (req, res) => {
   await query('DELETE FROM coupons WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
+});
+
+// --- Reviews ---
+app.get('/api/reviews', async (req, res) => {
+  const storeId = req.query.storeId;
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  const { rows } = await query(
+    'SELECT id, data, created_at FROM reviews WHERE store_id = $1 ORDER BY created_at DESC',
+    [storeId]
+  );
+  const response = rows.map((row) => ({ id: row.id, createdAt: row.created_at, ...row.data }));
+  res.json(response);
+});
+
+app.post('/api/reviews', async (req, res) => {
+  const payload = req.body || {};
+  const storeId = payload.storeId;
+  const rating = Number(payload.rating);
+  const comment = (payload.comment || '').trim();
+  if (!storeId || !Number.isFinite(rating) || rating < 1 || rating > 5 || !comment) {
+    return res.status(400).json({ error: 'storeId, rating (1-5), and comment required' });
+  }
+
+  const authPayload = getAuthPayload(req);
+  const profileData = authPayload ? await getProfile(authPayload.sub) : null;
+  const userName =
+    (payload.userName || '').trim() ||
+    (profileData?.name || '').trim() ||
+    (profileData?.email || '').trim() ||
+    'Cliente';
+
+  const reviewData = {
+    storeId,
+    userName,
+    rating,
+    comment,
+    date: new Date().toISOString()
+  };
+
+  try {
+    let reviewRow = null;
+    await withClient(async (client) => {
+      const { rows } = await client.query(
+        'INSERT INTO reviews (store_id, data) VALUES ($1, $2) RETURNING id, created_at',
+        [storeId, reviewData]
+      );
+      reviewRow = rows[0];
+      await refreshStoreRating(client, storeId);
+    });
+    res.json({ id: reviewRow.id, createdAt: reviewRow.created_at, ...reviewData });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to add review' });
+  }
 });
 
 // --- Couriers ---

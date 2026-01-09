@@ -2,9 +2,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, MapPin, Heart, Share2, Sparkles, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
 import { Store, Product, CartItem, Review, PizzaFlavor } from '../types';
-import { getProductsByStore, getPizzaFlavorsByStore } from '../services/db';
+import { getProductsByStore, getPizzaFlavorsByStore, getReviewsByStore, addReview } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
 import StoreReviews from './StoreReviews';
+import { useAuth } from '../contexts/AuthContext';
 
 interface StoreDetailsProps {
   store: Store;
@@ -27,11 +28,13 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     tableNumber,
     onTrackTable
 }) => {
+  const { user } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [storeProducts, setStoreProducts] = useState<Product[]>([]);
   const [storeFlavors, setStoreFlavors] = useState<PizzaFlavor[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  const [loadingReviews, setLoadingReviews] = useState(true);
   
   // Scroll logic
   const [scrolled, setScrolled] = useState(false);
@@ -78,9 +81,45 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   // Reviews
   const [reviews, setReviews] = useState<Review[]>([]); 
 
-  const handleAddReview = (rating: number, comment: string) => {
-      // Placeholder
+  useEffect(() => {
+      let active = true;
+      const loadReviews = async () => {
+          setLoadingReviews(true);
+          try {
+              const data = await getReviewsByStore(store.id);
+              if (active) setReviews(data);
+          } catch (error) {
+              console.error('Erro ao carregar avaliações', error);
+          } finally {
+              if (active) setLoadingReviews(false);
+          }
+      };
+      loadReviews();
+      return () => {
+          active = false;
+      };
+  }, [store.id]);
+
+  const handleAddReview = async (rating: number, comment: string) => {
+      try {
+          const review = await addReview({
+              storeId: store.id,
+              rating,
+              comment,
+              userName: user?.name || user?.email
+          });
+          setReviews(prev => [review, ...prev]);
+      } catch (error) {
+          console.error('Erro ao enviar avaliação', error);
+          alert('Erro ao enviar avaliação. Tente novamente.');
+      }
   };
+
+  const ratingCount = Number(store.ratingCount ?? 0) || reviews.length;
+  const averageRating = reviews.length > 0
+      ? reviews.reduce((acc, review) => acc + review.rating, 0) / reviews.length
+      : Number(store.rating) || 0;
+  const displayRating = ratingCount > 0 ? averageRating.toFixed(1) : 'Novo';
 
   // Group products
   const categories = useMemo(() => {
@@ -314,8 +353,8 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-y-2 gap-x-6 text-sm text-gray-600 dark:text-gray-300 mb-4">
-                         <span className="flex items-center gap-1 text-yellow-500 font-bold bg-yellow-50 dark:bg-yellow-900/20 px-2 py-0.5 rounded-lg">
-                             <Star size={14} fill="currentColor"/> {store.rating}
+                         <span className={`flex items-center gap-1 font-bold px-2 py-0.5 rounded-lg ${ratingCount > 0 ? 'text-yellow-500 bg-yellow-50 dark:bg-yellow-900/20' : 'text-gray-400 bg-gray-100 dark:bg-slate-800'}`}>
+                             <Star size={14} fill={ratingCount > 0 ? 'currentColor' : 'none'} /> {displayRating}
                          </span>
                          <span className="flex items-center gap-1">
                              <span className="w-1 h-1 rounded-full bg-gray-300"></span>
@@ -474,6 +513,12 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                         </div>
                     );
                 })
+            )}
+
+            {loadingReviews ? (
+                <div className="py-10 text-center text-gray-500">Carregando avaliações...</div>
+            ) : (
+                <StoreReviews reviews={reviews} onAddReview={handleAddReview} storeName={store.name} />
             )}
         </div>
 

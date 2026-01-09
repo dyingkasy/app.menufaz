@@ -10,6 +10,10 @@ interface StoreCardProps {
 }
 
 const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
+  const ratingCount = Number(store.ratingCount ?? 0);
+  const ratingValue = Number(store.rating) || 0;
+  const ratingLabel = ratingCount > 0 ? ratingValue.toFixed(1) : 'Novo';
+
   return (
     <div 
       onClick={() => onClick(store)}
@@ -41,9 +45,9 @@ const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
           <h3 className="font-bold text-gray-800 dark:text-white text-lg line-clamp-1 group-hover:text-red-600 dark:group-hover:text-red-400 transition-colors">
             {store.name}
           </h3>
-          <div className="flex items-center gap-1 text-yellow-500 font-semibold text-sm">
-            <Star size={14} fill="currentColor" />
-            {store.rating}
+          <div className={`flex items-center gap-1 font-semibold text-sm ${ratingCount > 0 ? 'text-yellow-500' : 'text-gray-400'}`}>
+            <Star size={14} fill={ratingCount > 0 ? 'currentColor' : 'none'} />
+            {ratingLabel}
           </div>
         </div>
         

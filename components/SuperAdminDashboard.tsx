@@ -189,7 +189,8 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                     name: newStore.name.trim(),
                     customUrl: newStore.customUrl.trim() || undefined,
                     category: newStore.category,
-                    rating: 5,
+                    rating: 0,
+                    ratingCount: 0,
                     deliveryTime: newStore.deliveryTime.trim() || '30-40 min',
                     pickupTime: newStore.pickupTime.trim() || '20-30 min',
                     deliveryFee: Number(newStore.deliveryFee) || 0,
@@ -1717,7 +1718,12 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
-                                        {filteredStores.map((store) => (
+                                        {filteredStores.map((store) => {
+                                            const ratingCount = Number(store.ratingCount ?? 0);
+                                            const ratingValue = Number(store.rating) || 0;
+                                            const ratingLabel = ratingCount > 0 ? ratingValue.toFixed(1) : 'Sem avaliações';
+
+                                            return (
                                             <tr key={store.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors">
                                                 <td className="px-6 py-4">
                                                     <div className="flex items-center gap-3">
@@ -1745,8 +1751,8 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                         )}
                                                     </button>
                                                 </td>
-                                                <td className="px-6 py-4 text-sm font-bold text-yellow-600">
-                                                    ⭐ {store.rating}
+                                                <td className={`px-6 py-4 text-sm font-bold ${ratingCount > 0 ? 'text-yellow-600' : 'text-gray-400'}`}>
+                                                    ⭐ {ratingLabel}
                                                 </td>
                                                 <td className="px-6 py-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
@@ -1774,7 +1780,8 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                     </div>
                                                 </td>
                                             </tr>
-                                        ))}
+                                        );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>

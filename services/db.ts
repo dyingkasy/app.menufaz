@@ -8,6 +8,7 @@ import {
   Order,
   PizzaFlavor,
   Product,
+  Review,
   Store,
   StoreRequest,
   ErrorLogEntry
@@ -208,6 +209,24 @@ export const saveCoupon = async (coupon: Coupon & { storeId?: string }) => {
 export const deleteCoupon = async (couponId: string) => {
   ensureApi();
   await apiFetch(`/coupons/${couponId}`, { method: 'DELETE' });
+};
+
+export const getReviewsByStore = async (storeId: string): Promise<Review[]> => {
+  ensureApi();
+  return apiFetch<Review[]>(`/reviews?storeId=${encodeURIComponent(storeId)}`);
+};
+
+export const addReview = async (payload: {
+  storeId: string;
+  rating: number;
+  comment: string;
+  userName?: string;
+}) => {
+  ensureApi();
+  return apiFetch<Review>('/reviews', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
 };
 
 export const getCouriersByStore = async (storeId: string): Promise<Courier[]> => {

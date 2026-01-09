@@ -47,6 +47,7 @@ export interface Store {
   category: string;
   description?: string;
   rating: number;
+  ratingCount?: number;
   deliveryTime: string;
   pickupTime?: string;
   deliveryFee: number;

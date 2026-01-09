@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS coupons (
   data JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
 CREATE TABLE IF NOT EXISTS couriers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
@@ -106,6 +113,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_courier_id ON orders(courier_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_store_city ON orders(store_city);
+CREATE INDEX IF NOT EXISTS idx_reviews_store_id ON reviews(store_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at);
 
 INSERT INTO app_settings (id, data)
 VALUES (1, '{}'::jsonb)
