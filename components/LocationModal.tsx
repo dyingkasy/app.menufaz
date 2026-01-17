@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, MapPin, Navigation, Search, Plus, Home, Briefcase, Check, Loader2, Tag, AlertCircle, ChevronLeft } from 'lucide-react';
 import { Address, Coordinates, SearchResult } from '../types';
-import { getReverseGeocoding, searchAddress, getCurrentLocation, fetchCepData, GEO_API_ENABLED } from '../utils/geo';
+import { getReverseGeocoding, searchAddress, getCurrentLocation, fetchCepData, GEO_API_ENABLED, ensureGoogleMapsLoaded } from '../utils/geo';
 
 declare global {
   interface Window {
@@ -31,6 +31,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
     savedAddresses,
     canClose = true 
 }) => {
+  const hasGoogleMaps = typeof window !== 'undefined' && !!window.google && !!window.google.maps;
   const [step, setStep] = useState<ModalStep>('SEARCH');
   
   // Search State
@@ -38,6 +39,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLocatingUser, setIsLocatingUser] = useState(false);
+  const [hasResolvedCoords, setHasResolvedCoords] = useState(false);
 
   // Map / Pin State
   const [mapCoordinates, setMapCoordinates] = useState<Coordinates>(DEFAULT_COORDS);
@@ -51,6 +53,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
   const [addressState, setAddressState] = useState('');
   const [streetNumber, setStreetNumber] = useState('');
   const [complement, setComplement] = useState('');
+  const [cep, setCep] = useState('');
   const [labelType, setLabelType] = useState<'Casa' | 'Trabalho' | 'Outro'>('Casa');
   const [customLabel, setCustomLabel] = useState('');
   
@@ -69,6 +72,8 @@ const LocationModal: React.FC<LocationModalProps> = ({
       setSearchText('');
       setSearchResults([]);
       setNumberError(false);
+      setCep('');
+      setHasResolvedCoords(false);
     } else {
         // CLEANUP MAP INSTANCE ON CLOSE TO FIX "BLANK MAP" ISSUE
         mapRef.current = null;
@@ -80,20 +85,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
   useEffect(() => {
       const timer = setTimeout(async () => {
           if (!GEO_API_ENABLED) {
-              if (searchText.length > 3) {
-                  setSearchResults([
-                      {
-                          street: searchText,
-                          district: '',
-                          fullAddress: searchText,
-                          coordinates: DEFAULT_COORDS,
-                          city: '',
-                          state: ''
-                      }
-                  ]);
-              } else {
-                  setSearchResults([]);
-              }
+              setSearchResults([]);
               return;
           }
 
@@ -101,7 +93,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
               // Verifica se é CEP (XXXXX-XXX ou XXXXXXXX)
               const cleanSearch = searchText.replace(/\D/g, '');
               
-              if (cleanSearch.length === 8) {
+                  if (cleanSearch.length === 8) {
                   // É UM CEP: Busca dados precisos no ViaCEP
                   setIsSearching(true);
                   try {
@@ -109,7 +101,13 @@ const LocationModal: React.FC<LocationModalProps> = ({
                       if (cepData) {
                           // Se achou o CEP, buscamos a coordenada disso no Google para o mapa
                           // Mas PRESERVAMOS os dados do ViaCEP que são mais precisos
-                          const results = await searchAddress(cepData.fullText);
+                          let results = await searchAddress(cepData.fullText);
+                          if (results.length === 0 && cepData.city) {
+                              results = await searchAddress(`${cepData.city} - ${cepData.state}`);
+                          }
+                          if (results.length === 0) {
+                              results = [];
+                          }
                           
                           // Prioriza dados do ViaCEP para texto, mas usa coords do Google
                           const enrichedResults: SearchResult[] = results.map(r => ({
@@ -176,6 +174,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
 
   const handleSelectSearchResult = (result: SearchResult) => {
       setMapCoordinates(result.coordinates);
+      setHasResolvedCoords(true);
       setStep('CONFIRM_PIN');
       
       // Pre-fill inputs with high confidence data if available (e.g. from CEP)
@@ -193,9 +192,23 @@ const LocationModal: React.FC<LocationModalProps> = ({
       }
       
       if (result.state) setAddressState(result.state);
+      setCep('');
       
       // Resetar número ao selecionar novo endereço da busca (pois busca geralmente não tem número exato)
       setStreetNumber(''); 
+  };
+  
+  const handleManualAddress = () => {
+      setMapCoordinates(DEFAULT_COORDS);
+      setHasResolvedCoords(false);
+      setAddressStreet('');
+      setAddressDistrict('');
+      setAddressCity('');
+      setAddressState('');
+      setStreetNumber('');
+      setComplement('');
+      setCep('');
+      setStep('CONFIRM_PIN');
   };
 
   // --- MAP LOGIC ---
@@ -205,7 +218,44 @@ const LocationModal: React.FC<LocationModalProps> = ({
       // Delay map initialization slightly to ensure DOM is ready
       if (!GEO_API_ENABLED) return;
       if (isOpen && step === 'CONFIRM_PIN' && mapContainerRef.current) {
-          if (!window.google) return;
+          if (!window.google) {
+              ensureGoogleMapsLoaded().then(() => {
+                  if (mapRef.current || !mapContainerRef.current || !window.google) return;
+                  const map = new window.google.maps.Map(mapContainerRef.current, {
+                      center: mapCoordinates,
+                      zoom: 18,
+                      disableDefaultUI: true,
+                      zoomControl: false,
+                      clickableIcons: false,
+                      gestureHandling: 'greedy'
+                  });
+
+                  mapRef.current = map;
+
+                  map.addListener('dragstart', () => setIsMapDragging(true));
+                  map.addListener('dragend', () => setIsMapDragging(false));
+                  
+                  map.addListener('idle', () => {
+                      setIsMapDragging(false);
+                      if (isProgrammaticMoveRef.current) {
+                          isProgrammaticMoveRef.current = false;
+                          return;
+                      }
+                      const center = map.getCenter();
+                      // Only update if changed significantly to prevent loops
+                      setMapCoordinates(prev => {
+                          if (Math.abs(prev.lat - center.lat()) < 0.00001 && Math.abs(prev.lng - center.lng()) < 0.00001) {
+                              return prev;
+                          }
+                          const newCoords = { lat: center.lat(), lng: center.lng() };
+                          // Update address details when map settles by user drag
+                          updateAddressFromCoords(newCoords);
+                          return newCoords;
+                      });
+                  });
+              });
+              return;
+          }
 
           // Se já existe, não recria, mas garante resize
           if (mapRef.current) {
@@ -270,15 +320,18 @@ const LocationModal: React.FC<LocationModalProps> = ({
           const data = await getReverseGeocoding(coords.lat, coords.lng);
           
           if (data) {
+              setHasResolvedCoords(true);
               setAddressStreet(data.street || 'Rua sem nome');
               setAddressDistrict(data.district);
               setAddressCity(data.city);
               setAddressState(data.state);
+              setCep('');
               // Não sobrescreve número se o usuário já digitou, a menos que venha vazio
               // Se veio do GPS, o número costuma ser aproximado, então é bom preencher mas deixar editar
               if (data.number) setStreetNumber(data.number);
               setNumberError(false);
           } else {
+              setHasResolvedCoords(false);
               setAddressStreet('Endereço não identificado');
               setAddressDistrict('');
               setAddressCity('');
@@ -291,7 +344,27 @@ const LocationModal: React.FC<LocationModalProps> = ({
       }
   };
 
-  const handleConfirm = (e: React.MouseEvent) => {
+  const handleCepLookup = async () => {
+      const cleanCep = cep.replace(/\D/g, '');
+      if (cleanCep.length !== 8) return;
+      try {
+          const data = await fetchCepData(cleanCep);
+          if (data) {
+              setAddressStreet(data.street);
+              setAddressDistrict(data.district);
+              setAddressCity(data.city);
+              setAddressState(data.state);
+              const results = await searchAddress(data.fullText);
+              if (results.length > 0) {
+                  setMapCoordinates(results[0].coordinates);
+              }
+          }
+      } catch (e) {
+          console.error(e);
+      }
+  };
+
+  const handleConfirm = async (e: React.MouseEvent) => {
       e.preventDefault(); // Stop form submission
       e.stopPropagation();
 
@@ -303,6 +376,35 @@ const LocationModal: React.FC<LocationModalProps> = ({
           return;
       }
 
+      let coordsToSave = mapCoordinates;
+      if (!hasResolvedCoords) {
+          const parts = [addressStreet, streetNumber, addressDistrict, addressCity, addressState]
+              .map((value) => String(value || '').trim())
+              .filter(Boolean);
+          const query = parts.join(', ');
+          if (!query) {
+              alert('Informe um endereço válido para localizar no mapa.');
+              return;
+          }
+          setIsLoadingAddressDetails(true);
+          try {
+              const results = await searchAddress(query);
+              if (!results.length) {
+                  alert('Não foi possível localizar o endereço informado.');
+                  return;
+              }
+              coordsToSave = results[0].coordinates;
+              setMapCoordinates(coordsToSave);
+              setHasResolvedCoords(true);
+          } catch (error) {
+              console.error(error);
+              alert('Não foi possível localizar o endereço informado.');
+              return;
+          } finally {
+              setIsLoadingAddressDetails(false);
+          }
+      }
+
       const finalLabel = labelType === 'Outro' ? (customLabel || 'Outro') : labelType;
       
       const newAddress: Address = {
@@ -310,7 +412,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
           label: finalLabel,
           street: addressStreet,
           number: streetNumber,
-          coordinates: mapCoordinates,
+          coordinates: coordsToSave,
           city: addressCity,
           state: addressState,
           district: addressDistrict
@@ -330,7 +432,7 @@ const LocationModal: React.FC<LocationModalProps> = ({
             onClick={canClose ? onClose : undefined} 
         />
 
-        <div className="relative bg-white dark:bg-slate-900 w-full md:w-[480px] md:rounded-2xl rounded-t-3xl shadow-2xl flex flex-col h-[90vh] md:h-[700px] overflow-hidden animate-slide-up z-10">
+        <div className="relative bg-white dark:bg-slate-900 w-full md:w-[560px] md:rounded-3xl rounded-t-3xl shadow-2xl flex flex-col h-[92vh] md:h-[86vh] overflow-hidden animate-slide-up z-10">
             
             {/* HEADER */}
             <div className="flex items-center justify-between px-4 py-4 border-b border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 z-20">
@@ -345,11 +447,9 @@ const LocationModal: React.FC<LocationModalProps> = ({
                     </h3>
                 </div>
                 
-                {canClose && (
-                    <button onClick={onClose} className="p-2 bg-gray-100 dark:bg-slate-800 rounded-full text-gray-500 hover:text-red-600 transition-colors">
-                        <X size={20} />
-                    </button>
-                )}
+                <button onClick={onClose} className="p-2 bg-gray-100 dark:bg-slate-800 rounded-full text-gray-500 hover:text-red-600 transition-colors">
+                    <X size={20} />
+                </button>
             </div>
 
             {/* CONTENT */}
@@ -363,17 +463,17 @@ const LocationModal: React.FC<LocationModalProps> = ({
                     )}
 
                     {/* Search Input */}
-                    <div className="relative mb-4">
+                    <div className="relative mb-5">
                         <input 
                             type="text" 
                             value={searchText}
                             onChange={(e) => setSearchText(e.target.value)}
                             placeholder="Digite CEP ou Endereço" 
-                            className="w-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl py-3.5 pl-11 pr-4 text-gray-800 dark:text-white shadow-sm focus:ring-2 focus:ring-red-500 outline-none"
+                            className="w-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl py-4 pl-12 pr-4 text-base text-gray-800 dark:text-white shadow-sm focus:ring-2 focus:ring-red-500 outline-none"
                             autoFocus
                         />
-                        <Search className="absolute left-4 top-3.5 text-gray-400" size={20} />
-                        {isSearching && <Loader2 className="absolute right-4 top-3.5 text-red-500 animate-spin" size={20} />}
+                        <Search className="absolute left-4 top-4 text-gray-400" size={20} />
+                        {isSearching && <Loader2 className="absolute right-4 top-4 text-red-500 animate-spin" size={20} />}
                     </div>
 
                     {/* Search Results List */}
@@ -415,6 +515,18 @@ const LocationModal: React.FC<LocationModalProps> = ({
                             </p>
                         </div>
                     </button>
+                    <button
+                        onClick={handleManualAddress}
+                        className="w-full flex items-center gap-3 p-4 mb-6 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 text-slate-700 dark:text-gray-200 rounded-xl transition-all shadow-sm hover:border-red-200 hover:bg-red-50 dark:hover:bg-slate-800"
+                    >
+                        <div className="w-10 h-10 bg-gray-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
+                            <MapPin size={20} className="text-red-600" />
+                        </div>
+                        <div className="text-left">
+                            <p className="font-bold text-sm">Digitar endereco manualmente</p>
+                            <p className="text-xs opacity-80">Sem geolocalizacao</p>
+                        </div>
+                    </button>
 
                     {/* Saved Addresses */}
                     <div className="space-y-3">
@@ -440,107 +552,147 @@ const LocationModal: React.FC<LocationModalProps> = ({
                     </div>
                 </div>
             ) : (
-                <div className="flex-1 flex flex-col h-full relative bg-slate-100 dark:bg-slate-950">
-                    {/* Map */}
-                    <div className="relative w-full flex-grow min-h-[300px]">
-                        {GEO_API_ENABLED ? (
-                            <>
-                                <div ref={mapContainerRef} className="absolute inset-0 w-full h-full" />
-                                
-                                {/* Center Pin */}
-                                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none -mt-8 flex flex-col items-center">
-                                    <div className={`bg-slate-900 text-white text-[10px] font-bold px-3 py-1 rounded-full shadow-lg mb-1 transition-opacity ${isMapDragging ? 'opacity-0' : 'opacity-100'}`}>
-                                        {isLoadingAddressDetails ? 'Carregando...' : 'É aqui?'}
-                                    </div>
-                                    <MapPin size={48} className="text-red-600 fill-red-600 drop-shadow-2xl" />
-                                    <div className="w-2 h-1 bg-black/20 rounded-full blur-[1px]"></div>
-                                </div>
-                            </>
-                        ) : (
-                            <div className="absolute inset-0 flex items-center justify-center bg-slate-200 dark:bg-slate-900 text-slate-600 dark:text-slate-300 text-sm font-semibold">
-                                Mapa desativado temporariamente
-                            </div>
-                        )}
-                    </div>
-
+                <div className="flex-1 flex flex-col h-full relative bg-slate-100 dark:bg-slate-950 min-h-0">
                     {/* Address Form Sheet */}
-                    <div className="bg-white dark:bg-slate-900 rounded-t-3xl shadow-[0_-4px_20px_rgba(0,0,0,0.1)] p-5 z-20 relative -mt-4">
-                        <div className="w-12 h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full mx-auto mb-4"></div>
+                    <div className="bg-white dark:bg-slate-900 rounded-t-3xl shadow-[0_-8px_30px_rgba(0,0,0,0.12)] z-20 relative flex flex-col h-full overflow-hidden">
+                        <div className="px-5 pt-4">
+                            <div className="w-12 h-1.5 bg-gray-200 dark:bg-slate-700 rounded-full mx-auto"></div>
+                        </div>
                         
-                        <div className="mb-4">
-                            <div className="flex gap-3 items-start">
-                                <MapPin className="text-red-600 mt-1 shrink-0" size={20} />
-                                <div>
-                                    <h4 className="font-bold text-slate-900 dark:text-white text-lg leading-tight">
-                                        {addressStreet || 'Rua desconhecida'}
-                                    </h4>
-                                    <p className="text-sm text-gray-500 dark:text-gray-400">{addressDistrict}{addressCity ? ` - ${addressCity}` : ''}</p>
+                        <div className="space-y-5 overflow-y-auto px-5 pt-6 pb-6 flex-1 min-h-0">
+                            <div>
+                                <div className="flex gap-3 items-start">
+                                    <MapPin className="text-red-600 mt-1 shrink-0" size={20} />
+                                    <div>
+                                        <h4 className="font-bold text-slate-900 dark:text-white text-xl leading-tight font-display">
+                                            Preencha o endereco
+                                        </h4>
+                                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                                            Informe os dados abaixo para entrega.
+                                        </p>
+                                    </div>
                                 </div>
                             </div>
+
+                            <div className="grid grid-cols-3 gap-3">
+                                <div className="col-span-1">
+                                    <label className={`text-[10px] font-bold uppercase mb-1 block ${numberError ? 'text-red-600' : 'text-gray-400'}`}>Número *</label>
+                                    <input 
+                                        id="street-number-input"
+                                        type="text" 
+                                        value={streetNumber}
+                                        onChange={(e) => {
+                                            setStreetNumber(e.target.value);
+                                            if (e.target.value) setNumberError(false);
+                                        }}
+                                        placeholder="Nº"
+                                        className={`w-full bg-gray-50 dark:bg-slate-800 border rounded-xl p-3 text-center font-bold text-slate-900 dark:text-white focus:ring-2 outline-none transition-all ${numberError ? 'border-red-500 ring-red-100 focus:ring-red-500 bg-red-50 dark:bg-red-900/10' : 'border-gray-200 dark:border-slate-700 focus:ring-red-500'}`}
+                                    />
+                                    {numberError && <span className="text-[10px] text-red-500 font-bold mt-1 block">Obrigatório</span>}
+                                </div>
+                                <div className="col-span-2">
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Complemento</label>
+                                    <input 
+                                        type="text" 
+                                        value={complement}
+                                        onChange={(e) => setComplement(e.target.value)}
+                                        placeholder="Apto, Bloco..."
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="col-span-2">
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">CEP</label>
+                                    <input 
+                                        type="text"
+                                        value={cep}
+                                        onChange={(e) => setCep(e.target.value)}
+                                        onBlur={handleCepLookup}
+                                        placeholder="00000-000"
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                                <div className="col-span-2">
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Rua</label>
+                                    <input 
+                                        type="text"
+                                        value={addressStreet}
+                                        onChange={(e) => setAddressStreet(e.target.value)}
+                                        placeholder="Rua / Logradouro"
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Bairro</label>
+                                    <input 
+                                        type="text"
+                                        value={addressDistrict}
+                                        onChange={(e) => setAddressDistrict(e.target.value)}
+                                        placeholder="Bairro"
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Cidade</label>
+                                    <input 
+                                        type="text"
+                                        value={addressCity}
+                                        onChange={(e) => setAddressCity(e.target.value)}
+                                        placeholder="Cidade"
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                                <div className="col-span-2">
+                                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Estado</label>
+                                    <input 
+                                        type="text"
+                                        value={addressState}
+                                        onChange={(e) => setAddressState(e.target.value)}
+                                        placeholder="UF"
+                                        className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="text-[10px] font-bold text-gray-400 uppercase mb-2 block">Salvar como</label>
+                                <div className="flex gap-2">
+                                    {(['Casa', 'Trabalho', 'Outro'] as const).map(type => (
+                                        <button
+                                            key={type}
+                                            onClick={() => setLabelType(type)}
+                                            type="button"
+                                            className={`px-4 py-2 rounded-full text-sm font-bold border transition-colors ${labelType === type ? 'bg-red-600 text-white border-red-600' : 'bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-slate-700'}`}
+                                        >
+                                            {type}
+                                        </button>
+                                    ))}
+                                </div>
+                                {labelType === 'Outro' && (
+                                    <input 
+                                        type="text"
+                                        value={customLabel}
+                                        onChange={(e) => setCustomLabel(e.target.value)}
+                                        placeholder="Nome do local (ex: Casa da Namorada)"
+                                        className="mt-2 w-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg p-2 text-sm focus:ring-red-500 outline-none dark:text-white"
+                                    />
+                                )}
+                            </div>
                         </div>
 
-                        <div className="flex gap-3 mb-4">
-                            <div className="w-28 shrink-0">
-                                <label className={`text-[10px] font-bold uppercase mb-1 block ${numberError ? 'text-red-600' : 'text-gray-400'}`}>Número *</label>
-                                <input 
-                                    id="street-number-input"
-                                    type="text" 
-                                    value={streetNumber}
-                                    onChange={(e) => {
-                                        setStreetNumber(e.target.value);
-                                        if (e.target.value) setNumberError(false);
-                                    }}
-                                    placeholder="Nº"
-                                    className={`w-full bg-gray-50 dark:bg-slate-800 border rounded-lg p-3 text-center font-bold text-slate-900 dark:text-white focus:ring-2 outline-none transition-all ${numberError ? 'border-red-500 ring-red-100 focus:ring-red-500 bg-red-50 dark:bg-red-900/10' : 'border-gray-200 dark:border-slate-700 focus:ring-red-500'}`}
-                                />
-                                {numberError && <span className="text-[10px] text-red-500 font-bold mt-1 block">Obrigatório</span>}
-                            </div>
-                            <div className="flex-1">
-                                <label className="text-[10px] font-bold text-gray-400 uppercase mb-1 block">Complemento</label>
-                                <input 
-                                    type="text" 
-                                    value={complement}
-                                    onChange={(e) => setComplement(e.target.value)}
-                                    placeholder="Apto, Bloco..."
-                                    className="w-full bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg p-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
-                                />
-                            </div>
+                        <div className="px-5 pb-5 pt-3 border-t border-slate-100 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm">
+                            <button 
+                                onClick={handleConfirm}
+                                type="button" 
+                                disabled={isLoadingAddressDetails}
+                                className="w-full bg-red-600 text-white font-bold py-4 rounded-2xl hover:bg-red-700 transition-colors shadow-lg shadow-red-600/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2 moving-border"
+                                style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
+                            >
+                                {isLoadingAddressDetails ? <Loader2 className="animate-spin" /> : <Check size={20} />}
+                                Confirmar Endereço
+                            </button>
                         </div>
-
-                        <div className="mb-6">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase mb-2 block">Salvar como</label>
-                            <div className="flex gap-2">
-                                {(['Casa', 'Trabalho', 'Outro'] as const).map(type => (
-                                    <button
-                                        key={type}
-                                        onClick={() => setLabelType(type)}
-                                        type="button"
-                                        className={`px-4 py-2 rounded-full text-sm font-bold border transition-colors ${labelType === type ? 'bg-red-600 text-white border-red-600' : 'bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-slate-700'}`}
-                                    >
-                                        {type}
-                                    </button>
-                                ))}
-                            </div>
-                            {labelType === 'Outro' && (
-                                <input 
-                                    type="text"
-                                    value={customLabel}
-                                    onChange={(e) => setCustomLabel(e.target.value)}
-                                    placeholder="Nome do local (ex: Casa da Namorada)"
-                                    className="mt-2 w-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg p-2 text-sm focus:ring-red-500 outline-none dark:text-white"
-                                />
-                            )}
-                        </div>
-
-                        <button 
-                            onClick={handleConfirm}
-                            type="button" 
-                            disabled={isLoadingAddressDetails}
-                            className="w-full bg-red-600 text-white font-bold py-4 rounded-xl hover:bg-red-700 transition-colors shadow-lg shadow-red-600/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                        >
-                            {isLoadingAddressDetails ? <Loader2 className="animate-spin" /> : <Check size={20} />}
-                            Confirmar Endereço
-                        </button>
                     </div>
                 </div>
             )}

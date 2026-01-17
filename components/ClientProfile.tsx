@@ -1,11 +1,11 @@
 
 
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, User, Mail, Phone, MapPin, CreditCard, LogOut, Plus, Trash2, ShieldCheck, Home, Briefcase, Edit2, Loader2, Landmark, Save, X, CheckCircle } from 'lucide-react';
+import { ArrowLeft, User, Mail, Phone, MapPin, LogOut, Plus, Trash2, ShieldCheck, Home, Briefcase, Edit2, Loader2, Landmark, Save } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import LocationModal from './LocationModal';
 import { Address } from '../types';
-import { addUserAddress, saveUserCard, getUserCards, deleteUserCard, EncryptedCard, updateUserProfile } from '../services/db';
+import { addUserAddress, updateUserProfile } from '../services/db';
 
 interface ClientProfileProps {
     onBack: () => void;
@@ -30,51 +30,10 @@ const isValidCPF = (cpf: string) => {
     return true;
 };
 
-const luhnCheck = (val: string) => {
-    if (!val) return false;
-    let checksum = 0;
-    let j = 1;
-    for (let i = val.length - 1; i >= 0; i--) {
-        let calc = 0;
-        calc = Number(val.charAt(i)) * j;
-        if (calc > 9) {
-            checksum = checksum + 1;
-            calc = calc - 10;
-        }
-        checksum = checksum + calc;
-        if (j == 1) j = 2;
-        else j = 1;
-    }
-    return (checksum % 10) == 0;
-};
-
-const validateExpiry = (val: string) => {
-    if (val.length !== 5) return false;
-    const [month, year] = val.split('/').map(Number);
-    if (!month || !year || month < 1 || month > 12) return false;
-    
-    const now = new Date();
-    const currentYear = parseInt(now.getFullYear().toString().slice(-2));
-    const currentMonth = now.getMonth() + 1;
-
-    if (year < currentYear) return false;
-    if (year === currentYear && month < currentMonth) return false;
-    return true;
-};
-
-const getCardBrand = (number: string) => {
-    const n = number.replace(/\D/g, '');
-    if (n.match(/^4/)) return 'Visa';
-    if (n.match(/^5[1-5]/)) return 'Mastercard';
-    if (n.match(/^3[47]/)) return 'Amex';
-    if (n.match(/^(606282|3841)/)) return 'Hipercard';
-    if (n.match(/^(4011|4312|4389|4514|4576|5041|5066|5090|6277|6362|6363|650|6516|6550)/)) return 'Elo';
-    return 'Outro';
-};
 
 const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
   const { user, refreshUser } = useAuth();
-  const [activeTab, setActiveTab] = useState<'DATA' | 'ADDRESSES' | 'PAYMENT'>('DATA');
+  const [activeTab, setActiveTab] = useState<'DATA' | 'ADDRESSES'>('DATA');
   
   // Address State
   const [isAddressModalOpen, setIsAddressModalOpen] = useState(false);
@@ -90,14 +49,6 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
   const [cpfError, setCpfError] = useState('');
   const [isSavingProfile, setIsSavingProfile] = useState(false);
 
-  // Payment State - CARTÕES REAIS
-  const [savedCards, setSavedCards] = useState<EncryptedCard[]>([]);
-  const [loadingCards, setLoadingCards] = useState(false);
-  const [showAddCard, setShowAddCard] = useState(false);
-  const [newCard, setNewCard] = useState({ number: '', name: '', expiry: '', cvv: '' });
-  const [savingCard, setSavingCard] = useState(false);
-  const [cardErrors, setCardErrors] = useState({ number: '', expiry: '', cvv: '' });
-
   // Initialize Form Data
   useEffect(() => {
       if (user) {
@@ -109,49 +60,19 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
       }
   }, [user]);
 
-  const displayName = user?.name?.trim() || user?.email || 'Cliente';
-  const displayEmail = user?.email || '';
-  const displayInitial = displayName.charAt(0).toUpperCase();
-
-  // Carregar cartões reais ao entrar na aba ou montar
-  useEffect(() => {
-      if (user && activeTab === 'PAYMENT') {
-          loadCards();
-      }
-  }, [user, activeTab]);
-
-  const loadCards = async () => {
-      if (!user) return;
-      setLoadingCards(true);
-      try {
-          const cards = await getUserCards(user.uid);
-          setSavedCards(cards);
-      } catch (e) {
-          console.error("Erro ao carregar cartões", e);
-      } finally {
-          setLoadingCards(false);
-      }
-  };
-
-  const handleDeleteCard = async (id: string) => {
-    if (!user) return;
-    if (confirm('Remover este cartão? Esta ação não pode ser desfeita.')) {
-        try {
-            setLoadingCards(true); // Show loading state while deleting
-            await deleteUserCard(user.uid, id);
-            
-            // Force fetch fresh data to ensure state consistency
-            await loadCards();
-        } catch (e) {
-            console.error("Error deleting card:", e);
-            alert("Erro ao remover cartão.");
-            // Revert to known state if error
-            loadCards();
-        } finally {
-            setLoadingCards(false);
-        }
-    }
-  };
+  const safeName = typeof user?.name === 'string' ? user.name.trim() : '';
+  const safeEmail = typeof user?.email === 'string' ? user.email : '';
+  const displayName = safeName || safeEmail || 'Cliente';
+  const displayEmail = safeEmail;
+  const displayInitial = displayName ? displayName.charAt(0).toUpperCase() : 'C';
+  const addressCount = user?.addresses?.length || 0;
+  const profileScore = [
+      Boolean(formData.name?.trim()),
+      Boolean(formData.phone?.trim()),
+      addressCount > 0
+  ].filter(Boolean).length;
+  const profileCompletion = Math.round((profileScore / 3) * 100);
+  const profileLabel = profileCompletion >= 100 ? 'Completo' : profileCompletion >= 67 ? 'Quase pronto' : 'Incompleto';
 
   const handleSaveProfile = async () => {
       if (!user) return;
@@ -185,48 +106,6 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
       }
   };
 
-  const handleSaveCard = async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!user) return;
-      
-      setCardErrors({ number: '', expiry: '', cvv: '' });
-      let hasError = false;
-
-      const cleanNumber = newCard.number.replace(/\D/g, '');
-      
-      if (cleanNumber.length < 13 || !luhnCheck(cleanNumber)) {
-          setCardErrors(prev => ({ ...prev, number: 'Número de cartão inválido.' }));
-          hasError = true;
-      }
-
-      if (!validateExpiry(newCard.expiry)) {
-          setCardErrors(prev => ({ ...prev, expiry: 'Data inválida ou vencida.' }));
-          hasError = true;
-      }
-
-      if (newCard.cvv.length < 3) {
-          setCardErrors(prev => ({ ...prev, cvv: 'CVV inválido.' }));
-          hasError = true;
-      }
-
-      if (hasError) return;
-
-      setSavingCard(true);
-      try {
-          const brand = getCardBrand(cleanNumber);
-          await saveUserCard(user.uid, { ...newCard, number: cleanNumber, brand });
-          await loadCards(); // Recarrega a lista
-          setShowAddCard(false);
-          setNewCard({ number: '', name: '', expiry: '', cvv: '' });
-          alert("Cartão verificado e salvo com segurança!");
-      } catch (e) {
-          console.error(e);
-          alert("Erro ao salvar cartão.");
-      } finally {
-          setSavingCard(false);
-      }
-  };
-
   const handleSaveNewAddress = async (newAddress: Address) => {
       if (!user) return;
       
@@ -244,18 +123,6 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
   };
 
   if (!user) return null;
-
-  // Card Style Helpers
-  const getCardStyle = (brand: string) => {
-      switch(brand) {
-          case 'Visa': return 'from-blue-700 to-blue-900';
-          case 'Mastercard': return 'from-orange-700 to-red-900';
-          case 'Amex': return 'from-slate-700 to-slate-900';
-          case 'Elo': return 'from-yellow-600 to-orange-700';
-          case 'Hipercard': return 'from-red-700 to-red-900';
-          default: return 'from-slate-700 to-slate-900';
-      }
-  };
 
   const renderContent = () => {
       switch(activeTab) {
@@ -410,171 +277,13 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
                       )}
                   </div>
               );
-          case 'PAYMENT':
-              return (
-                  <div className="space-y-6 animate-fade-in">
-                       {/* Saved Cards List */}
-                       <div className="space-y-4">
-                           {loadingCards ? (
-                               <div className="flex justify-center py-10"><Loader2 className="animate-spin text-red-600" /></div>
-                           ) : savedCards.length === 0 && !showAddCard ? (
-                               <div className="text-center py-8 text-gray-400 border border-dashed border-gray-300 dark:border-slate-700 rounded-2xl">
-                                   <CreditCard size={32} className="mx-auto mb-2 opacity-50"/>
-                                   <p>Nenhum cartão salvo.</p>
-                               </div>
-                           ) : (
-                               savedCards.map(card => (
-                                   <div key={card.id} className={`bg-gradient-to-br ${getCardStyle(card.brand)} text-white p-6 rounded-2xl shadow-xl relative overflow-hidden group transform hover:scale-[1.02] transition-transform`}>
-                                       <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                                           <CreditCard size={120} />
-                                       </div>
-                                       <div className="relative z-10">
-                                           <div className="flex justify-between items-start mb-8">
-                                               <div className="flex items-center gap-2">
-                                                   {/* Mock Icon based on Brand */}
-                                                   <span className="font-bold uppercase tracking-wider text-sm bg-white/20 px-2 py-1 rounded">{card.brand}</span>
-                                               </div>
-                                               <button 
-                                                    onClick={() => handleDeleteCard(card.id)} 
-                                                    className="text-white/60 hover:text-white hover:bg-red-500/50 transition-colors p-2 rounded-full backdrop-blur-sm"
-                                                    title="Excluir Cartão"
-                                               >
-                                                   <Trash2 size={16} />
-                                               </button>
-                                           </div>
-                                           <div className="font-mono text-xl md:text-2xl tracking-widest mb-4 drop-shadow-md flex items-center gap-2">
-                                               <span className="text-[10px] align-middle tracking-normal opacity-60 mr-2">••••</span>
-                                               <span className="text-[10px] align-middle tracking-normal opacity-60 mr-2">••••</span>
-                                               <span className="text-[10px] align-middle tracking-normal opacity-60 mr-2">••••</span>
-                                               {card.last4}
-                                           </div>
-                                           <div className="flex justify-between items-end">
-                                               <div>
-                                                   <p className="text-[10px] text-white/60 uppercase font-bold mb-1">Titular</p>
-                                                   <p className="font-bold text-xs md:text-sm uppercase tracking-wide truncate max-w-[150px]">{card.holder}</p>
-                                               </div>
-                                               <div className="text-right">
-                                                    <p className="text-[10px] text-white/60 uppercase font-bold mb-1">Validade</p>
-                                                    <p className="font-mono text-xs md:text-sm">{card.expiry}</p>
-                                               </div>
-                                           </div>
-                                       </div>
-                                   </div>
-                               ))
-                           )}
-                       </div>
-
-                       {/* Add Card Form Toggle */}
-                       {!showAddCard ? (
-                           <button 
-                              onClick={() => setShowAddCard(true)}
-                              className="w-full py-4 bg-white dark:bg-slate-900 border-2 border-dashed border-gray-300 dark:border-slate-700 rounded-2xl flex items-center justify-center gap-2 text-gray-500 hover:text-red-600 hover:border-red-500 hover:bg-red-50 dark:hover:bg-slate-800 transition-all font-bold"
-                           >
-                              <Plus size={20} /> Adicionar Cartão
-                           </button>
-                       ) : (
-                           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-lg border border-gray-100 dark:border-slate-800 animate-slide-up">
-                               <div className="flex justify-between items-center mb-4">
-                                   <h3 className="font-bold text-lg text-slate-800 dark:text-white flex items-center gap-2">
-                                       <ShieldCheck className="text-green-600" size={20} /> Novo Cartão Seguro
-                                   </h3>
-                                   <button onClick={() => setShowAddCard(false)} className="text-gray-400 hover:text-red-500"><X size={20}/></button>
-                               </div>
-                               <form onSubmit={handleSaveCard} className="space-y-4">
-                                   <div>
-                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Número do Cartão</label>
-                                       <input 
-                                            type="text" 
-                                            placeholder="0000 0000 0000 0000" 
-                                            maxLength={23}
-                                            value={newCard.number}
-                                            onChange={e => {
-                                                setCardErrors(prev => ({...prev, number: ''}));
-                                                const v = e.target.value.replace(/\D/g, '').replace(/(.{4})/g, '$1 ').trim();
-                                                setNewCard({...newCard, number: v.slice(0, 23)});
-                                            }}
-                                            className={`w-full p-3 border rounded-xl bg-gray-50 dark:bg-slate-800 outline-none focus:ring-2 font-mono transition-all ${cardErrors.number ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-700 focus:ring-red-500'}`}
-                                       />
-                                       {cardErrors.number && <p className="text-xs text-red-600 mt-1 font-bold">{cardErrors.number}</p>}
-                                   </div>
-                                   <div>
-                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nome no Cartão</label>
-                                       <input 
-                                            type="text" 
-                                            placeholder="COMO NO CARTAO" 
-                                            value={newCard.name}
-                                            onChange={e => setNewCard({...newCard, name: e.target.value})}
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl bg-gray-50 dark:bg-slate-800 outline-none focus:ring-2 focus:ring-red-500 dark:text-white uppercase"
-                                       />
-                                   </div>
-                                   <div className="grid grid-cols-2 gap-4">
-                                       <div>
-                                           <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Validade</label>
-                                           <input 
-                                                type="text" 
-                                                placeholder="MM/AA" 
-                                                maxLength={5}
-                                                value={newCard.expiry}
-                                                onChange={e => {
-                                                    setCardErrors(prev => ({...prev, expiry: ''}));
-                                                    let val = e.target.value.replace(/\D/g, '');
-                                                    if (val.length >= 2) val = val.slice(0,2) + '/' + val.slice(2,4);
-                                                    setNewCard({...newCard, expiry: val});
-                                                }}
-                                                className={`w-full p-3 border rounded-xl bg-gray-50 dark:bg-slate-800 outline-none focus:ring-2 text-center transition-all ${cardErrors.expiry ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-700 focus:ring-red-500'}`}
-                                           />
-                                           {cardErrors.expiry && <p className="text-xs text-red-600 mt-1 font-bold">{cardErrors.expiry}</p>}
-                                       </div>
-                                       <div>
-                                           <label className="block text-xs font-bold text-gray-500 uppercase mb-1">CVV</label>
-                                           <input 
-                                                type="text" 
-                                                placeholder="123" 
-                                                maxLength={4}
-                                                value={newCard.cvv}
-                                                onChange={e => {
-                                                    setCardErrors(prev => ({...prev, cvv: ''}));
-                                                    setNewCard({...newCard, cvv: e.target.value.replace(/\D/g, '')})
-                                                }}
-                                                className={`w-full p-3 border rounded-xl bg-gray-50 dark:bg-slate-800 outline-none focus:ring-2 text-center transition-all ${cardErrors.cvv ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-700 focus:ring-red-500'}`}
-                                           />
-                                           {cardErrors.cvv && <p className="text-xs text-red-600 mt-1 font-bold">{cardErrors.cvv}</p>}
-                                       </div>
-                                   </div>
-                                   
-                                   <div className="text-[10px] text-gray-400 flex items-center gap-1 bg-gray-50 dark:bg-slate-800 p-2 rounded">
-                                       <ShieldCheck size={12} /> Seus dados são criptografados antes de serem salvos.
-                                   </div>
-
-                                   <div className="flex gap-3 pt-2">
-                                       <button 
-                                            type="button" 
-                                            onClick={() => setShowAddCard(false)}
-                                            className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 dark:hover:bg-slate-800 rounded-xl"
-                                            disabled={savingCard}
-                                       >
-                                           Cancelar
-                                       </button>
-                                       <button 
-                                            type="submit"
-                                            className="flex-1 py-3 bg-slate-900 dark:bg-red-600 text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 disabled:opacity-70"
-                                            disabled={savingCard}
-                                       >
-                                           {savingCard ? <Loader2 className="animate-spin" size={18} /> : 'Salvar Cartão'}
-                                       </button>
-                                   </div>
-                               </form>
-                           </div>
-                       )}
-                  </div>
-              );
       }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-slate-950 font-sans">
-      <header className="bg-white dark:bg-slate-900 sticky top-0 z-30 border-b border-gray-200 dark:border-slate-800 shadow-sm">
-        <div className="max-w-3xl mx-auto px-4 h-16 flex items-center justify-between">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans">
+      <header className="bg-white/90 dark:bg-slate-900/90 sticky top-0 z-30 border-b border-gray-200/80 dark:border-slate-800 shadow-sm backdrop-blur">
+        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button 
               onClick={onBack}
@@ -593,35 +302,72 @@ const ClientProfile: React.FC<ClientProfileProps> = ({ onBack, onLogout }) => {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-8">
+      <main className="max-w-5xl mx-auto px-4 py-8">
           {/* Profile Hero */}
-          <div className="bg-gradient-to-r from-slate-800 to-slate-900 rounded-3xl p-8 mb-8 shadow-xl text-white relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-64 h-64 bg-white opacity-5 rounded-full -translate-y-1/2 translate-x-1/4 pointer-events-none"></div>
-              <div className="flex items-center gap-6 relative z-10">
-                  <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center text-slate-900 text-3xl font-bold border-4 border-white/20 shadow-md">
-                      {displayInitial}
+          <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-red-50/60 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 mb-8 shadow-sm">
+              <div className="pointer-events-none absolute -top-20 -right-16 h-64 w-64 rounded-full bg-red-200/40 blur-3xl dark:bg-red-900/20" />
+              <div className="pointer-events-none absolute -bottom-24 -left-10 h-64 w-64 rounded-full bg-orange-200/30 blur-3xl dark:bg-orange-900/20" />
+              <div className="relative grid gap-6 md:grid-cols-[1.2fr,0.8fr]">
+                  <div className="flex items-center gap-6">
+                      <div className="w-20 h-20 rounded-2xl bg-slate-900 text-white flex items-center justify-center text-3xl font-bold shadow-lg shadow-slate-900/20">
+                          {displayInitial}
+                      </div>
+                      <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                              <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white">
+                                  {displayName}
+                              </h2>
+                              <span className="text-xs font-bold uppercase tracking-[0.2em] text-red-500 bg-red-50 dark:bg-red-900/20 px-2 py-1 rounded-full">
+                                  Cliente
+                              </span>
+                          </div>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{displayEmail}</p>
+                          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 px-3 py-1.5 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              <ShieldCheck size={14} className="text-green-600" />
+                              Perfil seguro e protegido
+                          </div>
+                      </div>
                   </div>
-                  <div>
-                      <h2 className="text-2xl font-bold">{displayName}</h2>
-                      <p className="text-slate-300 text-sm mb-2">{displayEmail}</p>
-                      <div className="inline-flex items-center gap-1 px-3 py-1 bg-white/10 rounded-full text-xs font-bold backdrop-blur-sm border border-white/10">
-                          <User size={12} /> Cliente VIP
+                  <div className="grid gap-3">
+                      <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-4">
+                          <p className="text-xs font-bold uppercase text-slate-400">Completo</p>
+                          <div className="mt-2 flex items-center justify-between">
+                              <span className="text-xl font-extrabold text-slate-900 dark:text-white">{profileCompletion}%</span>
+                              <span className="text-xs font-bold text-slate-500 dark:text-slate-400">{profileLabel}</span>
+                          </div>
+                          <div className="mt-3 h-2 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                              <div className="h-full rounded-full bg-red-500" style={{ width: `${profileCompletion}%` }} />
+                          </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                          <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-4">
+                              <p className="text-xs font-bold uppercase text-slate-400">Enderecos</p>
+                              <p className="mt-2 text-xl font-extrabold text-slate-900 dark:text-white">{addressCount}</p>
+                          </div>
+                          <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-4">
+                              <p className="text-xs font-bold uppercase text-slate-400">Status</p>
+                              <p className="mt-2 text-sm font-bold text-slate-900 dark:text-white">Ativo</p>
+                              <p className="text-xs text-slate-400">Conta liberada</p>
+                          </div>
                       </div>
                   </div>
               </div>
           </div>
 
           {/* Navigation Tabs */}
-          <div className="flex bg-white dark:bg-slate-900 p-1 rounded-2xl mb-8 border border-gray-100 dark:border-slate-800 shadow-sm">
+          <div className="flex bg-white dark:bg-slate-900 p-1.5 rounded-2xl mb-8 border border-gray-100 dark:border-slate-800 shadow-sm">
               {[
                   { id: 'DATA', label: 'Dados', icon: User },
-                  { id: 'ADDRESSES', label: 'Endereços', icon: MapPin },
-                  { id: 'PAYMENT', label: 'Cartões', icon: CreditCard }
+                  { id: 'ADDRESSES', label: 'Endereços', icon: MapPin }
               ].map(tab => (
                   <button 
                       key={tab.id}
                       onClick={() => setActiveTab(tab.id as any)}
-                      className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${activeTab === tab.id ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-slate-800/50'}`}
+                      className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${
+                          activeTab === tab.id
+                              ? 'bg-gradient-to-br from-white to-slate-50 dark:from-slate-800 dark:to-slate-900 text-slate-900 dark:text-white shadow-sm border border-slate-200/70 dark:border-slate-700'
+                              : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-slate-800/50'
+                      }`}
                   >
                       <tab.icon size={16} /> {tab.label}
                   </button>

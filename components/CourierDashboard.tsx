@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Bike, MapPin, Navigation, CheckCircle, Clock, DollarSign, Settings, LogOut, ShieldAlert, Wallet, Bell, ChevronRight, User, Loader2 } from 'lucide-react';
+import { Bike, MapPin, Navigation, CheckCircle, Clock, DollarSign, Settings, LogOut, ShieldAlert, Wallet, Bell, ChevronRight, User, Loader2, Compass, Map } from 'lucide-react';
 import { Order, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
-import { getOpenOrdersForCity, acceptOrder, getCourierActiveOrders, updateCourierLocation, getCourierHistory, updateCourierCity } from '../services/db';
+import { getOpenOrdersForCity, acceptOrder, getCourierActiveOrders, updateCourierLocation, getCourierHistory, updateCourierCity, updateOrderCourierStage } from '../services/db';
 import { calculateDistance, GEO_API_ENABLED } from '../utils/geo';
 import { formatCurrencyBRL } from '../utils/format';
 
@@ -31,7 +31,6 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
         if (!user) return;
         if (!GEO_API_ENABLED) {
             setLocationPermission('GRANTED');
-            return;
         }
 
         // 1. Check/Request Location
@@ -144,12 +143,68 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
     // Calculate Wallet
     const todayEarnings = historyOrders
         .filter(o => new Date(o.createdAt!).toDateString() === new Date().toDateString())
-        .reduce((acc, o) => acc + 5.00, 0); // Assuming deliveryFee is 5.00 fixed or from order.deliveryFee (mocked)
-        // Note: The prompt asked to SHOW commission. Let's assume commission is fixed R$5 or delivery fee.
-        // We don't have deliveryFee in Order type strictly yet, only in Store. But createOrder passed total.
-        // Let's assume a fixed R$ 5,00 per run for MVP visualization or derive from Order total logic.
+        .reduce((acc, o) => acc + (Number(o.deliveryFee) || 0), 0);
     
-    const totalPending = myActiveOrders.length * 5.00;
+    const totalPending = myActiveOrders.reduce((acc, o) => acc + (Number(o.deliveryFee) || 0), 0);
+
+    const formatAddressLine = (label: string, address?: Order['deliveryAddress']) => {
+        if (!address) return `${label}: Endereço não informado`;
+        const parts: string[] = [];
+        if (address.street) {
+            parts.push(address.number ? `${address.street}, ${address.number}` : address.street);
+        } else if (address.number) {
+            parts.push(address.number);
+        }
+        if (address.district) parts.push(address.district);
+        if (address.city) parts.push(address.city);
+        if (parts.length === 0) return `${label}: Endereço não informado`;
+        return `${label}: ${parts.join(' - ')}`;
+    };
+
+    const buildAddressQuery = (address?: Order['deliveryAddress']) => {
+        if (!address) return '';
+        return [address.street, address.number, address.district, address.city, address.state]
+            .filter(Boolean)
+            .join(', ');
+    };
+
+    const openRoute = (destination: Coordinates | null, address?: Order['deliveryAddress']) => {
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const destinationValue = destination ? `${destination.lat},${destination.lng}` : buildAddressQuery(address);
+        if (!destinationValue) return;
+        const originValue = currentLocation ? `${currentLocation.lat},${currentLocation.lng}` : '';
+        const url = new URL('https://www.google.com/maps/dir/');
+        url.searchParams.set('api', '1');
+        if (originValue) url.searchParams.set('origin', originValue);
+        url.searchParams.set('destination', destinationValue);
+        url.searchParams.set('travelmode', 'driving');
+        if (isMobile) {
+            window.location.href = url.toString();
+        } else {
+            window.open(url.toString(), '_blank');
+        }
+    };
+
+    const handlePickedOrder = async (order: Order) => {
+        try {
+            await updateOrderCourierStage(order.id, 'PICKED');
+        } catch {
+            alert('Erro ao confirmar retirada. Tente novamente.');
+        }
+    };
+
+    const handleGoToCustomer = async (order: Order) => {
+        try {
+            await updateOrderCourierStage(order.id, 'TO_CUSTOMER');
+            openRoute(order.deliveryCoordinates || null, order.deliveryAddress);
+        } catch {
+            alert('Erro ao abrir rota para o cliente.');
+        }
+    };
+
+    const handleGoToStore = (order: Order) => {
+        openRoute(order.storeCoordinates || null, order.storeAddress);
+    };
 
     return (
         <div className="min-h-screen bg-slate-50 dark:bg-slate-950 pb-24 font-sans">
@@ -221,15 +276,25 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                                             </div>
                                         </div>
                                         
-                                        <div className="bg-gray-50 dark:bg-slate-800 p-3 rounded-xl mb-4 text-sm space-y-1">
-                                            <div className="flex items-center gap-2 text-slate-700 dark:text-gray-300">
-                                                <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-                                                <span>Coleta: <strong>Loja Parceira</strong></span>
+                                        <div className="bg-gray-50 dark:bg-slate-800 p-3 rounded-xl mb-4 text-sm space-y-2">
+                                            <div className="flex items-start gap-2 text-slate-700 dark:text-gray-300">
+                                                <div className="w-2 h-2 bg-slate-400 rounded-full mt-2"></div>
+                                                <div>
+                                                    <span className="font-bold">{order.storeName || 'Loja Parceira'}</span>
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                        {formatAddressLine('Coleta', order.storeAddress || undefined)}
+                                                    </p>
+                                                </div>
                                             </div>
                                             <div className="h-4 border-l border-dashed border-gray-300 ml-1"></div>
-                                            <div className="flex items-center gap-2 text-slate-700 dark:text-gray-300">
-                                                <div className="w-2 h-2 bg-red-500 rounded-full"></div>
-                                                <span>Entrega: <strong>{order.customerName}</strong></span>
+                                            <div className="flex items-start gap-2 text-slate-700 dark:text-gray-300">
+                                                <div className="w-2 h-2 bg-red-500 rounded-full mt-2"></div>
+                                                <div>
+                                                    <span className="font-bold">{order.customerName}</span>
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                        {formatAddressLine('Entrega', order.deliveryAddress || undefined)}
+                                                    </p>
+                                                </div>
                                             </div>
                                         </div>
 
@@ -258,12 +323,45 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                                         <span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">EM ANDAMENTO</span>
                                         <span className="font-mono text-xs text-gray-400">#{order.id.slice(0,4)}</span>
                                     </div>
-                                    <h3 className="font-bold text-lg text-slate-800 dark:text-white mb-1">{order.customerName}</h3>
-                                    <p className="text-sm text-gray-500 mb-4">Rua X, 123 (Mock Address)</p>
-                                    
-                                    <div className="flex gap-2">
-                                        <button className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-bold text-sm">Abrir Mapa</button>
-                                        <button className="flex-1 bg-gray-100 dark:bg-slate-800 text-slate-800 dark:text-white py-2 rounded-lg font-bold text-sm">Detalhes</button>
+                                    <h3 className="font-bold text-lg text-slate-800 dark:text-white mb-2">{order.customerName}</h3>
+                                    <div className="text-sm text-gray-500 space-y-2 mb-4">
+                                        <p className="text-slate-700 dark:text-gray-300">
+                                            <span className="font-bold">{order.storeName || 'Loja Parceira'}</span>
+                                        </p>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            {formatAddressLine('Coleta', order.storeAddress || undefined)}
+                                        </p>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            {formatAddressLine('Entrega', order.deliveryAddress || undefined)}
+                                        </p>
+                                    </div>
+
+                                    <div className="grid gap-2">
+                                        <button
+                                            onClick={() => handleGoToStore(order)}
+                                            className="w-full bg-slate-900 text-white py-2.5 rounded-lg font-bold text-sm flex items-center justify-center gap-2"
+                                        >
+                                            <Map size={16} /> Ir para loja
+                                        </button>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button
+                                                onClick={() => handlePickedOrder(order)}
+                                                className="bg-amber-500 text-white py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1"
+                                            >
+                                                <Compass size={14} /> Pedido pego
+                                            </button>
+                                            <button
+                                                onClick={() => handleGoToCustomer(order)}
+                                                disabled={!['PICKED', 'TO_CUSTOMER'].includes(order.courierStage || '')}
+                                                className={`py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1 ${
+                                                    ['PICKED', 'TO_CUSTOMER'].includes(order.courierStage || '')
+                                                        ? 'bg-red-600 text-white'
+                                                        : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                                                }`}
+                                            >
+                                                <Navigation size={14} /> Ir para cliente
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                              ))
@@ -298,33 +396,58 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                 )}
 
                 {activeTab === 'SETTINGS' && (
-                    <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-gray-200 dark:border-slate-800 space-y-6 animate-fade-in">
-                        <h2 className="font-bold text-slate-800 dark:text-white text-lg">Configurações</h2>
-                        
-                        <div>
-                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cidade de Atuação</label>
-                            <div className="flex gap-2">
-                                <input 
-                                    type="text" 
-                                    defaultValue={user?.city} 
-                                    id="cityInput"
-                                    className="flex-1 p-3 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none dark:text-white"
-                                />
-                                <button 
-                                    onClick={() => {
-                                        const val = (document.getElementById('cityInput') as HTMLInputElement).value;
-                                        handleUpdateCity(val);
-                                    }}
-                                    className="bg-red-600 text-white px-4 rounded-xl font-bold"
-                                >
-                                    Salvar
-                                </button>
+                    <div className="space-y-6 animate-fade-in">
+                        <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-gray-200 dark:border-slate-800">
+                            <div className="mb-4 inline-flex items-center gap-2 text-xs font-bold px-2 py-1 rounded-full">
+                                {currentLocation ? (
+                                    <span className="text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                                        Localização ativa
+                                    </span>
+                                ) : (
+                                    <span className="text-amber-600 bg-amber-50 px-2 py-1 rounded-full flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                                        Localização pendente
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="w-14 h-14 rounded-2xl bg-red-600 text-white flex items-center justify-center font-bold text-xl">
+                                    {user?.name?.charAt(0) || 'M'}
+                                </div>
+                                <div>
+                                    <h2 className="font-bold text-slate-800 dark:text-white text-lg">{user?.name || 'Motoboy'}</h2>
+                                    <p className="text-xs text-slate-500">Perfil do entregador</p>
+                                </div>
                             </div>
                         </div>
-                        
-                        <button onClick={onLogout} className="w-full py-3 border border-red-100 text-red-600 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-red-50 transition-colors">
-                            <LogOut size={18} /> Sair da Conta
-                        </button>
+
+                        <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-gray-200 dark:border-slate-800 space-y-6">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cidade de Atuação</label>
+                                <div className="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        defaultValue={user?.city} 
+                                        id="cityInput"
+                                        className="flex-1 p-3 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none dark:text-white"
+                                    />
+                                    <button 
+                                        onClick={() => {
+                                            const val = (document.getElementById('cityInput') as HTMLInputElement).value;
+                                            handleUpdateCity(val);
+                                        }}
+                                        className="bg-red-600 text-white px-4 rounded-xl font-bold"
+                                    >
+                                        Salvar
+                                    </button>
+                                </div>
+                            </div>
+
+                            <button onClick={onLogout} className="w-full py-3 border border-red-100 text-red-600 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-red-50 transition-colors">
+                                <LogOut size={18} /> Sair da Conta
+                            </button>
+                        </div>
                     </div>
                 )}
             </main>

@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { X, ShoppingBag, Trash2, ChevronRight } from 'lucide-react';
+import { X, ShoppingBag, Trash2, ChevronRight, Plus } from 'lucide-react';
 import { CartItem, Store } from '../types';
 import { formatCurrencyBRL } from '../utils/format';
 
@@ -106,6 +106,12 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
 
             {cartItems.length > 0 && (
                 <div className="p-6 bg-white dark:bg-slate-900 border-t border-gray-100 dark:border-slate-800 shadow-[0_-4px_20px_rgba(0,0,0,0.05)] z-30">
+                    <button
+                        onClick={onClose}
+                        className="mb-4 text-sm font-bold text-red-600 hover:text-red-700 flex items-center gap-2"
+                    >
+                        <Plus size={16} /> Adicionar produtos
+                    </button>
                     <div className="space-y-3 mb-6 text-sm">
                         <div className="flex justify-between text-gray-500 dark:text-gray-400">
                             <span>Subtotal</span>

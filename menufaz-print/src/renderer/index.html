@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Menufaz Print</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>Menufaz Print</h1>
+        <p>Local printing agent</p>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">Store</span>
+          <span id="storeName">Not connected</span>
+        </div>
+        <div class="row">
+          <span class="label">Merchant ID</span>
+          <span id="merchantIdLabel">-</span>
+        </div>
+        <div class="row">
+          <span class="label">API URL</span>
+          <span id="apiUrlLabel">-</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Setup</h2>
+        <label class="field">
+          Merchant ID
+          <input id="merchantIdInput" type="text" placeholder="merchantId" />
+        </label>
+        <label class="field">
+          API URL
+          <input id="apiUrlInput" type="text" placeholder="http://localhost:3001" />
+        </label>
+        <button id="saveMerchant" class="primary">Save and register</button>
+      </section>
+
+      <section class="card">
+        <h2>Printers</h2>
+        <div class="row">
+          <select id="printerSelect"></select>
+          <button id="refreshPrinters">Refresh</button>
+        </div>
+        <div class="row">
+          <button id="testPrint" class="ghost">Imprimir teste</button>
+        </div>
+        <p class="hint" id="printerHint"></p>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <div class="row">
+          <span class="label">Connected</span>
+          <span id="connectedStatus">No</span>
+        </div>
+        <div class="row">
+          <span class="label">Last printed</span>
+          <span id="lastPrinted">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Last error</span>
+          <span id="lastError">-</span>
+        </div>
+      </section>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

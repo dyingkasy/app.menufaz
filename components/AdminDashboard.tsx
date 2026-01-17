@@ -9,12 +9,60 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import JSZip from 'jszip';
-import { UserRole, DashboardSection, Product, Order, ProductOptionGroup, ProductOption, Courier, Store as StoreType, ScheduleDay, Coupon, FinancialTransaction, PaymentMethod, PizzaFlavor } from '../types';
+import {
+    UserRole,
+    DashboardSection,
+    Product,
+    Order,
+    ProductOptionGroup,
+    ProductOption,
+    Courier,
+    Store as StoreType,
+    StoreAvailability,
+    ScheduleDay,
+    Coupon,
+    FinancialTransaction,
+    PaymentMethod,
+    PizzaFlavor,
+    Address
+} from '../types';
 import { formatCurrencyBRL } from '../utils/format';
+import { compressImageFile } from '../utils/image';
+import { uploadImageKit, deleteImageKit } from '../services/imagekit';
 import { useAuth } from '../contexts/AuthContext';
-import { getStoreById, updateStore, getProductsByStore, saveProduct, deleteProduct, subscribeToOrders, updateOrderStatus, updateOrderPayment, getCouponsByStore, saveCoupon, deleteCoupon, getCouriersByStore, saveCourier, deleteCourier, getExpensesByStore, saveExpense, deleteExpense, deleteOrder, getPizzaFlavorsByStore, savePizzaFlavor, deletePizzaFlavor } from '../services/db';
+import {
+    getStoreById,
+    updateStore,
+    updateStoreSchedule,
+    updateStoreAutoAccept,
+    updateStoreAutoOpen,
+    getStoreAvailability,
+    pauseStore,
+    resumeStorePause,
+    getProductsByStore,
+    saveProduct,
+    deleteProduct,
+    subscribeToOrders,
+    updateOrderStatus,
+    updateOrderPayment,
+    getCouponsByStore,
+    saveCoupon,
+    deleteCoupon,
+    getCouriersByStore,
+    saveCourier,
+    deleteCourier,
+    getExpensesByStore,
+    saveExpense,
+    deleteExpense,
+    deleteOrder,
+    getPizzaFlavorsByStore,
+    savePizzaFlavor,
+    deletePizzaFlavor,
+    generateMerchantId,
+    revokeMerchantId
+} from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
-import { searchAddress, GEO_API_ENABLED } from '../utils/geo';
+import { searchAddress, GEO_API_ENABLED, fetchCepData } from '../utils/geo';
 
 interface AdminDashboardProps {
     onBack: () => void;
@@ -43,9 +91,100 @@ const TRANSACTION_CATEGORIES = [
     { id: 'OUTROS_ENTRADA', label: 'Outras Entradas', color: '#6EE7B7', type: 'INCOME' },
 ];
 
+const PIZZA_SIZE_GROUP_ID = 'size-group';
+const PIZZA_SIZE_OPTIONS = [
+    { key: 'brotinho', label: 'Brotinho', optionId: 'size-brotinho', order: 1 },
+    { key: 'pequena', label: 'Pequena', optionId: 'size-pequena', order: 2 },
+    { key: 'media', label: 'Média', optionId: 'size-media', order: 3 },
+    { key: 'grande', label: 'Grande', optionId: 'size-grande', order: 4 },
+    { key: 'familia', label: 'Família', optionId: 'size-familia', order: 5 }
+];
+
+const PRICING_STRATEGIES = [
+    { id: 'NORMAL', label: 'Normal' },
+    { id: 'PROPORCIONAL', label: 'Proporcional' },
+    { id: 'MAX', label: 'Maior sabor' }
+];
+
+const normalizeSizeKey = (value: string) =>
+    (value || '')
+        .toString()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '')
+        .trim();
+
+const resolvePizzaSizeKey = (value: string) => {
+    const normalized = normalizeSizeKey(value);
+    if (!normalized) return '';
+    if (PIZZA_SIZE_OPTIONS.some((size) => size.key === normalized)) return normalized;
+    if (normalized.includes('sizebrotinho') || normalized.includes('brotinho')) return 'brotinho';
+    if (normalized.includes('sizepequena') || normalized.includes('pequena') || normalized.includes('pequeno')) return 'pequena';
+    if (normalized.includes('sizemedia') || normalized.includes('media') || normalized.includes('medio')) return 'media';
+    if (normalized.includes('sizegrande') || normalized.includes('grande')) return 'grande';
+    if (normalized.includes('sizefamilia') || normalized.includes('familia')) return 'familia';
+    return '';
+};
+
+const getSizeKeyFromOption = (option?: ProductOption) => {
+    if (!option) return '';
+    const byId = PIZZA_SIZE_OPTIONS.find((size) => size.optionId === option.id);
+    if (byId) return byId.key;
+    return resolvePizzaSizeKey(option.name || '');
+};
+
+const isPizzaSizeGroup = (group?: ProductOptionGroup) => {
+    if (!group) return false;
+    if (group.id === PIZZA_SIZE_GROUP_ID) return true;
+    return /tamanho|gramatura/i.test(group.name || '');
+};
+
+const ensurePizzaSizeGroup = (optionGroups?: ProductOptionGroup[]) => {
+    const groups = [...(optionGroups || [])];
+    const groupIndex = groups.findIndex((group) => isPizzaSizeGroup(group));
+    const createOption = (size: typeof PIZZA_SIZE_OPTIONS[number]): ProductOption => ({
+        id: size.optionId,
+        name: size.label,
+        price: 0,
+        isAvailable: true,
+        order: size.order,
+        stockProductId: ''
+    });
+
+    if (groupIndex === -1) {
+        const sizeGroup: ProductOptionGroup = {
+            id: PIZZA_SIZE_GROUP_ID,
+            name: 'Tamanho',
+            min: 1,
+            max: 1,
+            options: PIZZA_SIZE_OPTIONS.map(createOption),
+            isRequired: true,
+            selectionType: 'SINGLE',
+            order: groups.length + 1,
+            extraChargeAfter: 0,
+            extraChargeAmount: 0
+        };
+        return [...groups, sizeGroup];
+    }
+
+    const group = groups[groupIndex];
+    const existingKeys = new Set(
+        (group.options || []).map((opt) => getSizeKeyFromOption(opt)).filter(Boolean)
+    );
+    const missingOptions = PIZZA_SIZE_OPTIONS.filter((size) => !existingKeys.has(size.key)).map(createOption);
+    if (missingOptions.length === 0) return groups;
+    groups[groupIndex] = {
+        ...group,
+        options: [...(group.options || []), ...missingOptions]
+    };
+    return groups;
+};
+
 const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }> = ({ className, children }) => {
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [isReady, setIsReady] = useState(false);
+    const mergedClassName = ['w-full', className].filter(Boolean).join(' ');
 
     useEffect(() => {
         const element = containerRef.current;
@@ -55,6 +194,8 @@ const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }
             const rect = entries[0]?.contentRect;
             if (rect && rect.width > 0 && rect.height > 0) {
                 setIsReady(true);
+            } else {
+                setIsReady(false);
             }
         });
 
@@ -63,7 +204,7 @@ const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }
     }, []);
 
     return (
-        <div ref={containerRef} className={className}>
+        <div ref={containerRef} className={mergedClassName} style={{ minWidth: 1, minHeight: 1 }}>
             {isReady ? children : null}
         </div>
     );
@@ -75,16 +216,24 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
   const [activeSection, setActiveSection] = useState<DashboardSection>('OVERVIEW');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   
   // Refs for File Uploads
   const storeLogoInputRef = useRef<HTMLInputElement>(null);
   const storeCoverInputRef = useRef<HTMLInputElement>(null);
   const productInfoInputRef = useRef<HTMLInputElement>(null);
+  const buildableProductInputRef = useRef<HTMLInputElement>(null);
+  const hasSyncedDerivedCategoriesRef = useRef(false);
 
   // --- STORE SETTINGS STATE ---
   const [storeProfile, setStoreProfile] = useState<Partial<StoreType>>({});
-  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY'>('STORE');
+  const [menuCategories, setMenuCategories] = useState<string[]>([]);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [isSavingCategories, setIsSavingCategories] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY' | 'HOMOLOGATION'>('STORE');
+  const [merchantActionLoading, setMerchantActionLoading] = useState(false);
   
   // Endereço Local State (para edição)
   const [addressForm, setAddressForm] = useState({
@@ -110,6 +259,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [productError, setProductError] = useState<string | null>(null);
   const [menuSearch, setMenuSearch] = useState('');
   const [selectedCategoryTab, setSelectedCategoryTab] = useState<string>('Todos');
+  const [showBuildableProductModal, setShowBuildableProductModal] = useState(false);
+  const [buildableProduct, setBuildableProduct] = useState<Partial<Product>>({});
+  const [buildableError, setBuildableError] = useState<string | null>(null);
 
   // --- FLAVOR MANAGER STATE ---
   const [pizzaFlavors, setPizzaFlavors] = useState<PizzaFlavor[]>([]);
@@ -124,6 +276,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   // --- ORDERS & REQUESTS STATE ---
   const [orders, setOrders] = useState<Order[]>([]);
   const [isAutoAcceptEnabled, setIsAutoAcceptEnabled] = useState(false);
+  const [isAutoAcceptUpdating, setIsAutoAcceptUpdating] = useState(false);
+  const [draggingOrderId, setDraggingOrderId] = useState<string | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  const [selectedOrderDetails, setSelectedOrderDetails] = useState<Order | null>(null);
+
+  const [availability, setAvailability] = useState<StoreAvailability | null>(null);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [pauseMinutes, setPauseMinutes] = useState('');
+  const [pauseReason, setPauseReason] = useState('');
+  const [pauseUpdating, setPauseUpdating] = useState(false);
   
   // --- COURIERS STATE ---
   const [couriers, setCouriers] = useState<Courier[]>([]); 
@@ -201,6 +363,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       storeData.logoUrl = storeData.logoUrl || '';
 
                       setStoreProfile(storeData);
+                      const storedCategories = Array.isArray((storeData as any).menuCategories)
+                          ? (storeData as any).menuCategories
+                              .map((value: string) => value?.toString().trim())
+                              .filter((value: string) => value)
+                          : [];
+                      setMenuCategories(storedCategories);
+                      setIsAutoAcceptEnabled(Boolean(storeData.autoAcceptOrders));
                       // Load extended address fields if they exist
                       const extendedData = storeData as any;
                       setAddressForm({
@@ -218,6 +387,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       
                       if (extendedData.paymentMethods) {
                           setPaymentMethods(extendedData.paymentMethods);
+                      }
+
+                      setAvailabilityLoading(true);
+                      try {
+                          const latestAvailability = await getStoreAvailability(storeId);
+                          setAvailability(latestAvailability);
+                      } catch (error) {
+                          console.error('Error loading store availability:', error);
+                      } finally {
+                          setAvailabilityLoading(false);
                       }
                   }
 
@@ -274,6 +453,33 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       return () => clearInterval(interval);
   }, [isAutoAcceptEnabled, orders]);
 
+  useEffect(() => {
+      if (menuCategories.length > 0) return;
+      const derived = Array.from(
+          new Set(
+              products
+                  .map((product) => (product.category || '').toString().trim())
+                  .filter((value) => value)
+          )
+      );
+      if (derived.length > 0) setMenuCategories(derived);
+  }, [products, menuCategories.length]);
+
+  useEffect(() => {
+      if (hasSyncedDerivedCategoriesRef.current) return;
+      if (!storeId || menuCategories.length > 0 || products.length === 0) return;
+      const derived = Array.from(
+          new Set(
+              products
+                  .map((product) => (product.category || '').toString().trim())
+                  .filter((value) => value)
+          )
+      );
+      if (derived.length === 0) return;
+      hasSyncedDerivedCategoriesRef.current = true;
+      persistMenuCategories(derived);
+  }, [products, menuCategories.length, storeId]);
+
   // --- CALCULATED METRICS ---
   
   // Receita dos últimos 7 dias (Gráfico)
@@ -321,8 +527,38 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
   // --- HANDLERS ---
 
+  const refreshAvailability = async () => {
+      if (!storeId) return;
+      setAvailabilityLoading(true);
+      try {
+          const latestAvailability = await getStoreAvailability(storeId);
+          setAvailability(latestAvailability);
+          setStoreProfile(prev => ({
+              ...prev,
+              isActive: latestAvailability.isOpen,
+              autoOpenClose: latestAvailability.autoOpenClose,
+              pause: latestAvailability.pause || prev.pause
+          }));
+      } catch (error) {
+          console.error('Error refreshing availability:', error);
+      } finally {
+          setAvailabilityLoading(false);
+      }
+  };
+
   const handleToggleOpenStore = async () => {
       if (!storeId) return;
+      if (storeProfile.autoOpenClose) {
+          const confirmed = window.confirm('Auto abertura esta ativa. Deseja desativar e abrir/fechar manualmente?');
+          if (!confirmed) return;
+          try {
+              await updateStoreAutoOpen(storeId, false);
+              setStoreProfile(prev => ({ ...prev, autoOpenClose: false }));
+          } catch (e) {
+              alert('Erro ao desativar auto abertura.');
+              return;
+          }
+      }
       const newState = !storeProfile.isActive;
       
       // Optimistic UI Update
@@ -330,6 +566,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       
       try {
           await updateStore(storeId, { isActive: newState });
+          await refreshAvailability();
       } catch (e) {
           console.error(e);
           alert("Erro ao atualizar status da loja.");
@@ -338,57 +575,323 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'STORE_LOGO' | 'STORE_COVER' | 'PRODUCT') => {
+  const handleToggleAutoAccept = async () => {
+      if (!storeId || isAutoAcceptUpdating) return;
+      const next = !isAutoAcceptEnabled;
+      setIsAutoAcceptUpdating(true);
+      setIsAutoAcceptEnabled(next);
+      setStoreProfile(prev => ({ ...prev, autoAcceptOrders: next }));
+      try {
+          await updateStoreAutoAccept(storeId, next);
+      } catch (error) {
+          console.error(error);
+          alert('Erro ao atualizar auto-aceite.');
+          setIsAutoAcceptEnabled(!next);
+          setStoreProfile(prev => ({ ...prev, autoAcceptOrders: !next }));
+      } finally {
+          setIsAutoAcceptUpdating(false);
+      }
+  };
+
+  const handleToggleAutoOpen = async () => {
+      if (!storeId) return;
+      const next = !storeProfile.autoOpenClose;
+      setStoreProfile(prev => ({ ...prev, autoOpenClose: next }));
+      try {
+          await updateStoreAutoOpen(storeId, next);
+          await refreshAvailability();
+      } catch (error) {
+          console.error(error);
+          alert('Erro ao atualizar auto abertura.');
+          setStoreProfile(prev => ({ ...prev, autoOpenClose: !next }));
+      }
+  };
+
+  const handlePauseStore = async () => {
+      if (!storeId || pauseUpdating) return;
+      const minutesValue = Number(pauseMinutes);
+      if (!Number.isFinite(minutesValue) || minutesValue <= 0) {
+          alert('Informe os minutos de pausa.');
+          return;
+      }
+      if (!pauseReason.trim()) {
+          alert('Informe o motivo da pausa.');
+          return;
+      }
+      setPauseUpdating(true);
+      try {
+          const result = await pauseStore(storeId, minutesValue, pauseReason.trim());
+          setStoreProfile(prev => ({ ...prev, pause: result.pause, isActive: false }));
+          setPauseMinutes('');
+          setPauseReason('');
+          await refreshAvailability();
+      } catch (error) {
+          console.error(error);
+          alert('Erro ao pausar loja.');
+      } finally {
+          setPauseUpdating(false);
+      }
+  };
+
+  const handleResumePause = async () => {
+      if (!storeId || pauseUpdating) return;
+      setPauseUpdating(true);
+      try {
+          const result = await resumeStorePause(storeId);
+          setStoreProfile(prev => ({ ...prev, pause: result.pause }));
+          await refreshAvailability();
+      } catch (error) {
+          console.error(error);
+          alert('Erro ao retomar loja.');
+      } finally {
+          setPauseUpdating(false);
+      }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, target: 'STORE_LOGO' | 'STORE_COVER' | 'PRODUCT' | 'BUILDABLE_PRODUCT') => {
       const file = e.target.files?.[0];
       if (!file) return;
-      if (file.size > 2 * 1024 * 1024) { alert("A imagem deve ter no máximo 2MB."); return; }
-      const reader = new FileReader();
-      reader.onload = (event) => {
-          const base64 = event.target?.result as string;
-          if (target === 'STORE_LOGO') { setStoreProfile(prev => ({ ...prev, logoUrl: base64 })); } 
-          else if (target === 'STORE_COVER') { setStoreProfile(prev => ({ ...prev, imageUrl: base64 })); } 
-          else { setNewProduct(prev => ({ ...prev, imageUrl: base64 })); }
-      };
-      reader.readAsDataURL(file);
+      const maxSize = 10 * 1024 * 1024;
+      if (file.size > maxSize) { alert('A imagem deve ter no máximo 10MB.'); return; }
+
+      try {
+          const options = target === 'STORE_LOGO'
+              ? { maxWidth: 384, maxHeight: 384, mimeType: file.type === 'image/png' ? 'image/png' : 'image/jpeg', quality: 0.8 }
+              : target === 'STORE_COVER'
+                  ? { maxWidth: 1280, maxHeight: 720, mimeType: 'image/jpeg', quality: 0.75 }
+                  : { maxWidth: 900, maxHeight: 900, mimeType: 'image/jpeg', quality: 0.75 };
+          const base64 = await compressImageFile(file, options);
+          const upload = await uploadImageKit(base64, file.name);
+          if (target === 'STORE_LOGO') {
+              const previousId = storeProfile.logoFileId;
+              setStoreProfile(prev => ({ ...prev, logoUrl: upload.url, logoFileId: upload.fileId }));
+              if (previousId) {
+                  try { await deleteImageKit(previousId); } catch {}
+              }
+          } else if (target === 'STORE_COVER') {
+              const previousId = storeProfile.imageFileId;
+              setStoreProfile(prev => ({ ...prev, imageUrl: upload.url, imageFileId: upload.fileId }));
+              if (previousId) {
+                  try { await deleteImageKit(previousId); } catch {}
+              }
+          } else if (target === 'PRODUCT') {
+              const previousId = newProduct.imageFileId;
+              setNewProduct(prev => ({ ...prev, imageUrl: upload.url, imageFileId: upload.fileId }));
+              if (previousId) {
+                  try { await deleteImageKit(previousId); } catch {}
+              }
+          } else {
+              const previousId = buildableProduct.imageFileId;
+              setBuildableProduct(prev => ({ ...prev, imageUrl: upload.url, imageFileId: upload.fileId }));
+              if (previousId) {
+                  try { await deleteImageKit(previousId); } catch {}
+              }
+          }
+      } catch (error) {
+          console.error('Image upload failed', error);
+          alert('Falha ao enviar imagem. Tente novamente.');
+      }
+  };
+
+  const handleRemoveStoreLogo = async () => {
+      if (!storeProfile.logoUrl) return;
+      if (!confirm('Remover logo da loja?')) return;
+      const previousId = storeProfile.logoFileId;
+      if (previousId) {
+          try { await deleteImageKit(previousId); } catch {}
+      }
+      setStoreProfile(prev => ({ ...prev, logoUrl: '', logoFileId: '' }));
+  };
+
+  const handleRemoveStoreCover = async () => {
+      if (!storeProfile.imageUrl) return;
+      if (!confirm('Remover capa da loja?')) return;
+      const previousId = storeProfile.imageFileId;
+      if (previousId) {
+          try { await deleteImageKit(previousId); } catch {}
+      }
+      setStoreProfile(prev => ({ ...prev, imageUrl: '', imageFileId: '' }));
+  };
+
+  const handleRemoveProductImage = async () => {
+      if (!newProduct.imageUrl) return;
+      if (!confirm('Remover imagem do produto?')) return;
+      const previousId = newProduct.imageFileId;
+      if (previousId) {
+          try { await deleteImageKit(previousId); } catch {}
+      }
+      setNewProduct(prev => ({ ...prev, imageUrl: '', imageFileId: '' }));
+  };
+
+  const handleRemoveBuildableImage = async () => {
+      if (!buildableProduct.imageUrl) return;
+      if (!confirm('Remover imagem do produto montavel?')) return;
+      const previousId = buildableProduct.imageFileId;
+      if (previousId) {
+          try { await deleteImageKit(previousId); } catch {}
+      }
+      setBuildableProduct(prev => ({ ...prev, imageUrl: '', imageFileId: '' }));
   };
 
   // ... (Product Handlers remain same) ...
   const handleAddOptionGroup = () => {
-      const newGroup: ProductOptionGroup = { id: Date.now().toString(), name: 'Novo Grupo (ex: Molhos)', min: 0, max: 1, options: [] };
+      const newGroup: ProductOptionGroup = { 
+          id: Date.now().toString(), 
+          name: 'Novo Grupo (ex: Molhos)', 
+          min: 0, 
+          max: 1, 
+          options: [],
+          isRequired: false,
+          selectionType: 'SINGLE',
+          order: (newProduct.optionGroups?.length || 0) + 1,
+          extraChargeAfter: 0,
+          extraChargeAmount: 0
+      };
       setNewProduct(prev => ({ ...prev, optionGroups: [...(prev.optionGroups || []), newGroup] }));
   };
   const handleUpdateOptionGroup = (groupId: string, field: keyof ProductOptionGroup, value: any) => {
       setNewProduct(prev => ({ ...prev, optionGroups: prev.optionGroups?.map(g => g.id === groupId ? { ...g, [field]: value } : g) }));
   };
   const handleRemoveOptionGroup = (groupId: string) => {
-      setNewProduct(prev => ({ ...prev, optionGroups: prev.optionGroups?.filter(g => g.id !== groupId) }));
+      setNewProduct(prev => {
+          const target = prev.optionGroups?.find((group) => group.id === groupId);
+          if (prev.isPizza && isPizzaSizeGroup(target)) {
+              return prev;
+          }
+          return { ...prev, optionGroups: prev.optionGroups?.filter(g => g.id !== groupId) };
+      });
   };
   const handleAddOptionToGroup = (groupId: string) => {
-      const newOption: ProductOption = { id: Date.now().toString(), name: 'Nova Opção', price: 0, isAvailable: true };
-      setNewProduct(prev => ({ ...prev, optionGroups: prev.optionGroups?.map(g => { if (g.id === groupId) return { ...g, options: [...g.options, newOption] }; return g; }) }));
+      setNewProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => {
+              if (g.id !== groupId) return g;
+              const newOption: ProductOption = { 
+                  id: Date.now().toString(), 
+                  name: 'Nova Opção', 
+                  price: 0, 
+                  isAvailable: true,
+                  order: (g.options?.length || 0) + 1,
+                  stockProductId: ''
+              };
+              return { ...g, options: [...g.options, newOption] };
+          })
+      }));
   };
   const handleUpdateOption = (groupId: string, optionId: string, field: keyof ProductOption, value: any) => {
       setNewProduct(prev => ({ ...prev, optionGroups: prev.optionGroups?.map(g => { if (g.id === groupId) return { ...g, options: g.options.map(o => o.id === optionId ? { ...o, [field]: value } : o) }; return g; }) }));
   };
   const handleRemoveOption = (groupId: string, optionId: string) => {
-      setNewProduct(prev => ({ ...prev, optionGroups: prev.optionGroups?.map(g => { if (g.id === groupId) return { ...g, options: g.options.filter(o => o.id !== optionId) }; return g; }) }));
+      setNewProduct(prev => {
+          const target = prev.optionGroups?.find((group) => group.id === groupId);
+          if (prev.isPizza && isPizzaSizeGroup(target)) {
+              return prev;
+          }
+          return {
+              ...prev,
+              optionGroups: prev.optionGroups?.map(g => {
+                  if (g.id === groupId) return { ...g, options: g.options.filter(o => o.id !== optionId) };
+                  return g;
+              })
+          };
+      });
   };
   const handleSaveProduct = async () => {
       if (!storeId) return;
       if (!newProduct.name) { setProductError('Nome é obrigatório.'); return; }
-      if ((newProduct.price || 0) <= 0) { setProductError('Preço deve ser maior que zero.'); return; }
+      const priceValue = Number(newProduct.price);
+      if (!Number.isFinite(priceValue) || priceValue < 0) {
+          setProductError('Preço deve ser zero ou maior.');
+          return;
+      }
       
       const isPizza = !!newProduct.isPizza;
       const maxFlavors = isPizza ? (newProduct.maxFlavors || 1) : 1;
+      const sizeGroup = isPizza
+          ? (newProduct.optionGroups || []).find((group) => isPizzaSizeGroup(group))
+          : null;
+      const availableSizeOptions = sizeGroup
+          ? (sizeGroup.options || []).filter((opt) => opt.isAvailable !== false)
+          : [];
+      const availableSizeKeys = Array.from(
+          new Set(availableSizeOptions.map((opt) => getSizeKeyFromOption(opt)).filter(Boolean))
+      );
+
+      if (isPizza) {
+          if (!sizeGroup) {
+              setProductError('Adicione o grupo de tamanho para pizzas.');
+              return;
+          }
+          if (availableSizeOptions.length === 0) {
+              setProductError('Selecione pelo menos um tamanho disponível.');
+              return;
+          }
+          if (newProduct.priceMode === 'BY_SIZE') {
+              const missingPrices = availableSizeOptions
+                  .filter((opt) => !Number.isFinite(Number(opt.price)) || Number(opt.price) <= 0)
+                  .map((opt) => opt.name || 'Tamanho');
+              if (missingPrices.length > 0) {
+                  setProductError(`Preencha o preço dos tamanhos disponíveis: ${missingPrices.join(', ')}`);
+                  return;
+              }
+          }
+      }
+
+      if (isPizza && newProduct.priceMode === 'BY_SIZE') {
+          const sizeKeys = availableSizeKeys;
+          const allowedIds = (newProduct.availableFlavorIds || []).length
+              ? newProduct.availableFlavorIds || []
+              : pizzaFlavors.map((flavor) => flavor.id);
+          const flavorsToCheck = pizzaFlavors.filter((flavor) => allowedIds.includes(flavor.id));
+          if (sizeKeys.length > 0 && flavorsToCheck.length > 0) {
+              const missing: string[] = [];
+              flavorsToCheck.forEach((flavor) => {
+                  const prices = flavor.pricesBySize || {};
+                  sizeKeys.forEach((sizeKey) => {
+                      const value = prices[sizeKey];
+                      if (!value || Number(value) <= 0) {
+                          missing.push(`${flavor.name} (${sizeKey})`);
+                      }
+                  });
+              });
+              if (missing.length > 0) {
+                  setProductError(`Preencha os preços dos sabores para os tamanhos usados: ${missing.join(', ')}`);
+                  return;
+              }
+          }
+      }
 
       const productToSave: Omit<Product, 'id'> & { id?: string } = {
-          id: newProduct.id, storeId: storeId, name: newProduct.name, description: newProduct.description || '', price: Number(newProduct.price),
-          promoPrice: newProduct.promoPrice ? Number(newProduct.promoPrice) : undefined, category: newProduct.category || 'Lanches', imageUrl: newProduct.imageUrl || '', 
-          isAvailable: newProduct.isAvailable !== undefined ? newProduct.isAvailable : true, 
+          id: newProduct.id, storeId: storeId, name: newProduct.name, description: newProduct.description || '', price: priceValue,
+          promoPrice: newProduct.promoPrice ? Number(newProduct.promoPrice) : undefined, category: newProduct.category || 'Lanches', imageUrl: newProduct.imageUrl || '', imageFileId: newProduct.imageFileId,
+          isAvailable: newProduct.isAvailable !== undefined ? newProduct.isAvailable : true,
+          isBuildable: newProduct.isBuildable ?? false,
+          priceMode: newProduct.priceMode,
           isPizza: isPizza, 
           maxFlavors: maxFlavors,
           allowHalfHalf: maxFlavors >= 2, 
-          splitSurcharge: newProduct.splitSurcharge ? Number(newProduct.splitSurcharge) : undefined,
+          maxFlavorsBySize: isPizza
+              ? (() => {
+                    const defaults: Record<string, number> = {
+                        brotinho: 2,
+                        pequena: 2,
+                        media: 3,
+                        grande: 4,
+                        familia: 5
+                    };
+                    const current = { ...(newProduct.maxFlavorsBySize || {}) } as Record<string, number>;
+                    availableSizeKeys.forEach((sizeKey) => {
+                        const raw = current[sizeKey];
+                        if (!Number.isFinite(Number(raw)) || Number(raw) <= 0) {
+                            current[sizeKey] = defaults[sizeKey] || 1;
+                        }
+                    });
+                    return current;
+                })()
+              : newProduct.maxFlavorsBySize,
+          pricingStrategiesAllowed: newProduct.pricingStrategiesAllowed,
+          defaultPricingStrategy: newProduct.defaultPricingStrategy,
+          customerCanChoosePricingStrategy: newProduct.customerCanChoosePricingStrategy,
           availableFlavorIds: newProduct.availableFlavorIds || [],
           optionGroups: newProduct.optionGroups || []
       };
@@ -396,25 +899,439 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           const savedProduct = await saveProduct(productToSave);
           if (newProduct.id) setProducts(products.map(p => p.id === savedProduct.id ? savedProduct : p));
           else setProducts([savedProduct, ...products]);
+          const nextCategory = (savedProduct.category || '').toString().trim();
+          if (nextCategory) {
+              const exists = menuCategories.some(
+                  (value) => value.toLowerCase() === nextCategory.toLowerCase()
+              );
+              if (!exists) {
+                  await persistMenuCategories([...menuCategories, nextCategory]);
+              }
+          }
           setShowProductModal(false);
       } catch (e) { alert("Erro ao salvar produto."); }
   };
 
   const handleDeleteProduct = async (id: string) => {
       if (confirm('Tem certeza que deseja excluir este produto?')) {
-          try { await deleteProduct(id); setProducts(products.filter(p => p.id !== id)); } catch (e) { alert("Erro ao excluir produto."); }
+          try {
+              const existing = products.find((product) => product.id === id);
+              if (existing?.imageFileId) {
+                  try { await deleteImageKit(existing.imageFileId); } catch {}
+              }
+              await deleteProduct(id);
+              setProducts(products.filter(p => p.id !== id));
+          } catch (e) {
+              alert("Erro ao excluir produto.");
+          }
       }
   };
 
+  const generateId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const handleAddBuildableGroup = () => {
+      const newGroup: ProductOptionGroup = {
+          id: generateId(),
+          name: 'Novo Grupo (ex: Acompanhamentos)',
+          min: 0,
+          max: 1,
+          options: [],
+          isRequired: false,
+          selectionType: 'SINGLE',
+          order: (buildableProduct.optionGroups?.length || 0) + 1,
+          extraChargeAfter: 0,
+          extraChargeAmount: 0
+      };
+      setBuildableProduct(prev => ({ ...prev, optionGroups: [...(prev.optionGroups || []), newGroup] }));
+  };
+
+  const handleAddSizeGroup = () => {
+      setBuildableProduct(prev => {
+          const exists = (prev.optionGroups || []).some(group => (group.name || '').toLowerCase() === 'tamanho');
+          if (exists) return prev;
+          const sizeGroup: ProductOptionGroup = {
+              id: generateId(),
+              name: 'Tamanho',
+              min: 1,
+              max: 1,
+              options: [
+                  { id: generateId(), name: 'Pequeno', price: 0, isAvailable: true, order: 1, stockProductId: '' },
+                  { id: generateId(), name: 'Medio', price: 4, isAvailable: true, order: 2, stockProductId: '' },
+                  { id: generateId(), name: 'Grande', price: 8, isAvailable: true, order: 3, stockProductId: '' }
+              ],
+              isRequired: true,
+              selectionType: 'SINGLE',
+              order: (prev.optionGroups?.length || 0) + 1,
+              extraChargeAfter: 0,
+              extraChargeAmount: 0
+          };
+          return { ...prev, optionGroups: [...(prev.optionGroups || []), sizeGroup] };
+      });
+  };
+
+  const handleUpdateBuildableGroup = (groupId: string, field: keyof ProductOptionGroup, value: any) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => g.id === groupId ? { ...g, [field]: value } : g)
+      }));
+  };
+
+  const handlePatchBuildableGroup = (groupId: string, updates: Partial<ProductOptionGroup>) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => g.id === groupId ? { ...g, ...updates } : g)
+      }));
+  };
+
+  const handleRemoveBuildableGroup = (groupId: string) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.filter(g => g.id !== groupId)
+      }));
+  };
+
+  const handleAddBuildableOption = (groupId: string) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => {
+              if (g.id !== groupId) return g;
+              const newOption: ProductOption = {
+                  id: generateId(),
+                  name: 'Novo Item',
+                  price: 0,
+                  isAvailable: true,
+                  order: (g.options?.length || 0) + 1,
+                  stockProductId: ''
+              };
+              return { ...g, options: [...g.options, newOption] };
+          })
+      }));
+  };
+
+  const handleUpdateBuildableOption = (groupId: string, optionId: string, field: keyof ProductOption, value: any) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => {
+              if (g.id !== groupId) return g;
+              return { ...g, options: g.options.map(o => o.id === optionId ? { ...o, [field]: value } : o) };
+          })
+      }));
+  };
+
+  const handleRemoveBuildableOption = (groupId: string, optionId: string) => {
+      setBuildableProduct(prev => ({
+          ...prev,
+          optionGroups: prev.optionGroups?.map(g => {
+              if (g.id !== groupId) return g;
+              return { ...g, options: g.options.filter(o => o.id !== optionId) };
+          })
+      }));
+  };
+
+  const handleApplyBuildableTemplate = (template: 'MARMITA' | 'PIZZA' | 'LANCHE') => {
+      const createOption = (name: string, price: number, order: number): ProductOption => ({
+          id: generateId(),
+          name,
+          price,
+          isAvailable: true,
+          order,
+          stockProductId: ''
+      });
+      const createGroup = (data: {
+          name: string;
+          min: number;
+          max: number;
+          selectionType: 'SINGLE' | 'MULTIPLE';
+          order: number;
+          isRequired: boolean;
+          extraChargeAfter?: number;
+          extraChargeAmount?: number;
+          options: ProductOption[];
+      }): ProductOptionGroup => ({
+          id: generateId(),
+          name: data.name,
+          min: data.min,
+          max: data.max,
+          options: data.options,
+          isRequired: data.isRequired,
+          selectionType: data.selectionType,
+          order: data.order,
+          extraChargeAfter: data.extraChargeAfter || 0,
+          extraChargeAmount: data.extraChargeAmount || 0
+      });
+
+      let templateProduct: Partial<Product> = {};
+      if (template === 'MARMITA') {
+          templateProduct = {
+              name: 'Marmita Montável',
+              category: 'Marmitas',
+              price: 25,
+              priceMode: 'BASE',
+              description: 'Monte sua marmita do jeito que quiser.',
+              isAvailable: true,
+              isBuildable: true,
+              isPizza: false,
+              optionGroups: [
+                  createGroup({
+                      name: 'Tamanho',
+                      min: 1,
+                      max: 1,
+                      selectionType: 'SINGLE',
+                      order: 1,
+                      isRequired: true,
+                      options: [
+                          createOption('Pequena', 0, 1),
+                          createOption('Media', 3, 2),
+                          createOption('Grande', 6, 3)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Proteina',
+                      min: 1,
+                      max: 2,
+                      selectionType: 'MULTIPLE',
+                      order: 2,
+                      isRequired: true,
+                      extraChargeAfter: 1,
+                      extraChargeAmount: 4,
+                      options: [
+                          createOption('Frango', 0, 1),
+                          createOption('Carne', 2, 2),
+                          createOption('Peixe', 3, 3)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Acompanhamentos',
+                      min: 2,
+                      max: 3,
+                      selectionType: 'MULTIPLE',
+                      order: 3,
+                      isRequired: true,
+                      options: [
+                          createOption('Arroz', 0, 1),
+                          createOption('Feijao', 0, 2),
+                          createOption('Salada', 0, 3),
+                          createOption('Legumes', 0, 4)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Extras',
+                      min: 0,
+                      max: 5,
+                      selectionType: 'MULTIPLE',
+                      order: 4,
+                      isRequired: false,
+                      options: [
+                          createOption('Ovo', 2, 1),
+                          createOption('Bacon', 3, 2),
+                          createOption('Queijo', 2, 3)
+                      ]
+                  })
+              ]
+          };
+      }
+      if (template === 'PIZZA') {
+          templateProduct = {
+              name: 'Pizza Montável',
+              category: 'Pizzas',
+              price: 0,
+              priceMode: 'BY_SIZE',
+              description: 'Escolha tamanho, sabores e extras.',
+              isAvailable: true,
+              isBuildable: true,
+              isPizza: false,
+              optionGroups: [
+                  createGroup({
+                      name: 'Tamanho',
+                      min: 1,
+                      max: 1,
+                      selectionType: 'SINGLE',
+                      order: 1,
+                      isRequired: true,
+                      options: [
+                          createOption('Broto', 22, 1),
+                          createOption('Media', 30, 2),
+                          createOption('Grande', 38, 3)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Sabores',
+                      min: 1,
+                      max: 2,
+                      selectionType: 'MULTIPLE',
+                      order: 2,
+                      isRequired: true,
+                      extraChargeAfter: 1,
+                      extraChargeAmount: 5,
+                      options: [
+                          createOption('Calabresa', 0, 1),
+                          createOption('Mussarela', 0, 2),
+                          createOption('Portuguesa', 0, 3),
+                          createOption('Frango com catupiry', 2, 4)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Extras',
+                      min: 0,
+                      max: 4,
+                      selectionType: 'MULTIPLE',
+                      order: 3,
+                      isRequired: false,
+                      options: [
+                          createOption('Borda recheada', 6, 1),
+                          createOption('Molho especial', 2, 2),
+                          createOption('Mais queijo', 4, 3)
+                      ]
+                  })
+              ]
+          };
+      }
+      if (template === 'LANCHE') {
+          templateProduct = {
+              name: 'Lanche Montável',
+              category: 'Lanches',
+              price: 18,
+              priceMode: 'BASE',
+              description: 'Escolha pao, proteina e extras.',
+              isAvailable: true,
+              isBuildable: true,
+              isPizza: false,
+              optionGroups: [
+                  createGroup({
+                      name: 'Pao',
+                      min: 1,
+                      max: 1,
+                      selectionType: 'SINGLE',
+                      order: 1,
+                      isRequired: true,
+                      options: [
+                          createOption('Brioche', 0, 1),
+                          createOption('Australiano', 2, 2),
+                          createOption('Tradicional', 0, 3)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Proteina',
+                      min: 1,
+                      max: 1,
+                      selectionType: 'SINGLE',
+                      order: 2,
+                      isRequired: true,
+                      options: [
+                          createOption('Hamburguer', 0, 1),
+                          createOption('Frango crispy', 3, 2),
+                          createOption('Veggie', 2, 3)
+                      ]
+                  }),
+                  createGroup({
+                      name: 'Adicionais',
+                      min: 0,
+                      max: 4,
+                      selectionType: 'MULTIPLE',
+                      order: 3,
+                      isRequired: false,
+                      options: [
+                          createOption('Queijo', 2, 1),
+                          createOption('Bacon', 3, 2),
+                          createOption('Ovo', 2, 3),
+                          createOption('Cebola caramelizada', 2, 4)
+                      ]
+                  })
+              ]
+          };
+      }
+
+      setBuildableProduct({
+          ...templateProduct,
+          imageUrl: '',
+          promoPrice: undefined
+      });
+      setShowBuildableProductModal(true);
+  };
+
+  const handleEditBuildableProduct = (product: Product) => {
+      setBuildableProduct({
+          ...product,
+          isBuildable: true,
+          priceMode: product.priceMode || (product.price > 0 ? 'BASE' : 'BY_SIZE')
+      });
+      setBuildableError(null);
+      setShowBuildableProductModal(true);
+  };
+
+  const handleSaveBuildableProduct = async () => {
+      if (!storeId) return;
+      if (!buildableProduct.name) { setBuildableError('Nome e obrigatorio.'); return; }
+
+      const priceMode = buildableProduct.priceMode || 'BASE';
+      const basePrice = Number(buildableProduct.price || 0);
+      if (priceMode === 'BASE' && (!Number.isFinite(basePrice) || basePrice < 0)) {
+          setBuildableError('Preço base deve ser zero ou maior.');
+          return;
+      }
+      if (priceMode === 'BY_SIZE' && (buildableProduct.optionGroups || []).length === 0) {
+          setBuildableError('Adicione pelo menos um grupo de tamanho para preços.');
+          return;
+      }
+
+      const productToSave: Omit<Product, 'id'> & { id?: string } = {
+          id: buildableProduct.id,
+          storeId,
+          name: buildableProduct.name,
+          description: buildableProduct.description || '',
+          price: basePrice,
+          promoPrice: buildableProduct.promoPrice ? Number(buildableProduct.promoPrice) : undefined,
+          category: buildableProduct.category || 'Montáveis',
+          imageUrl: buildableProduct.imageUrl || '',
+          imageFileId: buildableProduct.imageFileId,
+          isAvailable: buildableProduct.isAvailable !== undefined ? buildableProduct.isAvailable : true,
+          isBuildable: true,
+          priceMode: priceMode,
+          isPizza: false,
+          allowHalfHalf: false,
+          maxFlavors: 1,
+          optionGroups: buildableProduct.optionGroups || []
+      };
+
+      try {
+          const savedProduct = await saveProduct(productToSave);
+          if (buildableProduct.id) setProducts(products.map(p => p.id === savedProduct.id ? savedProduct : p));
+          else setProducts([savedProduct, ...products]);
+          const nextCategory = (savedProduct.category || '').toString().trim();
+          if (nextCategory) {
+              const exists = menuCategories.some(
+                  (value) => value.toLowerCase() === nextCategory.toLowerCase()
+              );
+              if (!exists) {
+                  await persistMenuCategories([...menuCategories, nextCategory]);
+              }
+          }
+          setShowBuildableProductModal(false);
+          setBuildableProduct({});
+          setBuildableError(null);
+      } catch (e) { alert("Erro ao salvar produto montável."); }
+  };
+
   // --- Pizza Flavor Handlers ---
-  const handleSaveFlavor = async () => {
+      const handleSaveFlavor = async () => {
       if (!storeId || !newFlavor.name) return;
+      const normalizedPrices = normalizeFlavorPrices(newFlavor.pricesBySize as Record<string, unknown>);
+      const hasInvalid = Object.values(newFlavor.pricesBySize || {}).some((value) => {
+          if (value === '' || value === null || value === undefined) return false;
+          const parsed = Number(value);
+          return !Number.isFinite(parsed) || parsed <= 0;
+      });
+      if (hasInvalid) {
+          alert('Preços devem ser maiores que zero. Deixe vazio para remover.');
+          return;
+      }
       const flavorToSave: PizzaFlavor = {
           id: newFlavor.id || '',
           storeId,
           name: newFlavor.name,
           description: newFlavor.description || '',
-          isAvailable: newFlavor.isAvailable ?? true
+          isAvailable: newFlavor.isAvailable ?? true,
+          pricesBySize: normalizedPrices
       };
       try {
           const payload = newFlavor.id ? flavorToSave : { ...flavorToSave, id: undefined };
@@ -480,7 +1397,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const handleDeleteCoupon = async (id: string) => {
       if(confirm("Excluir cupom?")) { try { await deleteCoupon(id); setCoupons(prev => prev.filter(c => c.id !== id)); } catch(e) { alert("Erro ao excluir"); } }
   };
-  const handleUpdateStatus = async (orderId: string, status: string) => { try { await updateOrderStatus(orderId, status); } catch (e) { alert("Erro ao atualizar status."); } };
+  const handleUpdateStatus = async (orderId: string, status: string, reason?: string) => {
+      try {
+          await updateOrderStatus(orderId, status as Order['status'], reason);
+      } catch (e) {
+          alert("Erro ao atualizar status.");
+      }
+  };
 
   // --- SALES & DELETION LOGIC ---
   const handleDeleteSale = async () => {
@@ -524,9 +1447,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   // Address Handlers
   const handleCepBlur = async () => {
       if (!GEO_API_ENABLED) { alert("Busca de CEP desativada temporariamente."); return; }
-      const cleanCep = addressForm.cep.replace(/\D/g, '');
-      if (cleanCep.length === 8) {
-          try { const response = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`); const data = await response.json(); if (!data.erro) { setAddressForm(prev => ({ ...prev, street: data.logradouro, district: data.bairro, city: data.localidade, state: data.uf })); } else { alert("CEP não encontrado."); } } catch (error) { alert("Erro ao buscar CEP."); }
+      const cepData = await fetchCepData(addressForm.cep);
+      if (cepData) {
+          setAddressForm(prev => ({
+              ...prev,
+              street: cepData.street,
+              district: cepData.district,
+              city: cepData.city,
+              state: cepData.state
+          }));
+      } else if (addressForm.cep.replace(/\D/g, '').length === 8) {
+          alert("CEP não encontrado.");
       }
   };
   const handleGeocodeAddress = async () => {
@@ -537,7 +1468,75 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
   const handleSaveStoreSettings = async () => {
       if (!storeId || !storeProfile) return;
-      try { const payload = { ...storeProfile, ...addressForm, paymentMethods }; await updateStore(storeId, payload); alert("Configurações salvas com sucesso!"); } catch (e) { alert("Erro ao salvar configurações."); }
+      try {
+          const {
+              schedule,
+              autoOpenClose,
+              autoAcceptOrders,
+              ...rest
+          } = storeProfile;
+          const payload = { ...rest, ...addressForm, paymentMethods };
+          await updateStore(storeId, payload);
+          if (schedule && schedule.length > 0) {
+              await updateStoreSchedule(storeId, schedule, autoOpenClose);
+          }
+          if (typeof autoAcceptOrders === 'boolean') {
+              await updateStoreAutoAccept(storeId, autoAcceptOrders);
+          }
+          await refreshAvailability();
+          alert("Configurações salvas com sucesso!");
+      } catch (e) {
+          alert("Erro ao salvar configurações.");
+      }
+  };
+
+  const handleGenerateMerchantId = async () => {
+      if (!storeId) return;
+      setMerchantActionLoading(true);
+      try {
+          const result = await generateMerchantId(storeId);
+          setStoreProfile((prev) => ({
+              ...prev,
+              merchantId: result.merchantId,
+              merchantIdCreatedAt: result.createdAt || prev.merchantIdCreatedAt,
+              merchantIdRevokedAt: null
+          }));
+          alert(result.status === 'existing' ? 'Merchant ID ja estava ativo.' : 'Merchant ID gerado com sucesso!');
+      } catch (e) {
+          alert('Erro ao gerar Merchant ID.');
+      } finally {
+          setMerchantActionLoading(false);
+      }
+  };
+
+  const handleRevokeMerchantId = async () => {
+      if (!storeId || !storeProfile.merchantId) return;
+      const confirmed = window.confirm('Deseja revogar o Merchant ID desta loja?');
+      if (!confirmed) return;
+      setMerchantActionLoading(true);
+      try {
+          const result = await revokeMerchantId(storeId);
+          setStoreProfile((prev) => ({
+              ...prev,
+              merchantId: '',
+              merchantIdRevokedAt: result.revokedAt
+          }));
+          alert('Merchant ID revogado com sucesso.');
+      } catch (e) {
+          alert('Erro ao revogar Merchant ID.');
+      } finally {
+          setMerchantActionLoading(false);
+      }
+  };
+
+  const handleCopyMerchantId = async () => {
+      if (!storeProfile.merchantId) return;
+      try {
+          await navigator.clipboard.writeText(storeProfile.merchantId);
+          alert('Merchant ID copiado.');
+      } catch {
+          alert('Nao foi possivel copiar o Merchant ID.');
+      }
   };
   const handleTogglePaymentMethod = (id: string) => { setPaymentMethods(prev => prev.map(pm => pm.id === id ? { ...pm, active: !pm.active } : pm)); };
   const normalizeSlug = (value: string) =>
@@ -655,83 +1654,220 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       </div>
   );
 
-  const renderOverview = () => (
-      <div className="animate-fade-in space-y-6">
-          <div className="flex flex-col md:flex-row justify-between items-end gap-4 mb-4">
-              <div><h2 className="text-3xl font-bold text-slate-800 dark:text-white tracking-tight">Painel de Controle</h2><p className="text-gray-500 dark:text-gray-400 mt-1">Acompanhe o desempenho do seu negócio em tempo real.</p></div>
-              <div className="flex items-center gap-3"><div className="px-4 py-2 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg shadow-sm text-sm font-medium text-slate-600 dark:text-gray-300 flex items-center gap-2"><Calendar size={16} className="text-red-600"/> {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}</div></div>
-          </div>
+  const renderOverview = () => {
+      const today = new Date();
+      const todayLabel = today.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+      const ordersToday = orders.filter((o) => new Date(o.createdAt || '').toDateString() === today.toDateString());
+      const revenueToday = ordersToday
+          .filter((o) => o.status !== 'CANCELLED')
+          .reduce((acc, o) => acc + o.total, 0);
+      const pendingOrders = orders.filter((o) => o.status === 'PENDING').length;
+      const avgTicket = ordersToday.length > 0 ? revenueToday / ordersToday.length : 0;
+      const uniqueCustomersToday = new Set(
+          ordersToday
+              .map((order) => order.userId || order.customerName)
+              .filter(Boolean)
+      ).size;
+      const weeklyMax = Math.max(1, ...weeklyRevenueData.map((item) => item.value));
+      const peakDay = weeklyRevenueData.reduce((best, item) => (item.value > best.value ? item : best), weeklyRevenueData[0]);
+      const deliveryCount = ordersToday.filter((o) => o.type === 'DELIVERY').length;
+      const pickupCount = ordersToday.filter((o) => o.type === 'PICKUP').length;
+      const tableCount = ordersToday.filter((o) => o.type === 'TABLE').length;
+      const recentOrders = orders.slice(0, 5);
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
-                  <div className="w-14 h-14 bg-green-50 dark:bg-green-900/20 rounded-full flex items-center justify-center text-green-600"><DollarSign size={28} /></div>
-                  <div><p className="text-xs font-bold text-gray-500 uppercase">Faturamento Hoje</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">{formatCurrencyBRL(orders.filter(o => o.status !== 'CANCELLED' && new Date(o.createdAt || '').toDateString() === new Date().toDateString()).reduce((acc, o) => acc + o.total, 0))}</h3></div>
-              </div>
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
-                  <div className="w-14 h-14 bg-blue-50 dark:bg-blue-900/20 rounded-full flex items-center justify-center text-blue-600"><ShoppingBasket size={28} /></div>
-                  <div><p className="text-xs font-bold text-gray-500 uppercase">Pedidos Hoje</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">{orders.filter(o => new Date(o.createdAt || '').toDateString() === new Date().toDateString()).length}</h3></div>
-              </div>
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
-                  <div className="w-14 h-14 bg-purple-50 dark:bg-purple-900/20 rounded-full flex items-center justify-center text-purple-600"><Users size={28} /></div>
-                  <div><p className="text-xs font-bold text-gray-500 uppercase">Novos Clientes</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">--</h3></div>
-              </div>
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex items-center gap-4">
-                  <div className="w-14 h-14 bg-orange-50 dark:bg-orange-900/20 rounded-full flex items-center justify-center text-orange-600"><AlertTriangle size={28} /></div>
-                  <div><p className="text-xs font-bold text-gray-500 uppercase">Pendentes</p><h3 className="text-2xl font-extrabold text-slate-800 dark:text-white">{orders.filter(o => o.status === 'PENDING').length}</h3></div>
-              </div>
-          </div>
+      return (
+          <div className="animate-fade-in space-y-6 font-body">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-rose-50/60 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-20 -left-24 h-48 w-48 rounded-full bg-red-200/40 blur-3xl dark:bg-red-900/20" />
+                  <div className="pointer-events-none absolute -bottom-28 right-6 h-56 w-56 rounded-full bg-orange-200/40 blur-3xl dark:bg-orange-900/20" />
+                  <div className="relative space-y-6">
+                      <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+                          <div>
+                              <span className="text-xs font-bold tracking-[0.2em] text-red-500 uppercase">Visao geral</span>
+                              <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 dark:text-white mt-2 font-display">
+                                  Central de comando da loja
+                              </h2>
+                              <p className="text-sm text-slate-500 dark:text-slate-400 mt-2 max-w-2xl">
+                                  Um painel vivo do que esta acontecendo agora, com sinais claros do que exige atencao.
+                              </p>
+                      </div>
+                      <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-full text-xs font-bold text-slate-600 dark:text-slate-300">
+                          <Calendar size={14} className="text-red-500" />
+                          {todayLabel}
+                      </div>
+                  </div>
 
-          <div className="grid lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                  <h3 className="font-bold text-slate-800 dark:text-white mb-6">Receita Semanal (Real)</h3>
-                  <ChartContainer className="h-80">
-                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                          <AreaChart data={weeklyRevenueData}>
-                              <defs><linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#EF4444" stopOpacity={0.3} /><stop offset="95%" stopColor="#EF4444" stopOpacity={0} /></linearGradient></defs>
-                              <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false} />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF' }} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF' }} tickFormatter={(value) => `R$${value}`} />
-                              <Tooltip 
-                                contentStyle={{ backgroundColor: isDarkMode ? '#0f172a' : '#fff', border: isDarkMode ? '1px solid #1e293b' : 'none', borderRadius: '8px' }} 
-                                itemStyle={{ color: isDarkMode ? '#e2e8f0' : '#1e293b' }}
-                                labelStyle={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}
-                              />
-                              <Area type="monotone" dataKey="value" stroke="#EF4444" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
-                          </AreaChart>
-                      </ResponsiveContainer>
-                  </ChartContainer>
-              </div>
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                  <h3 className="font-bold text-slate-800 dark:text-white mb-6">Pedidos Recentes</h3>
-                  <div className="space-y-4">
-                      {orders.length === 0 ? (
-                          <p className="text-gray-400 text-center text-sm py-8">Nenhum pedido recente.</p>
-                      ) : (
-                          orders.slice(0, 5).map(order => (
-                              <div key={order.id} className="flex items-center gap-3 pb-3 border-b border-gray-50 last:border-0">
-                                  <div className="w-10 h-10 bg-gray-100 dark:bg-slate-800 rounded-lg flex items-center justify-center font-bold text-gray-500 text-xs">#{order.id.slice(0,4)}</div>
-                                  <div className="flex-1">
-                                      <p className="font-bold text-sm text-slate-800 dark:text-white">{order.customerName}</p>
-                                      <p className="text-xs text-gray-400">{order.items.length} itens • {order.time}</p>
-                                      {order.type && (
-                                          <p className="text-[11px] text-gray-400">
-                                              {order.type === 'TABLE'
-                                                  ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
-                                                  : order.type === 'PICKUP'
-                                                  ? 'Retirada'
-                                                  : 'Entrega'}
-                                          </p>
-                                      )}
+                  <div className="grid lg:grid-cols-[1.2fr,0.8fr] gap-6">
+                      <div className="space-y-6">
+                          <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-6 md:p-7 shadow-xl shadow-red-100/30 dark:shadow-none">
+                              <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full border border-dashed border-red-200/60 dark:border-red-900/40" />
+                              <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full border border-dashed border-orange-200/60 dark:border-orange-900/40" />
+                              <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                                  <div>
+                                      <p className="text-xs font-bold uppercase text-slate-400">Hoje</p>
+                                      <div className="flex items-center gap-3 mt-2">
+                                          <div className="w-12 h-12 rounded-2xl bg-red-600 text-white flex items-center justify-center shadow-lg shadow-red-600/20">
+                                              <TrendingUp size={20} />
+                                          </div>
+                                          <div>
+                                              <p className="text-sm text-slate-500 dark:text-slate-400">Faturamento</p>
+                                              <p className="text-3xl font-extrabold text-slate-900 dark:text-white">{formatCurrencyBRL(revenueToday)}</p>
+                                          </div>
+                                      </div>
+                                      <div className="mt-4 flex flex-wrap gap-3">
+                                          <div className="px-3 py-2 rounded-xl bg-slate-100/80 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                                              {ordersToday.length} pedidos hoje
+                                          </div>
+                                          <div className="px-3 py-2 rounded-xl bg-slate-100/80 dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                                              Ticket medio {formatCurrencyBRL(avgTicket)}
+                                          </div>
+                                          <div className={`px-3 py-2 rounded-xl text-xs font-semibold ${pendingOrders > 0 ? 'bg-yellow-100 text-yellow-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                              {pendingOrders > 0 ? `${pendingOrders} pendentes` : 'Fluxo limpo'}
+                                          </div>
+                                      </div>
                                   </div>
-                                  <span className={`text-xs font-bold px-2 py-1 rounded-full ${order.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' : order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{order.status === 'PENDING' ? 'Novo' : order.status}</span>
+                                  <div className="flex-1 grid grid-cols-2 gap-3">
+                                      {[
+                                          { label: 'Entrega', value: deliveryCount, color: 'bg-sky-500' },
+                                          { label: 'Retirada', value: pickupCount, color: 'bg-indigo-500' },
+                                          { label: 'Mesa', value: tableCount, color: 'bg-emerald-500' },
+                                          { label: 'Total', value: ordersToday.length, color: 'bg-red-500' }
+                                      ].map((item) => (
+                                          <div key={item.label} className="rounded-2xl border border-slate-200/70 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 flex items-center gap-3">
+                                              <div className={`w-9 h-9 rounded-xl ${item.color} text-white flex items-center justify-center text-xs font-bold`}>
+                                                  {item.value}
+                                              </div>
+                                              <div>
+                                                  <p className="text-[11px] uppercase font-bold text-slate-400">{item.label}</p>
+                                                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Pedidos</p>
+                                              </div>
+                                          </div>
+                                      ))}
+                                  </div>
                               </div>
-                          ))
-                      )}
+                          </div>
+
+                          <div className="grid md:grid-cols-3 gap-4">
+                              {[
+                                  {
+                                      label: 'Receita semanal',
+                                      value: formatCurrencyBRL(weeklyRevenueData.reduce((acc, item) => acc + item.value, 0)),
+                                      hint: `Pico em ${peakDay?.name || ''}`
+                                  },
+                                  {
+                                      label: 'Pedidos pendentes',
+                                      value: pendingOrders.toString(),
+                                      hint: pendingOrders > 0 ? 'Exige prioridade' : 'Tudo ok'
+                                  },
+                                  {
+                                      label: 'Clientes novos',
+                                      value: uniqueCustomersToday.toString(),
+                                      hint: 'Hoje'
+                                  }
+                              ].map((item) => (
+                                  <div key={item.label} className="rounded-3xl border border-slate-200/70 dark:border-slate-800 bg-white/95 dark:bg-slate-900/80 p-4 shadow-sm">
+                                      <p className="text-xs font-bold uppercase text-slate-400">{item.label}</p>
+                                      <p className="text-2xl font-extrabold text-slate-900 dark:text-white mt-2">{item.value}</p>
+                                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{item.hint}</p>
+                                  </div>
+                              ))}
+                          </div>
+
+                          <div className="rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-5">
+                              <div className="flex items-center justify-between mb-4">
+                                  <div>
+                                      <p className="text-xs font-bold uppercase text-slate-400">Pulso semanal</p>
+                                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Volume por dia</p>
+                                  </div>
+                                  <span className="text-xs font-bold text-slate-500">Max {formatCurrencyBRL(weeklyMax)}</span>
+                              </div>
+                              <div className="grid grid-cols-7 gap-2">
+                                  {weeklyRevenueData.map((item) => (
+                                      <div key={item.name} className="flex flex-col items-center gap-2">
+                                          <div className="w-full h-24 bg-slate-100 dark:bg-slate-800 rounded-full flex items-end overflow-hidden">
+                                              <div
+                                                  className="w-full bg-gradient-to-t from-red-500 via-red-400 to-orange-300 rounded-full"
+                                                  style={{ height: `${Math.max(12, (item.value / weeklyMax) * 100)}%` }}
+                                              />
+                                          </div>
+                                          <span className="text-[10px] font-bold text-slate-400 uppercase">{item.name}</span>
+                                      </div>
+                                  ))}
+                              </div>
+                          </div>
+                      </div>
+
+                      <div className="space-y-6">
+                          <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                              <div className="flex items-center justify-between mb-4">
+                                  <h3 className="font-bold text-slate-800 dark:text-white">Receita em tempo real</h3>
+                                  <span className="text-xs font-bold text-emerald-600">Atualizando</span>
+                              </div>
+                              <ChartContainer className="h-64">
+                                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                                      <AreaChart data={weeklyRevenueData}>
+                                          <defs>
+                                              <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                                                  <stop offset="5%" stopColor="#EF4444" stopOpacity={0.35} />
+                                                  <stop offset="95%" stopColor="#EF4444" stopOpacity={0} />
+                                              </linearGradient>
+                                          </defs>
+                                          <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false} />
+                                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF' }} />
+                                          <YAxis axisLine={false} tickLine={false} tick={{ fill: '#9CA3AF' }} tickFormatter={(value) => `R$${value}`} />
+                                          <Tooltip
+                                            contentStyle={{ backgroundColor: isDarkMode ? '#0f172a' : '#fff', border: isDarkMode ? '1px solid #1e293b' : 'none', borderRadius: '8px' }}
+                                            itemStyle={{ color: isDarkMode ? '#e2e8f0' : '#1e293b' }}
+                                            labelStyle={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}
+                                          />
+                                          <Area type="monotone" dataKey="value" stroke="#EF4444" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
+                                      </AreaChart>
+                                  </ResponsiveContainer>
+                              </ChartContainer>
+                          </div>
+
+                          <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                              <div className="flex items-center justify-between mb-4">
+                                  <h3 className="font-bold text-slate-800 dark:text-white">Pedidos recentes</h3>
+                                  <span className="text-xs font-bold text-slate-400">Ultimos 5</span>
+                              </div>
+                              <div className="space-y-4">
+                                  {recentOrders.length === 0 ? (
+                                      <p className="text-gray-400 text-center text-sm py-8">Nenhum pedido recente.</p>
+                                  ) : (
+                                      recentOrders.map((order) => (
+                                          <div key={order.id} className="flex items-center gap-3 pb-3 border-b border-gray-50 last:border-0">
+                                              <div className="w-10 h-10 bg-slate-100 dark:bg-slate-800 rounded-xl flex items-center justify-center font-bold text-slate-500 text-xs">
+                                                  #{order.id.slice(0,4)}
+                                              </div>
+                                              <div className="flex-1">
+                                                  <p className="font-bold text-sm text-slate-800 dark:text-white">{order.customerName}</p>
+                                                  <p className="text-xs text-gray-400">{order.items.length} itens • {order.time}</p>
+                                                  {order.type && (
+                                                      <p className="text-[11px] text-gray-400">
+                                                          {order.type === 'TABLE'
+                                                              ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
+                                                              : order.type === 'PICKUP'
+                                                              ? 'Retirada'
+                                                              : 'Entrega'}
+                                                      </p>
+                                                  )}
+                                              </div>
+                                              <span className={`text-xs font-bold px-2 py-1 rounded-full ${order.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' : order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                                                  {order.status === 'PENDING' ? 'Novo' : order.status}
+                                              </span>
+                                          </div>
+                                      ))
+                                  )}
+                              </div>
+                          </div>
+                      </div>
                   </div>
               </div>
           </div>
       </div>
-  );
+      );
+  };
 
   const renderOrders = () => {
       const columns = [
@@ -739,11 +1875,62 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           { id: 'PREPARING', label: 'Em Preparo', color: 'bg-blue-500' },
           { id: 'WAITING_COURIER', label: 'Aguardando Motoboy', color: 'bg-purple-500' },
           { id: 'DELIVERING', label: 'Saiu para Entrega', color: 'bg-orange-500' },
-          { id: 'COMPLETED', label: 'Concluídos', color: 'bg-green-500' }
+          { id: 'COMPLETED', label: 'Concluídos', color: 'bg-green-500' },
+          { id: 'CANCELLED', label: 'Cancelados', color: 'bg-red-500' }
       ];
+      const storeAddressLine = [
+          storeProfile.street,
+          storeProfile.number,
+          storeProfile.district,
+          storeProfile.city,
+          storeProfile.state
+      ]
+          .filter(Boolean)
+          .join(', ');
+      const formatOrderAddress = (order: Order) => {
+          if (order.type === 'DELIVERY') {
+              const address = order.deliveryAddress;
+              if (!address) return 'Endereço não informado';
+              const complement = (address as any)?.complement ? `, ${(address as any).complement}` : '';
+              return [
+                  [address.street, address.number].filter(Boolean).join(', '),
+                  address.district,
+                  address.city,
+                  address.state
+              ]
+                  .filter(Boolean)
+                  .join(' - ') + complement;
+          }
+          return storeAddressLine || 'Endereço da loja não informado';
+      };
+      const formatAddress = (address?: Address, fallback?: string) => {
+          if (!address) return fallback || 'Não informado';
+          const complement = (address as any)?.complement ? `, ${(address as any).complement}` : '';
+          return [
+              [address.street, address.number].filter(Boolean).join(', '),
+              address.district,
+              address.city,
+              address.state
+          ]
+              .filter(Boolean)
+              .join(' - ') + complement;
+      };
+      const handleDropOnColumn = async (columnId: string, orderId?: string) => {
+          const id = orderId || draggingOrderId;
+          if (!id) return;
+          const current = orders.find((order) => order.id === id);
+          if (!current || current.status === columnId) return;
+          if (columnId === 'CANCELLED') {
+              const reason = prompt('Motivo do cancelamento?');
+              if (!reason?.trim()) return;
+              await handleUpdateStatus(id, columnId, reason.trim());
+              return;
+          }
+          await handleUpdateStatus(id, columnId);
+      };
 
       return (
-          <div className="h-[calc(100vh-140px)] flex flex-col">
+          <div className="h-[calc(100vh-140px)] flex flex-col gap-6">
               {paymentOrderTarget && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
                       <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-800">
@@ -813,33 +2000,121 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       </div>
                   </div>
               )}
-              <div className="flex justify-between items-center mb-4 px-2">
-                  <h3 className="font-bold text-lg text-gray-700 dark:text-gray-300">Quadro de Pedidos</h3>
-                  <button 
-                    onClick={() => setIsAutoAcceptEnabled(!isAutoAcceptEnabled)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-full font-bold text-xs transition-all shadow-sm ${isAutoAcceptEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'}`}
-                  >
-                      {isAutoAcceptEnabled ? <ToggleRight size={24} /> : <ToggleLeft size={24} />}
-                      {isAutoAcceptEnabled ? 'Auto-Aceitar Ativado' : 'Auto-Aceitar Desativado'}
-                  </button>
+              <div className="px-2">
+                  <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-amber-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-5 md:p-6 shadow-sm">
+                      <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-amber-200/40 blur-3xl dark:bg-amber-900/20" />
+                      <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-red-200/30 blur-3xl dark:bg-red-900/20" />
+                      <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                          <div>
+                              <span className="text-xs font-bold tracking-[0.2em] text-amber-600 uppercase">Pedidos</span>
+                              <h3 className="text-2xl font-extrabold text-slate-900 dark:text-white mt-2">Quadro em tempo real</h3>
+                              <p className="text-sm text-slate-500 dark:text-slate-400">Arraste o foco para o que exige acao imediata.</p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3">
+                              <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                  {orders.filter(o => o.status === 'PENDING').length} novos
+                              </div>
+                              <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                  {orders.filter(o => o.status === 'PREPARING').length} em preparo
+                              </div>
+                              <button 
+                                onClick={handleToggleAutoAccept}
+                                disabled={isAutoAcceptUpdating}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-full font-bold text-xs transition-all shadow-sm ${
+                                  isAutoAcceptEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
+                                } ${isAutoAcceptUpdating ? 'opacity-70 cursor-not-allowed' : ''}`}
+                              >
+                                  {isAutoAcceptEnabled ? <ToggleRight size={24} /> : <ToggleLeft size={24} />}
+                                  {isAutoAcceptEnabled ? 'Auto-Aceitar Ativado' : 'Auto-Aceitar Desativado'}
+                              </button>
+                          </div>
+                      </div>
+                  </div>
               </div>
-              <div className="flex gap-4 overflow-x-auto pb-6 h-full px-2">
+              <div className="flex gap-3 overflow-x-auto pb-6 h-full px-2">
                   {columns.map(col => {
                       const colOrders = orders.filter(o => o.status === col.id);
                       return (
-                          <div key={col.id} className="min-w-[300px] w-full max-w-xs flex flex-col bg-gray-100 dark:bg-slate-900 rounded-2xl p-3 h-full border border-gray-200 dark:border-slate-800">
-                              <div className={`flex justify-between items-center mb-3 px-2 py-1.5 rounded-lg ${col.color} bg-opacity-10`}>
-                                  <h3 className={`font-bold text-sm ${col.id === 'PENDING' ? 'text-yellow-700' : col.id === 'PREPARING' ? 'text-blue-700' : col.id === 'WAITING_COURIER' ? 'text-purple-700' : col.id === 'DELIVERING' ? 'text-orange-700' : 'text-green-700'}`}>{col.label}</h3>
-                                  <span className="bg-white dark:bg-slate-800 px-2 py-0.5 rounded text-xs font-bold shadow-sm text-slate-700 dark:text-white">{colOrders.length}</span>
+                          <div
+                              key={col.id}
+                              onDragOver={(event) => {
+                                  event.preventDefault();
+                                  setDragOverColumn(col.id);
+                              }}
+                              onDragLeave={() => {
+                                  if (dragOverColumn === col.id) setDragOverColumn(null);
+                              }}
+                              onDrop={(event) => {
+                                  event.preventDefault();
+                                  const payloadId = event.dataTransfer.getData('text/plain');
+                                  handleDropOnColumn(col.id, payloadId || undefined);
+                                  setDragOverColumn(null);
+                                  setDraggingOrderId(null);
+                              }}
+                              className={`min-w-[250px] w-full max-w-[280px] flex flex-col bg-white/70 dark:bg-slate-900/80 rounded-3xl p-4 h-full border border-slate-200/80 dark:border-slate-800 shadow-sm transition-shadow ${dragOverColumn === col.id ? 'ring-2 ring-red-400 shadow-lg' : ''}`}
+                          >
+                              <div className="flex items-center justify-between mb-4">
+                                  <div className="flex items-center gap-2">
+                                      <div className={`w-2.5 h-2.5 rounded-full ${col.color}`} />
+                                      <h3 className="font-extrabold text-sm text-slate-800 dark:text-white">{col.label}</h3>
+                                  </div>
+                                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-100">
+                                      {colOrders.length}
+                                  </span>
                               </div>
                               <div className="flex-1 overflow-y-auto space-y-3 pr-1">
                                   {colOrders.map(order => (
-                                      <div key={order.id} className="bg-white dark:bg-slate-800 p-3 rounded-xl shadow-sm border border-gray-200 dark:border-slate-700 hover:shadow-md transition-shadow group relative">
-                                          <div className="flex justify-between items-start mb-2">
-                                              <span className="font-mono text-xs text-gray-400">#{order.id.slice(0, 5)}</span>
-                                              <span className="text-xs font-bold text-slate-600 dark:text-gray-300">{order.time}</span>
+                                      <div
+                                          key={order.id}
+                                          draggable
+                                          onDragStart={(event) => {
+                                              setDraggingOrderId(order.id);
+                                              event.dataTransfer.setData('text/plain', order.id);
+                                              event.dataTransfer.effectAllowed = 'move';
+                                          }}
+                                          onDragEnd={() => setDraggingOrderId(null)}
+                                          onClick={() => setSelectedOrderDetails(order)}
+                                          className={`bg-white dark:bg-slate-950 p-4 rounded-2xl shadow-sm border border-slate-200/70 dark:border-slate-800 hover:shadow-md transition-shadow group relative cursor-pointer ${draggingOrderId === order.id ? 'opacity-60' : ''}`}
+                                      >
+                                          <div className="flex items-center justify-between mb-3">
+                                              <div className="flex items-center gap-2">
+                                                  <span className="font-mono text-xs text-slate-400">#{order.id.slice(0, 5)}</span>
+                                                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                                                      {order.type === 'TABLE'
+                                                          ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
+                                                          : order.type === 'PICKUP'
+                                                          ? 'Retirada'
+                                                          : 'Entrega'}
+                                                  </span>
+                                              </div>
+                                              <span className="text-xs font-bold text-slate-500 dark:text-slate-300">{order.time}</span>
                                           </div>
                                           <h4 className="font-bold text-slate-800 dark:text-white mb-1 text-sm">{order.customerName}</h4>
+                                          <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap gap-2 mb-2">
+                                              {order.customerPhone && (
+                                                  <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 font-semibold">
+                                                      {order.customerPhone}
+                                                  </span>
+                                              )}
+                                              {order.paymentMethod && (
+                                                  <span className="px-2 py-0.5 rounded-full bg-amber-100/70 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200 font-semibold">
+                                                      {order.paymentMethod}
+                                                  </span>
+                                              )}
+                                              {order.type === 'DELIVERY' && (
+                                                  <span className="px-2 py-0.5 rounded-full bg-emerald-100/70 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-200 font-semibold">
+                                                      Entrega {formatCurrencyBRL(order.deliveryFee || 0)}
+                                                  </span>
+                                              )}
+                                          </div>
+                                          <div className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                                              {formatOrderAddress(order)}
+                                          </div>
+                                          {order.notes && (
+                                              <div className="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1 mb-3">
+                                                  Obs: {order.notes}
+                                              </div>
+                                          )}
                                           
                                           {/* Updated Items List to Show Full Details (Pizzas) */}
                                           <div className="space-y-2 mb-3 bg-gray-50 dark:bg-slate-900/50 p-2 rounded-lg border border-gray-100 dark:border-slate-700">
@@ -851,6 +2126,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                               ))}
                                           </div>
                                           
+                                          {order.status === 'CANCELLED' && order.cancelReason && (
+                                              <div className="mb-3 text-xs text-red-600 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-900/40 rounded-lg px-2 py-1">
+                                                  Motivo: {order.cancelReason}
+                                              </div>
+                                          )}
+
                                           <div className="flex justify-between items-center border-t border-gray-100 dark:border-slate-700 pt-3">
                                               <div className="flex flex-col">
                                                   <span className="font-bold text-slate-800 dark:text-white text-sm">{formatCurrencyBRL(order.total)}</span>
@@ -864,43 +2145,67 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                       </span>
                                                   )}
                                               </div>
-                                              {col.id !== 'COMPLETED' && col.id !== 'DELIVERING' && col.id !== 'WAITING_COURIER' && (
-                                                  <button 
-                                                    onClick={() => handleUpdateStatus(
-                                                        order.id,
-                                                        col.id === 'PENDING'
-                                                            ? 'PREPARING'
-                                                            : order.type === 'TABLE'
-                                                            ? 'DELIVERING'
-                                                            : 'WAITING_COURIER'
-                                                    )}
-                                                    className="px-3 py-1.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold rounded-lg hover:opacity-90 transition-opacity"
-                                                  >
-                                                      {col.id === 'PENDING' ? 'Aceitar' : order.type === 'TABLE' ? 'Saiu para entrega' : 'Chamar Motoboy'}
-                                                  </button>
-                                              )}
-                                              {col.id === 'WAITING_COURIER' && (
-                                                  <span className="text-xs font-bold text-purple-600 animate-pulse">Aguardando...</span>
-                                              )}
-                                              {col.id === 'DELIVERING' && (
-                                                  <button
-                                                      onClick={() => {
-                                                          if (order.type === 'TABLE') {
-                                                              setPaymentOrderTarget(order);
-                                                              setPaymentOrderMethod('');
-                                                              return;
-                                                          }
-                                                          handleUpdateStatus(order.id, 'COMPLETED');
-                                                      }}
-                                                      className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700"
-                                                  >
-                                                      Concluir
-                                                  </button>
-                                              )}
+                                              <div className="flex flex-col items-end gap-2">
+                                                  {order.status !== 'COMPLETED' && order.status !== 'CANCELLED' && (
+                                                      <button
+                                                          onClick={(event) => {
+                                                              event.stopPropagation();
+                                                              const reason = prompt('Motivo do cancelamento?');
+                                                              if (!reason?.trim()) return;
+                                                              handleUpdateStatus(order.id, 'CANCELLED', reason.trim());
+                                                          }}
+                                                          className="px-3 py-1.5 border border-red-200 text-red-600 text-xs font-bold rounded-lg hover:bg-red-50 transition-colors whitespace-nowrap"
+                                                      >
+                                                          Cancelar
+                                                      </button>
+                                                  )}
+                                                  {col.id !== 'COMPLETED' && col.id !== 'DELIVERING' && col.id !== 'WAITING_COURIER' && col.id !== 'CANCELLED' && (
+                                                      <button 
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            handleUpdateStatus(
+                                                                order.id,
+                                                                col.id === 'PENDING'
+                                                                    ? 'PREPARING'
+                                                                    : order.type === 'TABLE'
+                                                                    ? 'DELIVERING'
+                                                                    : order.type === 'PICKUP'
+                                                                    ? 'DELIVERING'
+                                                                    : 'WAITING_COURIER'
+                                                            );
+                                                        }}
+                                                        className="px-3 py-1.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap"
+                                                      >
+                                                          {col.id === 'PENDING'
+                                                              ? 'Aceitar'
+                                                              : order.type === 'TABLE'
+                                                              ? 'Saiu para entrega'
+                                                              : order.type === 'PICKUP'
+                                                              ? 'Pronto p/ Retirada'
+                                                              : 'Chamar Motoboy'}
+                                                      </button>
+                                                  )}
+                                                  {col.id === 'WAITING_COURIER' && (
+                                                      <span className="text-xs font-bold text-purple-600 animate-pulse">Aguardando...</span>
+                                                  )}
+                                                  {col.id === 'DELIVERING' && (
+                                                      <button
+                                                          onClick={(event) => {
+                                                              event.stopPropagation();
+                                                              if (order.type === 'TABLE') {
+                                                                  setPaymentOrderTarget(order);
+                                                                  setPaymentOrderMethod('');
+                                                                  return;
+                                                              }
+                                                              handleUpdateStatus(order.id, 'COMPLETED');
+                                                          }}
+                                                          className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700"
+                                                      >
+                                                          {order.type === 'PICKUP' ? 'Confirmar Retirada' : 'Concluir'}
+                                                      </button>
+                                                  )}
+                                              </div>
                                           </div>
-                                          {order.status === 'PENDING' && (
-                                              <button onClick={() => handleUpdateStatus(order.id, 'CANCELLED')} className="absolute top-2 right-2 p-1 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><X size={16} /></button>
-                                          )}
                                       </div>
                                   ))}
                               </div>
@@ -908,6 +2213,124 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       );
                   })}
               </div>
+              {selectedOrderDetails && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+                      <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-800 overflow-hidden">
+                          <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
+                              <div>
+                                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Detalhes do pedido</h3>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">#{selectedOrderDetails.id.slice(0, 6)}</p>
+                              </div>
+                              <button
+                                  onClick={() => setSelectedOrderDetails(null)}
+                                  className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800"
+                              >
+                                  <X size={18} className="text-slate-500" />
+                              </button>
+                          </div>
+                          <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.status}</p>
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Horario</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.time || '-'}</p>
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Cliente</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.customerName}</p>
+                                      {selectedOrderDetails.customerPhone && <p className="text-xs text-slate-500">{selectedOrderDetails.customerPhone}</p>}
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Pagamento</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.paymentMethod || 'Nao informado'}</p>
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Tipo</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">
+                                          {selectedOrderDetails.type === 'TABLE'
+                                              ? `Mesa ${selectedOrderDetails.tableNumber || ''}`
+                                              : selectedOrderDetails.type === 'PICKUP'
+                                              ? 'Retirada'
+                                              : 'Entrega'}
+                                      </p>
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Total</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{formatCurrencyBRL(selectedOrderDetails.total)}</p>
+                                  </div>
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Taxa entrega</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">{formatCurrencyBRL(selectedOrderDetails.deliveryFee || 0)}</p>
+                                  </div>
+                                  {selectedOrderDetails.cpf && (
+                                      <div>
+                                          <p className="text-xs font-bold text-slate-400 uppercase">CPF</p>
+                                          <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.cpf}</p>
+                                      </div>
+                                  )}
+                              </div>
+                              <div>
+                                  <p className="text-xs font-bold text-slate-400 uppercase mb-2">Endereco</p>
+                                  <p className="text-sm text-slate-700 dark:text-slate-200">
+                                      {selectedOrderDetails.type === 'DELIVERY'
+                                          ? formatAddress(selectedOrderDetails.deliveryAddress, 'Nao informado')
+                                          : storeAddressLine || 'Nao informado'}
+                                  </p>
+                              </div>
+                              {selectedOrderDetails.notes && (
+                                  <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase mb-2">Observacoes</p>
+                                      <p className="text-sm text-slate-700 dark:text-slate-200">{selectedOrderDetails.notes}</p>
+                                  </div>
+                              )}
+                              {selectedOrderDetails.cancelReason && (
+                                  <div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-900/40 rounded-xl p-3 text-sm text-red-600">
+                                      Motivo do cancelamento: {selectedOrderDetails.cancelReason}
+                                  </div>
+                              )}
+                              <div>
+                                  <p className="text-xs font-bold text-slate-400 uppercase mb-2">Itens</p>
+                                  <div className="space-y-2">
+                                      {selectedOrderDetails.items.map((item, idx) => (
+                                          <div key={idx} className="text-sm text-slate-700 dark:text-slate-200 border-b border-slate-100 dark:border-slate-800 pb-2">
+                                              {item}
+                                          </div>
+                                      ))}
+                                  </div>
+                              </div>
+                          </div>
+                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex items-center justify-end gap-3">
+                              {selectedOrderDetails.status !== 'COMPLETED' && selectedOrderDetails.status !== 'CANCELLED' && (
+                                  <button
+                                      onClick={() => {
+                                          const reason = prompt('Motivo do cancelamento?');
+                                          if (!reason?.trim()) return;
+                                          handleUpdateStatus(selectedOrderDetails.id, 'CANCELLED', reason.trim());
+                                          setSelectedOrderDetails(null);
+                                      }}
+                                      className="px-4 py-2 rounded-xl border border-red-200 text-red-600 font-bold hover:bg-red-50"
+                                  >
+                                      Cancelar
+                                  </button>
+                              )}
+                              {selectedOrderDetails.status === 'PENDING' && (
+                                  <button
+                                      onClick={() => {
+                                          handleUpdateStatus(selectedOrderDetails.id, 'PREPARING');
+                                          setSelectedOrderDetails(null);
+                                      }}
+                                      className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold hover:opacity-90"
+                                  >
+                                      Aceitar
+                                  </button>
+                              )}
+                          </div>
+                      </div>
+                  </div>
+              )}
           </div>
       );
   };
@@ -923,6 +2346,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const groupKeys = Object.keys(grouped);
       const selectedTableOrders = selectedTableKey ? grouped[selectedTableKey] || [] : [];
       const activePaymentOptions = paymentMethods.filter((pm) => pm.active);
+      const totalTableRevenue = tableOrders.reduce((sum, order) => sum + (order.total || 0), 0);
+      const pendingTableOrders = tableOrders.filter(
+          (order) => !['COMPLETED', 'CANCELLED'].includes(order.status)
+      ).length;
 
       const handleFinalizeTable = async () => {
           if (!selectedTableKey) return;
@@ -1068,90 +2495,131 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
       return (
           <div className="animate-fade-in space-y-6">
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-sky-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-16 -left-10 h-44 w-44 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-900/20" />
+                  <div className="pointer-events-none absolute -bottom-20 right-6 h-52 w-52 rounded-full bg-emerald-200/30 blur-3xl dark:bg-emerald-900/20" />
+                  <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 mb-6">
                       <div>
-                          <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Mesas</h2>
-                          <p className="text-sm text-gray-500 dark:text-gray-400">Acompanhe pedidos feitos direto na mesa.</p>
+                          <span className="text-xs font-bold tracking-[0.2em] text-sky-600 uppercase">Mesas</span>
+                          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Sala em tempo real</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                              Acompanhe mesas ativas, pedidos em aberto e finalize com rapidez.
+                          </p>
                       </div>
-                      <button
-                          onClick={() => { setActiveSection('SETTINGS'); setSettingsTab('DELIVERY'); }}
-                          className="px-4 py-2 rounded-xl font-bold text-sm border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
-                      >
-                          Configurar mesas
-                      </button>
+                      <div className="flex flex-wrap items-center gap-3">
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {groupKeys.length} mesas ativas
+                          </div>
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {pendingTableOrders} pedidos pendentes
+                          </div>
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {formatCurrencyBRL(totalTableRevenue)} em mesa
+                          </div>
+                          <button
+                              onClick={() => { setActiveSection('SETTINGS'); setSettingsTab('DELIVERY'); }}
+                              className="px-4 py-2 rounded-xl font-bold text-sm border border-slate-200/80 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800"
+                          >
+                              Configurar mesas
+                          </button>
+                      </div>
                   </div>
 
                   {groupKeys.length === 0 ? (
-                      <div className="bg-gray-50 dark:bg-slate-800/60 border border-dashed border-gray-200 dark:border-slate-700 rounded-xl p-6 text-sm text-gray-500">
+                      <div className="bg-white/80 dark:bg-slate-900/70 border border-dashed border-slate-200/80 dark:border-slate-700 rounded-2xl p-8 text-sm text-slate-500">
                           Nenhum pedido de mesa no momento.
                       </div>
                   ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                          {groupKeys.map((key) => (
-                              <button
-                                  key={key}
-                                  onClick={() => setSelectedTableKey(key)}
-                                  className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 p-4 text-left hover:border-red-300 dark:hover:border-red-600 transition-colors"
-                              >
-                                  <div className="flex items-center justify-between mb-3">
-                                      <div className="flex items-center gap-2">
-                                          <div className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-200">
-                                              <Table size={16} />
+                          {groupKeys.map((key) => {
+                              const tablePending = grouped[key].filter(
+                                  (order) => !['COMPLETED', 'CANCELLED'].includes(order.status)
+                              ).length;
+                              const tableTotal = grouped[key].reduce((sum, order) => sum + (order.total || 0), 0);
+
+                              return (
+                                  <button
+                                      key={key}
+                                      onClick={() => setSelectedTableKey(key)}
+                                      className="rounded-3xl border border-slate-200/80 dark:border-slate-700 bg-white/80 dark:bg-slate-900/70 p-4 text-left hover:border-sky-300 dark:hover:border-sky-600 transition-colors shadow-sm"
+                                  >
+                                      <div className="flex items-center justify-between mb-4">
+                                          <div className="flex items-center gap-3">
+                                              <div className="w-10 h-10 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-200">
+                                                  <Table size={18} />
+                                              </div>
+                                              <div>
+                                                  <p className="text-sm font-extrabold text-slate-800 dark:text-white">Mesa {key}</p>
+                                                  <p className="text-xs text-slate-500 dark:text-slate-400">{grouped[key].length} pedidos</p>
+                                              </div>
                                           </div>
-                                          <div>
-                                              <p className="text-sm font-bold text-slate-800 dark:text-white">Mesa {key}</p>
-                                              <p className="text-xs text-gray-500 dark:text-gray-400">{grouped[key].length} pedidos</p>
+                                          <div className="text-right">
+                                              <p className="text-xs font-bold text-slate-400 uppercase">Pendentes</p>
+                                              <p className="text-sm font-extrabold text-slate-800 dark:text-white">{tablePending}</p>
                                           </div>
                                       </div>
-                                  </div>
-                                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                                      {grouped[key].map((order) => (
-                                          <div key={order.id} className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-xl p-3">
-                                              <div className="flex items-center justify-between text-xs text-gray-400">
-                                                  <span>#{order.id.slice(0, 5)}</span>
-                                                  <span>{order.time}</span>
+                                      <div className="flex items-center justify-between mb-4">
+                                          <span className="text-xs font-bold text-slate-400 uppercase">Total mesa</span>
+                                          <span className="text-sm font-extrabold text-slate-800 dark:text-white">{formatCurrencyBRL(tableTotal)}</span>
+                                      </div>
+                                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                          {grouped[key].map((order) => (
+                                              <div key={order.id} className="bg-white dark:bg-slate-950 border border-slate-200/70 dark:border-slate-800 rounded-2xl p-3">
+                                                  <div className="flex items-center justify-between text-xs text-slate-400">
+                                                      <span>#{order.id.slice(0, 5)}</span>
+                                                      <span>{order.time}</span>
+                                                  </div>
+                                                  <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
+                                                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{order.items.length} itens • {formatCurrencyBRL(order.total)}</p>
                                               </div>
-                                              <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
-                                              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{order.items.length} itens • {formatCurrencyBRL(order.total)}</p>
-                                          </div>
-                                      ))}
-                                  </div>
-                              </button>
-                          ))}
+                                          ))}
+                                      </div>
+                                  </button>
+                              );
+                          })}
                       </div>
                   )}
               </div>
               {selectedTableKey && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-                      <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-800">
-                          <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
-                              <div>
-                                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Mesa {selectedTableKey}</h3>
-                                  <p className="text-xs text-gray-500 dark:text-gray-400">{selectedTableOrders.length} pedidos</p>
+                      <div className="bg-white dark:bg-slate-900 w-full max-w-3xl rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden">
+                          <div className="p-6 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900">
+                              <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-3">
+                                      <div className="w-12 h-12 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-200">
+                                          <Table size={20} />
+                                      </div>
+                                      <div>
+                                          <h3 className="text-lg font-extrabold text-slate-800 dark:text-white">Mesa {selectedTableKey}</h3>
+                                          <p className="text-xs text-slate-500 dark:text-slate-400">{selectedTableOrders.length} pedidos</p>
+                                      </div>
+                                  </div>
+                                  <button onClick={() => { setSelectedTableKey(null); setSelectedTablePayment(''); }} className="p-2 rounded-full hover:bg-slate-200/60 dark:hover:bg-slate-800">
+                                      <X size={18} className="text-slate-500" />
+                                  </button>
                               </div>
-                              <button onClick={() => { setSelectedTableKey(null); setSelectedTablePayment(''); }} className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800">
-                                  <X size={18} className="text-slate-500" />
-                              </button>
                           </div>
-                          <div className="p-5 space-y-3 max-h-[60vh] overflow-y-auto">
+                          <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto bg-white dark:bg-slate-900">
                               {selectedTableOrders.map((order) => (
-                                  <div key={order.id} className="border border-gray-200 dark:border-slate-800 rounded-xl p-4 bg-gray-50 dark:bg-slate-800/40">
-                                      <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                                  <div key={order.id} className="border border-slate-200/80 dark:border-slate-800 rounded-2xl p-4 bg-slate-50/70 dark:bg-slate-800/40">
+                                      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                                           <span>#{order.id.slice(0, 5)}</span>
                                           <span>{order.time}</span>
                                       </div>
-                                      <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
-                                      <div className="mt-2 space-y-1 text-xs text-gray-600 dark:text-gray-300">
+                                      <div className="flex items-center justify-between mt-2">
+                                          <p className="text-sm font-bold text-slate-800 dark:text-white">{order.customerName}</p>
+                                          <span className="text-xs font-bold text-slate-400 uppercase">{order.status}</span>
+                                      </div>
+                                      <div className="mt-3 space-y-1 text-xs text-slate-600 dark:text-slate-300">
                                           {order.items.map((item, idx) => (
                                               <div key={`${order.id}-${idx}`}>• {item}</div>
                                           ))}
                                       </div>
-                                      <div className="text-right font-bold text-slate-800 dark:text-white mt-3">{formatCurrencyBRL(order.total)}</div>
+                                      <div className="text-right font-extrabold text-slate-800 dark:text-white mt-3">{formatCurrencyBRL(order.total)}</div>
                                   </div>
                               ))}
                           </div>
-                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex flex-col gap-3">
+                          <div className="p-6 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-3 bg-slate-50 dark:bg-slate-900">
                               <div>
                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Forma de pagamento</label>
                                   <select
@@ -1195,37 +2663,141 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       );
   };
 
+  const normalizeCategoryName = (value: string) => value.trim();
+
+  const normalizeFlavorPrices = (value?: Record<string, unknown>) => {
+      const output: Record<string, number> = {};
+      if (!value) return output;
+      PIZZA_SIZE_OPTIONS.forEach((size) => {
+          if (!Object.prototype.hasOwnProperty.call(value, size.key)) return;
+          const raw = (value as Record<string, unknown>)[size.key];
+          if (raw === '' || raw === null || raw === undefined) return;
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed > 0) {
+              output[size.key] = parsed;
+          }
+      });
+      return output;
+  };
+
+  const normalizePizzaProduct = (product: Partial<Product>) => {
+      if (!product.isPizza) return product;
+      const allowed = product.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX'];
+      return {
+          ...product,
+          optionGroups: ensurePizzaSizeGroup(product.optionGroups),
+          maxFlavorsBySize: product.maxFlavorsBySize || {
+              brotinho: 2,
+              pequena: 2,
+              media: 3,
+              grande: 4,
+              familia: 5
+          },
+          pricingStrategiesAllowed: allowed,
+          defaultPricingStrategy: product.defaultPricingStrategy || allowed[0] || 'NORMAL',
+          customerCanChoosePricingStrategy: product.customerCanChoosePricingStrategy ?? true
+      };
+  };
+
+  const pizzaSizeGroupForForm = newProduct.isPizza
+      ? (newProduct.optionGroups || []).find((group) => isPizzaSizeGroup(group))
+      : null;
+  const pizzaAvailableSizeKeys = new Set(
+      (pizzaSizeGroupForForm?.options || [])
+          .filter((opt) => opt.isAvailable !== false)
+          .map((opt) => getSizeKeyFromOption(opt))
+          .filter(Boolean)
+  );
+
+  const persistMenuCategories = async (next: string[]) => {
+      if (!storeId) return;
+      setIsSavingCategories(true);
+      try {
+          setMenuCategories(next);
+          setStoreProfile((prev) => ({ ...prev, menuCategories: next }));
+          await updateStore(storeId, { menuCategories: next });
+      } catch (error) {
+          console.error('Erro ao salvar categorias', error);
+          alert('Erro ao salvar categorias.');
+      } finally {
+          setIsSavingCategories(false);
+      }
+  };
+
+  const handleAddMenuCategory = async () => {
+      const normalized = normalizeCategoryName(newCategoryName);
+      if (!normalized) return;
+      const exists = menuCategories.some(
+          (value) => value.toLowerCase() === normalized.toLowerCase()
+      );
+      if (exists) {
+          setNewCategoryName('');
+          return;
+      }
+      await persistMenuCategories([...menuCategories, normalized]);
+      setNewCategoryName('');
+  };
+
+  const handleRemoveMenuCategory = async (category: string) => {
+      const next = menuCategories.filter((value) => value !== category);
+      await persistMenuCategories(next);
+  };
+
   const renderMenu = () => {
-      const categories = Array.from(new Set(products.map(p => p.category)));
+      const derivedCategories = Array.from(new Set(products.map(p => p.category).filter(Boolean)));
+      const categories = Array.from(new Set([...menuCategories, ...derivedCategories]));
       const filteredProducts = products.filter(p => 
           (selectedCategoryTab === 'Todos' || p.category === selectedCategoryTab) &&
           (p.name || '').toLowerCase().includes(menuSearch.toLowerCase())
       );
 
       return (
-          <div className="animate-fade-in">
-              <div className="flex justify-between items-center mb-6">
-                  <div className="flex gap-2 overflow-x-auto pb-2">
-                      <button onClick={() => setSelectedCategoryTab('Todos')} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-colors ${selectedCategoryTab === 'Todos' ? 'bg-red-600 text-white' : 'bg-white dark:bg-slate-800 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-700'}`}>Todos</button>
-                      {categories.map(cat => (
-                          <button key={cat} onClick={() => setSelectedCategoryTab(cat)} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-colors ${selectedCategoryTab === cat ? 'bg-red-600 text-white' : 'bg-white dark:bg-slate-800 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-700'}`}>{cat}</button>
-                      ))}
-                  </div>
-                  <div className="flex gap-2">
-                      <button onClick={() => { setNewProduct({ isAvailable: true }); setShowProductModal(true); }} className="bg-white dark:bg-slate-800 text-gray-600 dark:text-white border border-gray-200 dark:border-slate-700 px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-slate-700 transition-colors"><Plus size={18} /> Novo Item</button>
-                      <button onClick={() => { setNewFlavor({}); setShowFlavorModal(true); }} className="bg-orange-500 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors shadow-lg shadow-orange-500/20"><Database size={18} /> Sabores de Pizza</button>
+          <div className="animate-fade-in space-y-6">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-rose-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-rose-200/40 blur-3xl dark:bg-rose-900/20" />
+                  <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-orange-200/30 blur-3xl dark:bg-orange-900/20" />
+                  <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                      <div>
+                          <span className="text-xs font-bold tracking-[0.2em] text-rose-600 uppercase">Cardapio</span>
+                          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Colecao de produtos</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                              Organize categorias, destaque pizzas e deixe o cardapio impecavel.
+                          </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                          <button onClick={() => { setNewProduct({ isAvailable: true }); setShowProductModal(true); }} className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                              <Plus size={18} /> Novo item
+                          </button>
+                          <button
+                              onClick={() => setShowCategoryModal(true)}
+                              className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                          >
+                              <Tag size={18} /> Categorias
+                          </button>
+                          <button onClick={() => { setNewFlavor({ pricesBySize: normalizeFlavorPrices() }); setShowFlavorModal(true); }} className="bg-orange-500 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors shadow-lg shadow-orange-500/20">
+                              <Database size={18} /> Sabores de pizza
+                          </button>
+                      </div>
                   </div>
               </div>
 
-              <div className="mb-6 relative">
-                  <input 
-                    type="text" 
-                    placeholder="Buscar item no cardápio..." 
-                    value={menuSearch} 
-                    onChange={(e) => setMenuSearch(e.target.value)} 
-                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 dark:border-slate-800 dark:bg-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none" 
-                  />
-                  <Search className="absolute left-3 top-3.5 text-gray-400" size={20} />
+              <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex gap-2 overflow-x-auto pb-2">
+                      <button onClick={() => setSelectedCategoryTab('Todos')} className={`px-4 py-2 rounded-full text-sm font-bold whitespace-nowrap transition-colors ${selectedCategoryTab === 'Todos' ? 'bg-red-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'}`}>Todos</button>
+                      {categories.map(cat => (
+                          <button key={cat} onClick={() => setSelectedCategoryTab(cat)} className={`px-4 py-2 rounded-full text-sm font-bold whitespace-nowrap transition-colors ${selectedCategoryTab === cat ? 'bg-red-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'}`}>{cat}</button>
+                      ))}
+                  </div>
+                  <div className="ml-auto relative w-full lg:w-80">
+                      <input 
+                        type="text" 
+                        placeholder="Buscar item no cardapio..." 
+                        value={menuSearch} 
+                        onChange={(e) => setMenuSearch(e.target.value)} 
+                        className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 dark:border-slate-800 dark:bg-slate-900 dark:text-white focus:ring-2 focus:ring-red-500 outline-none" 
+                      />
+                      <Search className="absolute left-3 top-3.5 text-slate-400" size={20} />
+                  </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -1244,7 +2816,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               <div className="flex justify-between items-start">
                                   <h4 className="font-bold text-slate-800 dark:text-white line-clamp-1 text-base">{product.name}</h4>
                                   <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      <button onClick={() => { setNewProduct(product); setShowProductModal(true); }} className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"><Edit size={16} /></button>
+                                  <button onClick={() => { setNewProduct(normalizePizzaProduct(product)); setShowProductModal(true); }} className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"><Edit size={16} /></button>
                                       <button onClick={() => handleDeleteProduct(product.id)} className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"><Trash size={16} /></button>
                                   </div>
                               </div>
@@ -1273,17 +2845,121 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       );
   };
 
+  const renderBuildableProducts = () => {
+      const buildableProducts = products.filter(p => p.isBuildable || (p.optionGroups?.length || 0) > 0);
+      const buildableCount = buildableProducts.length;
+
+      return (
+          <div className="animate-fade-in space-y-6">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-emerald-50/60 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-20 -right-20 h-44 w-44 rounded-full bg-emerald-200/40 blur-3xl dark:bg-emerald-900/20" />
+                  <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-lime-200/30 blur-3xl dark:bg-lime-900/20" />
+                  <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                      <div>
+                          <span className="text-xs font-bold tracking-[0.2em] text-emerald-600 uppercase">Cadastro guiado</span>
+                          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Produtos Montáveis</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                              Monte grupos e regras de forma rapida. Perfeito para marmitas, pizzas e lanches personalizados.
+                          </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                          <button
+                              onClick={() => {
+                                  setBuildableProduct({ isAvailable: true, isBuildable: true, priceMode: 'BASE', category: 'Montáveis', optionGroups: [] });
+                                  setBuildableError(null);
+                                  setShowBuildableProductModal(true);
+                              }}
+                              className="bg-white dark:bg-slate-800 text-slate-700 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                          >
+                              <Plus size={18} /> Novo produto montável
+                          </button>
+                          <button onClick={() => handleApplyBuildableTemplate('MARMITA')} className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-emerald-700">
+                              Criar modelo Marmita
+                          </button>
+                          <button onClick={() => handleApplyBuildableTemplate('PIZZA')} className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold hover:opacity-90">
+                              Criar modelo Pizza
+                          </button>
+                          <button onClick={() => handleApplyBuildableTemplate('LANCHE')} className="bg-white dark:bg-slate-800 text-slate-700 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold hover:bg-slate-50 dark:hover:bg-slate-700">
+                              Criar modelo Lanche
+                          </button>
+                      </div>
+                  </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Produtos montáveis cadastrados</h3>
+                  <span className="text-sm text-slate-500 dark:text-slate-400">{buildableCount} itens</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                  {buildableProducts.length === 0 && (
+                      <div className="col-span-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 text-center text-slate-500 dark:text-slate-400">
+                          Nenhum produto montável ainda. Use um modelo pronto para acelerar.
+                      </div>
+                  )}
+                  {buildableProducts.map(product => {
+                      const groupsCount = product.optionGroups?.length || 0;
+                      const itemsCount = product.optionGroups?.reduce((acc, group) => acc + (group.options?.length || 0), 0) || 0;
+                      return (
+                          <div key={product.id} className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200/80 dark:border-slate-800 shadow-sm flex flex-col">
+                              <div className="flex items-start justify-between gap-4">
+                                  <div>
+                                      <h4 className="font-bold text-slate-800 dark:text-white text-base">{product.name}</h4>
+                                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{product.description || 'Sem descricao'}</p>
+                                  </div>
+                                  <div className="flex gap-1">
+                                      <button onClick={() => handleEditBuildableProduct(product)} className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded">
+                                          <Edit size={16} />
+                                      </button>
+                                      <button onClick={() => handleDeleteProduct(product.id)} className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded">
+                                          <Trash size={16} />
+                                      </button>
+                                  </div>
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold">
+                                  <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Grupos: {groupsCount}</span>
+                                  <span className="px-2 py-1 rounded-full bg-slate-100 text-slate-600">Itens: {itemsCount}</span>
+                                  <span className="px-2 py-1 rounded-full bg-amber-100 text-amber-700">
+                                      {product.priceMode === 'BY_SIZE' ? 'Preço por tamanho' : `Preço base: ${formatCurrencyBRL(product.price || 0)}`}
+                                  </span>
+                              </div>
+                              <div className="mt-4 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                                  <span>{product.category || 'Sem categoria'}</span>
+                                  <span className={`font-bold ${product.isAvailable ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                      {product.isAvailable ? 'Ativo' : 'Inativo'}
+                                  </span>
+                              </div>
+                          </div>
+                      );
+                  })}
+              </div>
+          </div>
+      );
+  };
+
   // ... (renderCoupons, renderCouriers, renderFinance, renderExpenses, renderSales, renderSettings remain same) ...
   const renderCoupons = () => (
-      <div className="animate-fade-in">
-           <div className="flex justify-between items-center mb-6">
-               <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Cupons de Desconto</h2>
-               <button onClick={() => { setEditingCoupon({}); setShowCouponModal(true); }} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-red-700"><Plus size={18} /> Criar Cupom</button>
+      <div className="animate-fade-in font-body">
+           <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-rose-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm mb-6">
+               <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-rose-200/40 blur-3xl dark:bg-rose-900/20" />
+               <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-orange-200/30 blur-3xl dark:bg-orange-900/20" />
+               <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                   <div>
+                       <span className="text-xs font-bold tracking-[0.2em] text-rose-600 uppercase">Cupons</span>
+                       <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Ofertas que aceleram pedidos</h2>
+                       <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                           Crie campanhas com desconto, controle uso e mantenha visibilidade do estoque promocional.
+                       </p>
+                   </div>
+                   <button onClick={() => { setEditingCoupon({}); setShowCouponModal(true); }} className="bg-red-600 text-white px-5 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-red-700 shadow-lg shadow-red-600/30">
+                       <Plus size={18} /> Criar cupom
+                   </button>
+               </div>
            </div>
            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                {coupons.map(coupon => (
-                   <div key={coupon.id} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-dashed border-gray-300 dark:border-slate-700 relative overflow-hidden group">
-                       <div className="absolute -right-6 -top-6 bg-red-50 dark:bg-red-900/20 w-24 h-24 rounded-full flex items-end justify-start p-4"><Ticket className="text-red-200 dark:text-red-800" size={40} /></div>
+                   <div key={coupon.id} className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200/80 dark:border-slate-700 relative overflow-hidden group shadow-sm">
+                       <div className="absolute -right-8 -top-8 bg-red-50 dark:bg-red-900/20 w-28 h-28 rounded-full flex items-end justify-start p-4"><Ticket className="text-red-200 dark:text-red-800" size={42} /></div>
                        <div className="relative z-10">
                            <h3 className="text-2xl font-black text-slate-800 dark:text-white tracking-widest mb-1">{coupon.code}</h3>
                            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{coupon.description || 'Sem descrição'}</p>
@@ -1306,22 +2982,49 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   );
 
   const renderCouriers = () => (
-      <div className="animate-fade-in">
-          <div className="flex justify-between items-center mb-6">
-              <div><h2 className="text-2xl font-bold text-slate-800 dark:text-white">Entregadores</h2><p className="text-gray-500">Gerencie sua frota própria.</p></div>
-              <button onClick={() => { setNewCourier({ commissionRate: 10, isActive: true }); setShowCourierModal(true); }} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-red-700"><Plus size={18} /> Novo Entregador</button>
+      <div className="animate-fade-in space-y-6">
+          <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-sky-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+              <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-sky-200/40 blur-3xl dark:bg-sky-900/20" />
+              <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-indigo-200/30 blur-3xl dark:bg-indigo-900/20" />
+              <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                  <div>
+                      <span className="text-xs font-bold tracking-[0.2em] text-sky-600 uppercase">Entregadores</span>
+                      <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Frota sob controle</h2>
+                      <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                          Acompanhe status, comissao e performance da equipe.
+                      </p>
+                  </div>
+                  <button onClick={() => { setNewCourier({ commissionRate: 10, isActive: true }); setShowCourierModal(true); }} className="bg-slate-900 text-white px-5 py-3 rounded-xl font-bold flex items-center gap-2 hover:opacity-90 shadow-sm">
+                      <Plus size={18} /> Novo entregador
+                  </button>
+              </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {couriers.map(courier => (
-                  <div key={courier.id} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm flex flex-col items-center text-center relative group">
-                      <button onClick={() => handleDeleteCourier(courier.id)} className="absolute top-4 right-4 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={18}/></button>
-                      <div className="w-20 h-20 bg-gray-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-4 text-gray-400"><Bike size={32} /></div>
-                      <h3 className="font-bold text-lg text-slate-800 dark:text-white">{courier.name}</h3>
-                      <p className="text-sm text-gray-500 mb-1">{courier.phone}</p>
-                      <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-4">{courier.plate || 'Sem placa'}</p>
-                      <div className="w-full grid grid-cols-2 gap-2 border-t border-gray-100 dark:border-slate-800 pt-4">
-                          <div><p className="text-xs text-gray-400">Comissão</p><p className="font-bold text-slate-800 dark:text-white">{courier.commissionRate}%</p></div>
-                          <div><p className="text-xs text-gray-400">Status</p><span className={`text-xs font-bold px-2 py-0.5 rounded-full ${courier.isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{courier.isActive ? 'Ativo' : 'Inativo'}</span></div>
+                  <div key={courier.id} className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm flex flex-col relative group">
+                      <button onClick={() => handleDeleteCourier(courier.id)} className="absolute top-4 right-4 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={18}/></button>
+                      <div className="flex items-center gap-4 mb-4">
+                          <div className="w-14 h-14 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center text-slate-500">
+                              <Bike size={26} />
+                          </div>
+                          <div className="flex-1">
+                              <h3 className="font-bold text-lg text-slate-800 dark:text-white">{courier.name}</h3>
+                              <p className="text-sm text-slate-500">{courier.phone}</p>
+                              <p className="text-xs text-slate-400 uppercase tracking-wider font-bold">{courier.plate || 'Sem placa'}</p>
+                          </div>
+                          <span className={`text-xs font-bold px-3 py-1 rounded-full ${courier.isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                              {courier.isActive ? 'Ativo' : 'Inativo'}
+                          </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-slate-100 dark:border-slate-800">
+                          <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3">
+                              <p className="text-xs text-slate-400 uppercase font-bold">Comissao</p>
+                              <p className="text-base font-extrabold text-slate-800 dark:text-white mt-1">{courier.commissionRate}%</p>
+                          </div>
+                          <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3">
+                              <p className="text-xs text-slate-400 uppercase font-bold">Status</p>
+                              <p className="text-base font-extrabold text-slate-800 dark:text-white mt-1">{courier.isActive ? 'Operando' : 'Pausado'}</p>
+                          </div>
                       </div>
                   </div>
               ))}
@@ -1339,31 +3042,54 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       ];
 
       return (
-          <div className="animate-fade-in">
-               <h2 className="text-2xl font-bold text-slate-800 dark:text-white mb-6">Painel Financeiro</h2>
+          <div className="animate-fade-in space-y-6">
+               <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-emerald-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                    <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-emerald-200/40 blur-3xl dark:bg-emerald-900/20" />
+                    <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-blue-200/30 blur-3xl dark:bg-blue-900/20" />
+                    <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                        <div>
+                            <span className="text-xs font-bold tracking-[0.2em] text-emerald-600 uppercase">Financeiro</span>
+                            <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Pulso financeiro da loja</h2>
+                            <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                                Entradas, saidas e saldo liquido com leitura rapida.
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                            <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                Vendas {formatCurrencyBRL(orderSales)}
+                            </div>
+                            <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                Outros {formatCurrencyBRL(manualIncome)}
+                            </div>
+                        </div>
+                    </div>
+               </div>
                
-               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                   <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                       <p className="text-sm font-bold text-gray-500 uppercase mb-2">Receita Total</p>
-                       <h3 className="text-3xl font-extrabold text-green-600">{formatCurrencyBRL(totalRevenue)}</h3>
-                       <div className="mt-2 text-xs text-gray-400">
+               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                   <div className="bg-white/90 dark:bg-slate-900/80 p-6 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                       <p className="text-xs font-bold text-slate-400 uppercase mb-2">Receita total</p>
+                       <h3 className="text-3xl font-extrabold text-emerald-600">{formatCurrencyBRL(totalRevenue)}</h3>
+                       <div className="mt-3 text-xs text-slate-400">
                            Vendas: {formatCurrencyBRL(orderSales)} | Outros: {formatCurrencyBRL(manualIncome)}
                        </div>
                    </div>
-                   <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                       <p className="text-sm font-bold text-gray-500 uppercase mb-2">Despesas</p>
+                   <div className="bg-white/90 dark:bg-slate-900/80 p-6 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                       <p className="text-xs font-bold text-slate-400 uppercase mb-2">Despesas</p>
                        <h3 className="text-3xl font-extrabold text-red-600">{formatCurrencyBRL(totalExpenses)}</h3>
-                       <p className="text-xs text-gray-400 mt-2">Total de saídas registradas</p>
+                       <p className="text-xs text-slate-400 mt-3">Total de saidas registradas</p>
                    </div>
-                   <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                       <p className="text-sm font-bold text-gray-500 uppercase mb-2">Lucro Líquido</p>
+                   <div className="bg-white/90 dark:bg-slate-900/80 p-6 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                       <p className="text-xs font-bold text-slate-400 uppercase mb-2">Lucro liquido</p>
                        <h3 className={`text-3xl font-extrabold ${netProfit >= 0 ? 'text-blue-600' : 'text-orange-600'}`}>{formatCurrencyBRL(netProfit)}</h3>
-                       <p className="text-xs text-gray-400 mt-2">Saldo final</p>
+                       <p className="text-xs text-slate-400 mt-3">Saldo final</p>
                    </div>
                </div>
 
-               <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
-                   <h3 className="font-bold text-slate-800 dark:text-white mb-6">Balanço Geral</h3>
+               <div className="bg-white/90 dark:bg-slate-900/80 p-6 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm">
+                   <div className="flex items-center justify-between mb-6">
+                       <h3 className="font-bold text-slate-800 dark:text-white">Balanco geral</h3>
+                       <span className="text-xs font-bold text-slate-400 uppercase">Resumo</span>
+                   </div>
                    <ChartContainer className="h-80">
                        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                            <BarChart data={barData}>
@@ -1374,7 +3100,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                     cursor={{fill: 'transparent'}}
                                     contentStyle={{ backgroundColor: isDarkMode ? '#0f172a' : '#fff', border: isDarkMode ? '1px solid #1e293b' : 'none', borderRadius: '8px' }} 
                                />
-                               <Bar dataKey="value" fill="#3B82F6" radius={[4, 4, 0, 0]}>
+                               <Bar dataKey="value" fill="#3B82F6" radius={[8, 8, 0, 0]}>
                                    {barData.map((entry, index) => (
                                        <Cell key={`cell-${index}`} fill={entry.name === 'Entradas' ? '#10B981' : '#EF4444'} />
                                    ))}
@@ -1388,28 +3114,53 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
 
   const renderExpenses = () => (
-      <div className="animate-fade-in">
-          <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Fluxo de Caixa (Entradas/Saídas)</h2>
-              <button onClick={() => { setNewTransaction({ type: 'EXPENSE', date: new Date().toISOString().split('T')[0], status: 'PAID', category: 'OUTROS_SAIDA' }); setShowTransactionModal(true); }} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 hover:bg-red-700"><Plus size={18} /> Nova Movimentação</button>
+      <div className="animate-fade-in space-y-6">
+          <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-amber-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+              <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-amber-200/40 blur-3xl dark:bg-amber-900/20" />
+              <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-orange-200/30 blur-3xl dark:bg-orange-900/20" />
+              <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                  <div>
+                      <span className="text-xs font-bold tracking-[0.2em] text-amber-600 uppercase">Retirada / Entrada</span>
+                      <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Fluxo de caixa</h2>
+                      <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                          Registre entradas e saidas manuais com visao clara por categoria.
+                      </p>
+                  </div>
+                  <button
+                      onClick={() => { setNewTransaction({ type: 'EXPENSE', date: new Date().toISOString().split('T')[0], status: 'PAID', category: 'OUTROS_SAIDA' }); setShowTransactionModal(true); }}
+                      className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:opacity-90 shadow-sm"
+                  >
+                      <Plus size={18} /> Nova movimentacao
+                  </button>
+              </div>
           </div>
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden">
+          <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 overflow-hidden">
               <table className="w-full">
-                  <thead className="bg-gray-50 dark:bg-slate-800 text-left">
-                      <tr><th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Data</th><th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Descrição</th><th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Categoria</th><th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Valor</th><th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Ações</th></tr>
+                  <thead className="bg-slate-50 dark:bg-slate-800 text-left">
+                      <tr>
+                          <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Data</th>
+                          <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Descricao</th>
+                          <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Categoria</th>
+                          <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Valor</th>
+                          <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Acoes</th>
+                      </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {transactions.map(t => (
-                          <tr key={t.id}>
-                              <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">{new Date(t.date).toLocaleDateString()}</td>
+                          <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                              <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-400">{new Date(t.date).toLocaleDateString()}</td>
                               <td className="px-6 py-4 font-bold text-slate-800 dark:text-white">{t.description}</td>
-                              <td className="px-6 py-4 text-sm text-gray-500">{TRANSACTION_CATEGORIES.find(c => c.id === t.category)?.label || t.category}</td>
-                              <td className={`px-6 py-4 font-bold ${t.type === 'INCOME' ? 'text-green-600' : 'text-red-600'}`}>{t.type === 'INCOME' ? '+' : '-'} {formatCurrencyBRL(t.amount)}</td>
-                              <td className="px-6 py-4"><button onClick={() => { if(confirm('Excluir?')) deleteExpense(t.id); }} className="text-gray-400 hover:text-red-600"><Trash2 size={16}/></button></td>
+                              <td className="px-6 py-4 text-sm text-slate-500">{TRANSACTION_CATEGORIES.find(c => c.id === t.category)?.label || t.category}</td>
+                              <td className={`px-6 py-4 font-bold ${t.type === 'INCOME' ? 'text-emerald-600' : 'text-red-600'}`}>{t.type === 'INCOME' ? '+' : '-'} {formatCurrencyBRL(t.amount)}</td>
+                              <td className="px-6 py-4">
+                                  <button onClick={() => { if(confirm('Excluir?')) deleteExpense(t.id); }} className="text-slate-400 hover:text-red-600">
+                                      <Trash2 size={16}/>
+                                  </button>
+                              </td>
                           </tr>
                       ))}
                       {transactions.length === 0 && (
-                          <tr><td colSpan={5} className="px-6 py-12 text-center text-gray-400">Nenhuma movimentação registrada.</td></tr>
+                          <tr><td colSpan={5} className="px-6 py-12 text-center text-slate-400">Nenhuma movimentacao registrada.</td></tr>
                       )}
                   </tbody>
               </table>
@@ -1427,36 +3178,57 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           return statusMatch && dateMatch;
       });
 
+      const salesTotal = filteredOrders.reduce((sum, order) => sum + (order.total || 0), 0);
+      const completedCount = filteredOrders.filter((order) => order.status === 'COMPLETED').length;
+      const cancelledCount = filteredOrders.filter((order) => order.status === 'CANCELLED').length;
+
       return (
-          <div className="animate-fade-in">
-              <div className="flex justify-between items-center mb-6">
-                  <div>
-                      <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Gestão de Vendas</h2>
-                      <p className="text-gray-500">Histórico completo de todos os pedidos.</p>
+          <div className="animate-fade-in space-y-6">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-purple-50/60 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-purple-200/40 blur-3xl dark:bg-purple-900/20" />
+                  <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-indigo-200/30 blur-3xl dark:bg-indigo-900/20" />
+                  <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                      <div>
+                          <span className="text-xs font-bold tracking-[0.2em] text-purple-600 uppercase">Vendas</span>
+                          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Historico e controle</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                              Veja o que foi vendido, filtre por data e status e acompanhe o total.
+                          </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3">
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {completedCount} concluidos
+                          </div>
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {cancelledCount} cancelados
+                          </div>
+                          <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              Total {formatCurrencyBRL(salesTotal)}
+                          </div>
+                      </div>
                   </div>
               </div>
 
-              {/* Filters */}
-              <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-gray-200 dark:border-slate-800 mb-6 flex flex-wrap gap-4 items-center">
+              <div className="bg-white/90 dark:bg-slate-900/80 p-4 md:p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800 flex flex-wrap gap-4 items-center">
                   <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-gray-500">Filtrar por:</span>
+                      <span className="text-sm font-bold text-slate-500">Filtrar por:</span>
                       <select 
                         value={salesFilterStatus} 
                         onChange={(e) => setSalesFilterStatus(e.target.value)}
-                        className="bg-gray-100 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-bold outline-none dark:text-white"
+                        className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-bold outline-none dark:text-white"
                       >
                           <option value="ALL">Todos os Status</option>
-                          <option value="COMPLETED">Concluídos</option>
+                          <option value="COMPLETED">Concluidos</option>
                           <option value="CANCELLED">Cancelados</option>
                       </select>
                   </div>
                   <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-gray-500">Data:</span>
+                      <span className="text-sm font-bold text-slate-500">Data:</span>
                       <input 
                         type="date" 
                         value={salesFilterDate}
                         onChange={(e) => setSalesFilterDate(e.target.value)}
-                        className="bg-gray-100 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm outline-none dark:text-white"
+                        className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm outline-none dark:text-white"
                         style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
                       />
                       {salesFilterDate && (
@@ -1465,30 +3237,29 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   </div>
               </div>
 
-              {/* Sales Table */}
-              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
+              <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm overflow-hidden">
                   <div className="overflow-x-auto">
                       <table className="w-full">
-                          <thead className="bg-gray-50 dark:bg-slate-800 text-left">
+                          <thead className="bg-slate-50 dark:bg-slate-800 text-left">
                               <tr>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Pedido</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Cliente</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Data</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Pagamento</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Total</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Status</th>
-                                  <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">Ações</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Pedido</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Cliente</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Data</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Pagamento</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Total</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Acoes</th>
                               </tr>
                           </thead>
-                          <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                               {filteredOrders.map(order => (
-                                  <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors">
-                                      <td className="px-6 py-4 font-mono text-sm text-gray-600 dark:text-gray-400">#{order.id.slice(0,5)}</td>
+                                  <tr key={order.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                                      <td className="px-6 py-4 font-mono text-sm text-slate-500">#{order.id.slice(0,5)}</td>
                                       <td className="px-6 py-4 font-bold text-slate-800 dark:text-white text-sm">{order.customerName}</td>
-                                      <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
+                                      <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-400">
                                           {new Date(order.createdAt || '').toLocaleString()}
                                       </td>
-                                      <td className="px-6 py-4 text-sm text-gray-600 dark:text-gray-300">{order.paymentMethod}</td>
+                                      <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-300">{order.paymentMethod}</td>
                                       <td className="px-6 py-4 font-bold text-slate-800 dark:text-white text-sm">{formatCurrencyBRL(order.total)}</td>
                                       <td className="px-6 py-4">
                                           <span className={`px-2 py-1 rounded text-xs font-bold ${
@@ -1501,7 +3272,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       <td className="px-6 py-4 text-right">
                                           <button 
                                             onClick={() => setDeleteSaleId(order.id)}
-                                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
                                             title="Excluir Venda"
                                           >
                                               <Trash2 size={18} />
@@ -1511,7 +3282,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               ))}
                               {filteredOrders.length === 0 && (
                                   <tr>
-                                      <td colSpan={7} className="px-6 py-12 text-center text-gray-400">Nenhuma venda encontrada com os filtros atuais.</td>
+                                      <td colSpan={7} className="px-6 py-12 text-center text-slate-400">Nenhuma venda encontrada com os filtros atuais.</td>
                                   </tr>
                               )}
                           </tbody>
@@ -1563,61 +3334,145 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       );
   };
 
-  const renderSettings = () => (
-      <div className="animate-fade-in">
-           <h2 className="text-2xl font-bold text-slate-800 dark:text-white mb-6">Configurações da Loja</h2>
-           
-           <div className="flex flex-wrap border-b border-gray-200 dark:border-slate-800 mb-6">
-               {[
-                   {id: 'STORE', label: 'Dados da Loja', icon: Store},
-                   {id: 'ADDRESS', label: 'Endereço & Contato', icon: MapPin},
-                   {id: 'DELIVERY', label: 'Entrega', icon: Bike},
-                   {id: 'SCHEDULE', label: 'Horários', icon: Clock},
-                   {id: 'PAYMENTS', label: 'Pagamento', icon: Wallet},
-                   {id: 'SECURITY', label: 'Segurança', icon: ShieldCheck}, 
-               ].map(tab => (
-                   <button key={tab.id} onClick={() => setSettingsTab(tab.id as any)} className={`flex items-center gap-2 px-6 py-3 text-sm font-bold border-b-2 transition-colors ${settingsTab === tab.id ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}>
-                       <tab.icon size={16}/> {tab.label}
-                   </button>
-               ))}
-           </div>
+  const renderSettings = () => {
+      const tabs = [
+          { id: 'STORE', label: 'Dados da Loja', icon: Store, desc: 'Identidade, categoria e imagens.' },
+          { id: 'ADDRESS', label: 'Endereco & Contato', icon: MapPin, desc: 'Localizacao e canais oficiais.' },
+          { id: 'DELIVERY', label: 'Entrega', icon: Bike, desc: 'Tempos, taxas e mesas.' },
+          { id: 'SCHEDULE', label: 'Horarios', icon: Clock, desc: 'Expediente e janelas.' },
+          { id: 'PAYMENTS', label: 'Pagamento', icon: Wallet, desc: 'Metodos aceitos e taxas.' },
+          { id: 'SECURITY', label: 'Seguranca', icon: ShieldCheck, desc: 'Protecao e confirmacoes.' },
+          { id: 'HOMOLOGATION', label: 'Homologacao', icon: ShieldCheck, desc: 'Merchant ID para integracoes.' }
+      ];
+      const canConfigurePrinter = userRole === 'BUSINESS' || userRole === 'ADMIN';
+      const printDownloadUrl = storeProfile.merchantId
+          ? `/downloads/menufaz-print.exe?merchantId=${encodeURIComponent(storeProfile.merchantId)}`
+          : '/downloads/menufaz-print.exe';
+      const activeTab = tabs.find((tab) => tab.id === settingsTab) || tabs[0];
+      const ActiveIcon = activeTab.icon;
 
-           {/* ... (Settings content remains same) ... */}
-           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm">
+      return (
+      <div className="animate-fade-in">
+           <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-rose-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-5 md:p-6 shadow-sm">
+                <div className="pointer-events-none absolute -top-24 -right-20 h-56 w-56 rounded-full bg-red-200/50 blur-3xl dark:bg-red-900/20" />
+                <div className="pointer-events-none absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-orange-200/40 blur-3xl dark:bg-orange-900/20" />
+                <div className="relative">
+                    <div className="flex flex-col gap-1.5 mb-4">
+                        <span className="text-xs font-bold tracking-[0.2em] text-red-500 uppercase">Configuracoes</span>
+                        <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white font-display">
+                            Central da loja
+                        </h2>
+                        <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                            Ajuste o que aparece para seus clientes e o que governa suas operacoes.
+                        </p>
+                    </div>
+
+                    <div className="grid lg:grid-cols-[220px,1fr] xl:grid-cols-[220px,1fr,260px] gap-4">
+                        <div className="lg:sticky lg:top-24 h-fit">
+                            <div className="hidden lg:flex flex-col gap-2 bg-white/90 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-3 shadow-sm">
+                                {tabs.map((tab) => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => setSettingsTab(tab.id as any)}
+                                        className={`flex items-center gap-3 px-3 py-2.5 rounded-2xl text-sm font-semibold transition-all ${
+                                            settingsTab === tab.id
+                                                ? 'bg-red-600 text-white shadow-lg shadow-red-600/20'
+                                                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100/70 dark:hover:bg-slate-800/70'
+                                        }`}
+                                    >
+                                        <tab.icon size={16} />
+                                        <div className="text-left">
+                                            <div>{tab.label}</div>
+                                            <div className={`text-[11px] ${settingsTab === tab.id ? 'text-white/80' : 'text-slate-400 dark:text-slate-500'}`}>
+                                                {tab.desc}
+                                            </div>
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="lg:hidden flex gap-2 overflow-x-auto pb-1">
+                                {tabs.map((tab) => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => setSettingsTab(tab.id as any)}
+                                        className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all ${
+                                            settingsTab === tab.id
+                                                ? 'bg-red-600 text-white shadow-md shadow-red-600/30'
+                                                : 'bg-white/80 dark:bg-slate-900/70 text-slate-600 dark:text-slate-300 border border-slate-200/80 dark:border-slate-800'
+                                        }`}
+                                    >
+                                        <tab.icon size={14} /> {tab.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div>
+                            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-11 h-11 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center text-red-600">
+                                        <ActiveIcon size={20} />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-800 dark:text-white">{activeTab.label}</h3>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">{activeTab.desc}</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={handleSaveStoreSettings}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-red-700 shadow-lg shadow-red-600/20 flex items-center gap-2 text-sm moving-border"
+                                    style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
+                                >
+                                    <Save size={18} /> Salvar agora
+                                </button>
+                            </div>
+
+                            {/* ... (Settings content remains same) ... */}
+                            <div className="bg-white/95 dark:bg-slate-900/80 p-6 md:p-7 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-red-100/20 dark:shadow-none">
                {settingsTab === 'STORE' && (
-                   <div className="grid md:grid-cols-2 gap-8">
+                   <div className="grid md:grid-cols-2 gap-6">
                        <div className="space-y-4">
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nome do Estabelecimento</label>
                                <p className="text-xs text-gray-400 mb-1">Esse nome aparece para os clientes no app.</p>
-                               <input type="text" value={storeProfile.name} onChange={(e) => setStoreProfile({...storeProfile, name: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
+                               <input type="text" value={storeProfile.name} onChange={(e) => setStoreProfile({...storeProfile, name: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Descrição / Bio</label>
                                <p className="text-xs text-gray-400 mb-1">Fale sobre o estilo da loja e diferenciais.</p>
-                               <textarea value={storeProfile.description} onChange={(e) => setStoreProfile({...storeProfile, description: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" rows={3} />
+                               <textarea value={storeProfile.description} onChange={(e) => setStoreProfile({...storeProfile, description: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" rows={3} />
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Categoria Principal</label>
                                <p className="text-xs text-gray-400 mb-1">Ajuda a loja aparecer nos filtros certos.</p>
-                               <input type="text" value={storeProfile.category} onChange={(e) => setStoreProfile({...storeProfile, category: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
+                               <input type="text" value={storeProfile.category} onChange={(e) => setStoreProfile({...storeProfile, category: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
                        </div>
                        <div className="space-y-4">
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Logo da Loja</label>
-                               <p className="text-xs text-gray-400 mb-2">Mostrada para o cliente durante o pedido.</p>
+                               <p className="text-xs text-gray-400 mb-2">Mostrada para o cliente durante o pedido. Recomendado: 512x512 px (quadrado).</p>
                                <div 
                                    onClick={() => storeLogoInputRef.current?.click()}
-                                   className="w-full h-32 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
+                                   className="w-40 h-40 rounded-2xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
                                >
-                                   {storeProfile.logoUrl ? <img src={storeProfile.logoUrl} alt="Logo" className="w-24 h-24 object-cover rounded-full border border-gray-200 dark:border-slate-700" /> : <><UploadCloud size={28} className="mb-2" /><span>Enviar logo</span></>}
+                                   {storeProfile.logoUrl ? <img src={storeProfile.logoUrl} alt="Logo" className="w-24 h-24 object-contain rounded-full border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-950 p-2" /> : <><UploadCloud size={28} className="mb-2" /><span>Enviar logo</span></>}
                                </div>
                                <input type="file" ref={storeLogoInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'STORE_LOGO')} accept="image/*" />
+                               {storeProfile.logoUrl ? (
+                                   <button
+                                       type="button"
+                                       onClick={handleRemoveStoreLogo}
+                                       className="mt-2 text-xs font-bold text-red-600 hover:text-red-700"
+                                   >
+                                       Remover logo
+                                   </button>
+                               ) : null}
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Capa da Loja</label>
-                               <p className="text-xs text-gray-400 mb-2">Imagem de destaque no topo da loja.</p>
+                               <p className="text-xs text-gray-400 mb-2">Imagem de destaque no topo da loja. Recomendado: 1600x900 px (16:9).</p>
                                <div 
                                    onClick={() => storeCoverInputRef.current?.click()}
                                    className="w-full h-48 rounded-xl border-2 border-dashed border-gray-300 dark:border-slate-700 flex flex-col items-center justify-center text-gray-400 cursor-pointer hover:border-red-500 hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden"
@@ -1625,31 +3480,40 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    {storeProfile.imageUrl ? <img src={storeProfile.imageUrl} alt="Capa" className="w-full h-full object-cover absolute" /> : <><UploadCloud size={32} className="mb-2" /><span>Enviar capa</span></>}
                                </div>
                                <input type="file" ref={storeCoverInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'STORE_COVER')} accept="image/*" />
+                               {storeProfile.imageUrl ? (
+                                   <button
+                                       type="button"
+                                       onClick={handleRemoveStoreCover}
+                                       className="mt-2 text-xs font-bold text-red-600 hover:text-red-700"
+                                   >
+                                       Remover capa
+                                   </button>
+                               ) : null}
                            </div>
                        </div>
                    </div>
                )}
 
                {settingsTab === 'ADDRESS' && (
-                   <div className="grid md:grid-cols-2 gap-6">
+                   <div className="grid md:grid-cols-2 gap-4">
                        <div className="md:col-span-2 flex items-end gap-2">
                            <div className="flex-1">
                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">CEP</label>
-                               <input type="text" value={addressForm.cep} onChange={(e) => setAddressForm({...addressForm, cep: e.target.value})} onBlur={handleCepBlur} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" maxLength={9} placeholder="00000-000" />
+                               <input type="text" value={addressForm.cep} onChange={(e) => setAddressForm({...addressForm, cep: e.target.value})} onBlur={handleCepBlur} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" maxLength={9} placeholder="00000-000" />
                            </div>
-                           <div className="flex-1"><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cidade</label><input type="text" value={addressForm.city} onChange={(e) => setAddressForm({...addressForm, city: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
-                           <button onClick={handleGeocodeAddress} className="bg-red-100 text-red-600 p-3 rounded-lg font-bold hover:bg-red-200" title="Atualizar Local no Mapa"><MapPin size={20} /></button>
+                           <div className="flex-1"><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Cidade</label><input type="text" value={addressForm.city} onChange={(e) => setAddressForm({...addressForm, city: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                           <button onClick={handleGeocodeAddress} className="bg-red-100 text-red-600 p-3 rounded-xl font-bold hover:bg-red-200" title="Atualizar Local no Mapa"><MapPin size={20} /></button>
                        </div>
-                       <div className="md:col-span-2"><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Rua / Logradouro</label><input type="text" value={addressForm.street} onChange={(e) => setAddressForm({...addressForm, street: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
-                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Número</label><input type="text" value={addressForm.number} onChange={(e) => setAddressForm({...addressForm, number: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
-                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Bairro</label><input type="text" value={addressForm.district} onChange={(e) => setAddressForm({...addressForm, district: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
-                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Telefone / WhatsApp</label><input type="text" value={addressForm.phone} onChange={(e) => setAddressForm({...addressForm, phone: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                       <div className="md:col-span-2"><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Rua / Logradouro</label><input type="text" value={addressForm.street} onChange={(e) => setAddressForm({...addressForm, street: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Número</label><input type="text" value={addressForm.number} onChange={(e) => setAddressForm({...addressForm, number: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Bairro</label><input type="text" value={addressForm.district} onChange={(e) => setAddressForm({...addressForm, district: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                       <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Telefone / WhatsApp</label><input type="text" value={addressForm.phone} onChange={(e) => setAddressForm({...addressForm, phone: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
                    </div>
                )}
 
                {settingsTab === 'DELIVERY' && (
-                   <div className="space-y-6">
-                       <div className="grid grid-cols-2 gap-6">
+                   <div className="space-y-4">
+                       <div className="grid grid-cols-2 gap-4">
                    <div>
                        <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tempo de Entrega</label>
                        <p className="text-xs text-gray-400 mb-1">Mostrado para o cliente no checkout.</p>
@@ -1666,11 +3530,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                <input type="number" value={storeProfile.deliveryFee} onChange={(e) => setStoreProfile({...storeProfile, deliveryFee: parseFloat(e.target.value)})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
                        </div>
-                       <div className="flex items-center gap-4">
+                       <div className="flex flex-wrap items-center gap-3">
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsDelivery} onChange={(e) => setStoreProfile({...storeProfile, acceptsDelivery: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Delivery</span></label>
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsPickup} onChange={(e) => setStoreProfile({...storeProfile, acceptsPickup: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Retirada</span></label>
                        </div>
-                       <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-900/50 p-4 space-y-4">
+                       <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-900/50 p-4 space-y-3">
                            <div className="flex flex-wrap items-center justify-between gap-3">
                                <div className="flex items-center gap-3">
                                    <div className="w-10 h-10 rounded-xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-200">
@@ -1693,7 +3557,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                            </div>
                            {storeProfile.acceptsTableOrders && (
                                <div className="space-y-3">
-                                   <div className="flex flex-wrap items-end gap-3">
+                                   <div className="flex flex-wrap items-end gap-2">
                                        <div className="flex-1 min-w-[200px]">
                                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Mesas</label>
                                            <input
@@ -1741,103 +3605,197 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                )}
 
                {settingsTab === 'SCHEDULE' && (
-                   <div className="space-y-3">
-                       {storeProfile.schedule?.map((day, idx) => (
-                           <div key={idx} className="flex items-center gap-4 p-3 bg-gray-50 dark:bg-slate-800 rounded-lg border border-gray-200 dark:border-slate-700">
-                               <div className="w-24 font-bold text-slate-700 dark:text-white">{day.day}</div>
-                               <div className="flex flex-col gap-3">
-                                   <div className="flex items-center gap-2">
-                                       <label className="relative inline-flex items-center cursor-pointer">
-                                           <input
-                                               type="checkbox"
-                                               checked={day.isMorningOpen}
-                                               onChange={(e) => {
-                                                   const newSched = [...(storeProfile.schedule || [])];
-                                                   newSched[idx].isMorningOpen = e.target.checked;
-                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
-                                               }}
-                                               className="sr-only peer"
-                                           />
-                                           <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
-                                       </label>
-                                       <span className="text-xs font-bold text-gray-500 w-12">Manhã</span>
+                   <div className="space-y-4">
+                       <div className="grid md:grid-cols-2 gap-4">
+                           <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/60 p-4 space-y-3">
+                               <div className="flex items-center justify-between gap-3">
+                                   <div>
+                                       <p className="text-xs font-bold text-gray-500 uppercase">Auto abertura</p>
+                                       <p className="text-sm text-gray-500 dark:text-gray-400">Abrir/fechar automaticamente conforme os horarios.</p>
+                                   </div>
+                                   <button
+                                       onClick={handleToggleAutoOpen}
+                                       className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
+                                           storeProfile.autoOpenClose ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
+                                       }`}
+                                   >
+                                       {storeProfile.autoOpenClose ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                                       {storeProfile.autoOpenClose ? 'Ativo' : 'Inativo'}
+                                   </button>
+                               </div>
+                               <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-gray-500">
+                                   <span className={`px-3 py-1 rounded-full ${availability?.isOpen ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                                       {availability?.isOpen ? 'Loja aberta' : 'Loja fechada'}
+                                   </span>
+                                   <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                       {availability?.reason || (availabilityLoading ? 'Carregando...' : 'Sem status')}
+                                   </span>
+                                   <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                       Proxima mudanca: {availability?.nextChangeAt ? new Date(availability.nextChangeAt).toLocaleString('pt-BR') : '--'}
+                                   </span>
+                               </div>
+                           </div>
+
+                           <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/60 p-4 space-y-3">
+                               <div className="flex items-center justify-between gap-3">
+                                   <div>
+                                       <p className="text-xs font-bold text-gray-500 uppercase">Auto-aceite</p>
+                                       <p className="text-sm text-gray-500 dark:text-gray-400">Aceitar pedidos automaticamente ao receber.</p>
+                                   </div>
+                                   <button
+                                       onClick={handleToggleAutoAccept}
+                                       disabled={isAutoAcceptUpdating}
+                                       className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
+                                           isAutoAcceptEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
+                                       } ${isAutoAcceptUpdating ? 'opacity-70 cursor-not-allowed' : ''}`}
+                                   >
+                                       {isAutoAcceptEnabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                                       {isAutoAcceptEnabled ? 'Ativo' : 'Inativo'}
+                                   </button>
+                               </div>
+
+                               <div className="border-t border-gray-200 dark:border-slate-700 pt-3 space-y-2">
+                                   <p className="text-xs font-bold text-gray-500 uppercase">Pausa/Fechar agora</p>
+                                   <div className="grid grid-cols-2 gap-2">
                                        <input
-                                           type="time"
-                                           value={day.morningOpenTime}
-                                           onChange={(e) => {
-                                               const newSched = [...(storeProfile.schedule || [])];
-                                               newSched[idx].morningOpenTime = e.target.value;
-                                               setStoreProfile({ ...storeProfile, schedule: newSched });
-                                           }}
-                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
-                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
-                                           disabled={!day.isMorningOpen}
+                                           type="number"
+                                           min="1"
+                                           value={pauseMinutes}
+                                           onChange={(e) => setPauseMinutes(e.target.value)}
+                                           placeholder="Minutos"
+                                           className="p-2 border rounded-lg text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
                                        />
-                                       <span className="text-gray-400">-</span>
                                        <input
-                                           type="time"
-                                           value={day.morningCloseTime}
-                                           onChange={(e) => {
-                                               const newSched = [...(storeProfile.schedule || [])];
-                                               newSched[idx].morningCloseTime = e.target.value;
-                                               setStoreProfile({ ...storeProfile, schedule: newSched });
-                                           }}
-                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
-                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
-                                           disabled={!day.isMorningOpen}
+                                           type="text"
+                                           value={pauseReason}
+                                           onChange={(e) => setPauseReason(e.target.value)}
+                                           placeholder="Motivo"
+                                           className="p-2 border rounded-lg text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
                                        />
                                    </div>
-                                   <div className="flex items-center gap-2">
-                                       <label className="relative inline-flex items-center cursor-pointer">
-                                           <input
-                                               type="checkbox"
-                                               checked={day.isAfternoonOpen}
-                                               onChange={(e) => {
-                                                   const newSched = [...(storeProfile.schedule || [])];
-                                                   newSched[idx].isAfternoonOpen = e.target.checked;
-                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
-                                               }}
-                                               className="sr-only peer"
-                                           />
-                                           <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
-                                       </label>
-                                       <span className="text-xs font-bold text-gray-500 w-12">Tarde</span>
-                                       <input
-                                           type="time"
-                                           value={day.afternoonOpenTime}
-                                           onChange={(e) => {
-                                               const newSched = [...(storeProfile.schedule || [])];
-                                               newSched[idx].afternoonOpenTime = e.target.value;
-                                               setStoreProfile({ ...storeProfile, schedule: newSched });
-                                           }}
-                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
-                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
-                                           disabled={!day.isAfternoonOpen}
-                                       />
-                                       <span className="text-gray-400">-</span>
-                                       <input
-                                           type="time"
-                                           value={day.afternoonCloseTime}
-                                           onChange={(e) => {
-                                               const newSched = [...(storeProfile.schedule || [])];
-                                               newSched[idx].afternoonCloseTime = e.target.value;
-                                               setStoreProfile({ ...storeProfile, schedule: newSched });
-                                           }}
-                                           className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
-                                           style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
-                                           disabled={!day.isAfternoonOpen}
-                                       />
+                                   <div className="flex flex-wrap gap-2">
+                                       <button
+                                           onClick={handlePauseStore}
+                                           disabled={pauseUpdating}
+                                           className="bg-red-600 text-white px-4 py-2 rounded-xl font-bold text-xs hover:bg-red-700 disabled:opacity-60"
+                                       >
+                                           Pausar
+                                       </button>
+                                       <button
+                                           onClick={handleResumePause}
+                                           disabled={pauseUpdating || !availability?.pause?.active}
+                                           className="bg-white dark:bg-slate-800 text-slate-700 dark:text-white px-4 py-2 rounded-xl font-bold text-xs border border-gray-200 dark:border-slate-700 hover:border-red-300 disabled:opacity-60"
+                                       >
+                                           Retomar
+                                       </button>
+                                       {availability?.pause?.active && (
+                                           <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center">
+                                               Pausado ate {availability.pause.endsAt ? new Date(availability.pause.endsAt).toLocaleString('pt-BR') : '--'}
+                                           </span>
+                                       )}
                                    </div>
                                </div>
                            </div>
-                       ))}
+                       </div>
+
+                       <div className="space-y-2">
+                           {storeProfile.schedule?.map((day, idx) => (
+                               <div key={idx} className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-slate-800 rounded-lg border border-gray-200 dark:border-slate-700">
+                                   <div className="w-24 font-bold text-slate-700 dark:text-white">{day.day}</div>
+                                   <div className="flex flex-col gap-3">
+                                       <div className="flex items-center gap-2">
+                                           <label className="relative inline-flex items-center cursor-pointer">
+                                               <input
+                                                   type="checkbox"
+                                                   checked={day.isMorningOpen}
+                                                   onChange={(e) => {
+                                                       const newSched = [...(storeProfile.schedule || [])];
+                                                       newSched[idx].isMorningOpen = e.target.checked;
+                                                       setStoreProfile({ ...storeProfile, schedule: newSched });
+                                                   }}
+                                                   className="sr-only peer"
+                                               />
+                                               <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
+                                           </label>
+                                           <span className="text-xs font-bold text-gray-500 w-12">Manha</span>
+                                           <input
+                                               type="time"
+                                               value={day.morningOpenTime}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].morningOpenTime = e.target.value;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                               style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                               disabled={!day.isMorningOpen}
+                                           />
+                                           <span className="text-gray-400">-</span>
+                                           <input
+                                               type="time"
+                                               value={day.morningCloseTime}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].morningCloseTime = e.target.value;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                               style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                               disabled={!day.isMorningOpen}
+                                           />
+                                       </div>
+                                       <div className="flex items-center gap-2">
+                                           <label className="relative inline-flex items-center cursor-pointer">
+                                               <input
+                                                   type="checkbox"
+                                                   checked={day.isAfternoonOpen}
+                                                   onChange={(e) => {
+                                                       const newSched = [...(storeProfile.schedule || [])];
+                                                       newSched[idx].isAfternoonOpen = e.target.checked;
+                                                       setStoreProfile({ ...storeProfile, schedule: newSched });
+                                                   }}
+                                                   className="sr-only peer"
+                                               />
+                                               <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
+                                           </label>
+                                           <span className="text-xs font-bold text-gray-500 w-12">Tarde</span>
+                                           <input
+                                               type="time"
+                                               value={day.afternoonOpenTime}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].afternoonOpenTime = e.target.value;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                               style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                               disabled={!day.isAfternoonOpen}
+                                           />
+                                           <span className="text-gray-400">-</span>
+                                           <input
+                                               type="time"
+                                               value={day.afternoonCloseTime}
+                                               onChange={(e) => {
+                                                   const newSched = [...(storeProfile.schedule || [])];
+                                                   newSched[idx].afternoonCloseTime = e.target.value;
+                                                   setStoreProfile({ ...storeProfile, schedule: newSched });
+                                               }}
+                                               className="p-1 border rounded text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                               style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                                               disabled={!day.isAfternoonOpen}
+                                           />
+                                       </div>
+                                   </div>
+                               </div>
+                           ))}
+                       </div>
                    </div>
                )}
 
                {settingsTab === 'PAYMENTS' && (
-                   <div className="space-y-4">
+                   <div className="space-y-3">
                        <p className="text-sm text-gray-500 mb-4">Selecione os métodos de pagamento aceitos na entrega ou retirada.</p>
-                       <div className="grid md:grid-cols-2 gap-4">
+                       <div className="grid md:grid-cols-2 gap-3">
                            {paymentMethods.map(pm => (
                                <div key={pm.id} onClick={() => handleTogglePaymentMethod(pm.id)} className={`p-4 rounded-xl border cursor-pointer flex items-center justify-between transition-all ${pm.active ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200 hover:border-gray-300 dark:bg-slate-800 dark:border-slate-700'}`}>
                                    <span className={`font-bold ${pm.active ? 'text-green-700' : 'text-gray-500 dark:text-gray-400'}`}>{pm.name}</span>
@@ -1845,7 +3803,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                </div>
                            ))}
                        </div>
-                       <div className="mt-6 pt-6 border-t border-gray-100 dark:border-slate-800">
+                       <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-800">
                           <label className="flex items-center gap-3 p-4 border border-gray-200 dark:border-slate-700 rounded-xl cursor-pointer bg-blue-50 dark:bg-blue-900/20">
                               <input type="checkbox" checked={storeProfile.acceptsCardOnDelivery} onChange={(e) => setStoreProfile({...storeProfile, acceptsCardOnDelivery: e.target.checked})} className="w-5 h-5 accent-blue-600" />
                               <div>
@@ -1862,7 +3820,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <h3 className="font-bold text-slate-800 dark:text-white mb-4 flex items-center gap-2">
                            <Lock size={20} className="text-red-600" /> Senha Administrativa
                        </h3>
-                        <div className="bg-gray-50 dark:bg-slate-800 p-6 rounded-xl border border-gray-200 dark:border-slate-700">
+                        <div className="bg-gray-50 dark:bg-slate-800 p-5 rounded-xl border border-gray-200 dark:border-slate-700">
                            <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Senha Atual</label>
                            <div className="flex gap-2 mb-4">
                                <div className="relative flex-1">
@@ -1916,12 +3874,182 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                    </div>
                )}
 
+               {settingsTab === 'HOMOLOGATION' && (
+                   <div className="space-y-4 max-w-3xl animate-fade-in">
+                       <div className="bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-2xl p-5">
+                           <h3 className="font-bold text-amber-900 dark:text-amber-200 mb-2 flex items-center gap-2">
+                               <ShieldCheck size={18} /> Homologacao com Qualifaz Entregas
+                           </h3>
+                           <p className="text-sm text-amber-800 dark:text-amber-300">
+                               Gere um Merchant ID unico para esta loja. Essa chave sera usada para sincronizar pedidos com a plataforma Qualifaz Entregas.
+                           </p>
+                       </div>
+
+                       <div className="bg-white/90 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 space-y-4">
+                           <div>
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Merchant ID</label>
+                               <div className="flex flex-wrap gap-2 items-center">
+                                   <input
+                                       type="text"
+                                       value={storeProfile.merchantId || ''}
+                                       readOnly
+                                       className="flex-1 min-w-[220px] p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white font-mono text-sm"
+                                       placeholder="Ainda nao gerado"
+                                   />
+                                   <button
+                                       type="button"
+                                       onClick={handleCopyMerchantId}
+                                       disabled={!storeProfile.merchantId}
+                                       className="px-4 py-3 rounded-xl font-bold text-sm border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                   >
+                                       <Copy size={16} /> Copiar
+                                   </button>
+                               </div>
+                               {storeProfile.merchantIdCreatedAt && (
+                                   <p className="text-xs text-slate-500 mt-2">
+                                       Gerado em {new Date(storeProfile.merchantIdCreatedAt).toLocaleString()}
+                                   </p>
+                               )}
+                           {storeProfile.merchantIdRevokedAt && !storeProfile.merchantId && (
+                               <p className="text-xs text-slate-500 mt-2">
+                                   Revogado em {new Date(storeProfile.merchantIdRevokedAt).toLocaleString()}
+                               </p>
+                           )}
+                       </div>
+
+                       {canConfigurePrinter && (
+                           <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 p-4 space-y-2">
+                               <h4 className="text-sm font-bold text-slate-800 dark:text-white">Impressao de pedidos</h4>
+                               <p className="text-xs text-slate-500 dark:text-slate-400">
+                                   Para imprimir pedidos automaticamente, instale o aplicativo Menufaz Print no computador da loja (Windows).
+                               </p>
+                               <button
+                                   type="button"
+                                   onClick={() => window.location.assign(printDownloadUrl)}
+                                   className="inline-flex items-center justify-center px-4 py-2 rounded-xl font-bold text-sm bg-red-600 text-white hover:bg-red-700 shadow-sm shadow-red-600/20"
+                               >
+                                   Configurar impressora
+                               </button>
+                           </div>
+                       )}
+
+                       <div className="flex flex-wrap gap-3">
+                           <button
+                               type="button"
+                               onClick={handleGenerateMerchantId}
+                                   disabled={merchantActionLoading || !!storeProfile.merchantId}
+                                   className="bg-green-600 text-white px-5 py-3 rounded-xl font-bold text-sm hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                               >
+                                   {merchantActionLoading ? 'Processando...' : 'Gerar Merchant ID'}
+                               </button>
+                               <button
+                                   type="button"
+                                   onClick={handleRevokeMerchantId}
+                                   disabled={merchantActionLoading || !storeProfile.merchantId}
+                                   className="bg-red-600 text-white px-5 py-3 rounded-xl font-bold text-sm hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                               >
+                                   Revogar
+                               </button>
+                           </div>
+                       </div>
+                   </div>
+               )}
+
                <div className="mt-8 pt-6 border-t border-gray-100 dark:border-slate-800 flex justify-end">
                    <button onClick={handleSaveStoreSettings} className="bg-red-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-red-700 shadow-lg shadow-red-600/20 flex items-center gap-2"><Save size={20}/> Salvar Alterações</button>
                </div>
+                            </div>
+                        </div>
+
+                        <div className="hidden xl:block">
+                            <div className="sticky top-24 space-y-4">
+                                <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-5 shadow-sm">
+                                    <p className="text-xs font-bold uppercase text-slate-400 mb-2">Resumo</p>
+                                    <p className="text-base font-extrabold text-slate-900 dark:text-white">{storeProfile.name || 'Sua loja'}</p>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">{storeProfile.city || addressForm.city || 'Cidade não informada'}</p>
+                                    <div className="mt-4 grid gap-2">
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-slate-500">Delivery</span>
+                                            <span className={`font-bold ${storeProfile.acceptsDelivery ? 'text-green-600' : 'text-slate-400'}`}>
+                                                {storeProfile.acceptsDelivery ? 'Ativo' : 'Inativo'}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-slate-500">Retirada</span>
+                                            <span className={`font-bold ${storeProfile.acceptsPickup ? 'text-green-600' : 'text-slate-400'}`}>
+                                                {storeProfile.acceptsPickup ? 'Ativo' : 'Inativo'}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-slate-500">Cartao na entrega</span>
+                                            <span className={`font-bold ${storeProfile.acceptsCardOnDelivery ? 'text-green-600' : 'text-slate-400'}`}>
+                                                {storeProfile.acceptsCardOnDelivery ? 'Ativo' : 'Inativo'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="rounded-2xl border border-red-200/60 dark:border-red-900/40 bg-red-50/70 dark:bg-red-900/10 p-5">
+                                    <p className="text-xs font-bold uppercase text-red-400 mb-2">Acoes rapidas</p>
+                                    <p className="text-sm text-red-600 dark:text-red-300 mb-4">
+                                        Revise as alteracoes e salve quando terminar.
+                                    </p>
+                                    <button
+                                        onClick={handleSaveStoreSettings}
+                                        className="w-full bg-red-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-red-700 shadow-lg shadow-red-600/20 flex items-center justify-center gap-2"
+                                    >
+                                        <Save size={18} /> Salvar alteracoes
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="hidden xl:flex flex-col gap-4">
+                            <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
+                                <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Resumo da loja</p>
+                                <p className="text-lg font-extrabold text-slate-900 dark:text-white mt-2 font-display">
+                                    {storeProfile.name || 'Sua loja'}
+                                </p>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{storeProfile.category || 'Categoria'}</p>
+                                <div className="mt-4 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                                    <div className="flex items-center justify-between">
+                                        <span>Delivery</span>
+                                        <span className="font-bold">{storeProfile.acceptsDelivery ? 'Ativo' : 'Off'}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                        <span>Retirada</span>
+                                        <span className="font-bold">{storeProfile.acceptsPickup ? 'Ativo' : 'Off'}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                        <span>Mesa</span>
+                                        <span className="font-bold">{storeProfile.acceptsTableOrders ? 'Ativo' : 'Off'}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
+                                <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Checklist rapido</p>
+                                <div className="mt-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                                        Logo e capa atualizados
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                                        Taxas e tempos revisados
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                                        Metodos de pagamento ativos
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
            </div>
       </div>
   );
+  };
 
   // --- MAIN RENDER LOGIC ---
 
@@ -1933,18 +4061,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-950 flex font-sans transition-colors duration-300">
       {/* Sidebar */}
-      <aside className={`fixed md:sticky top-0 left-0 h-screen w-64 bg-white dark:bg-slate-900 border-r border-gray-200 dark:border-slate-800 z-50 flex flex-col transition-transform duration-300 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
-            <div className="p-6 border-b border-gray-100 dark:border-slate-800 flex items-center gap-3">
+      <aside className={`fixed md:sticky top-0 left-0 h-screen ${isSidebarCollapsed ? 'w-16' : 'w-56'} bg-white dark:bg-slate-900 border-r border-gray-200 dark:border-slate-800 z-50 flex flex-col transition-all duration-300 overflow-hidden ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
+            <div className={`p-6 border-b border-gray-100 dark:border-slate-800 flex items-center gap-3 ${isSidebarCollapsed ? 'justify-center' : ''}`}>
                 <div className="w-8 h-8 bg-red-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-red-500/30">
                     <LayoutDashboard size={18} />
                 </div>
+                {!isSidebarCollapsed && (
                 <div>
                     <h2 className="text-lg font-bold text-slate-900 dark:text-white tracking-tight">MenuFaz</h2>
                     <p className="text-[10px] text-gray-400 uppercase tracking-wider font-bold">Gestor</p>
                 </div>
+                )}
             </div>
             <div className="flex-1 py-6 px-3 overflow-y-auto">
-                <p className="px-4 text-xs font-bold text-gray-400 mb-4 uppercase">Painel</p>
+                {!isSidebarCollapsed && <p className="px-4 text-xs font-bold text-gray-400 mb-4 uppercase">Painel</p>}
                 {[
                     { id: 'OVERVIEW', icon: Activity, label: 'Visão Geral' },
                     { id: 'ORDERS', icon: ClipboardList, label: 'Pedidos', count: orders.filter(o => o.status === 'PENDING').length },
@@ -1953,6 +4083,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                     { id: 'FINANCE', icon: DollarSign, label: 'Financeiro' }, 
                     { id: 'EXPENSES', icon: Wallet, label: 'Retirada / Entrada' }, 
                     { id: 'MENU', icon: UtensilsCrossed, label: 'Cardápio' },
+                    { id: 'BUILDABLE_PRODUCTS', icon: Layers, label: 'Cadastro Produto Montável' },
                     { id: 'COUPONS', icon: Ticket, label: 'Cupons' },
                     { id: 'COURIERS', icon: Bike, label: 'Entregadores' },
                     { id: 'SETTINGS', icon: Settings, label: 'Configurações' }
@@ -1960,19 +4091,23 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                     <button 
                         key={item.id}
                         onClick={() => { setActiveSection(item.id as DashboardSection); setIsMobileMenuOpen(false); }}
-                        className={`w-full flex items-center justify-between px-4 py-3 mb-1 rounded-xl transition-all font-medium ${activeSection === item.id ? 'bg-red-600 text-white shadow-lg shadow-red-200 dark:shadow-none' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-800'}`}
+                        className={`w-full flex items-center justify-between px-4 py-3 mb-1 rounded-xl transition-all font-medium ${activeSection === item.id ? 'bg-red-600 text-white shadow-lg shadow-red-200 dark:shadow-none' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-800'} ${isSidebarCollapsed ? 'justify-center' : ''}`}
                     >
-                        <div className="flex items-center gap-3">
+                        <div className={`flex items-center gap-3 ${isSidebarCollapsed ? 'justify-center' : ''}`}>
                             <item.icon size={20} />
-                            <span>{item.label}</span>
+                            {!isSidebarCollapsed && <span>{item.label}</span>}
                         </div>
-                        {item.count ? <span className="bg-white text-red-600 text-xs font-bold px-2 py-0.5 rounded-full">{item.count}</span> : null}
+                        {!isSidebarCollapsed && item.count ? <span className="bg-white text-red-600 text-xs font-bold px-2 py-0.5 rounded-full">{item.count}</span> : null}
                     </button>
                 ))}
             </div>
             <div className="p-4 border-t border-gray-100 dark:border-slate-800">
-                <button onClick={onBack} className="w-full flex items-center gap-2 text-gray-500 hover:text-red-600 px-4 py-2 rounded-lg transition-colors text-sm font-medium">
-                    <LogOut size={16} /> {userRole === 'ADMIN' ? 'Voltar Admin' : 'Sair'}
+                <button
+                    onClick={onBack}
+                    className={`w-full flex items-center gap-2 text-gray-500 hover:text-red-600 px-4 py-2 rounded-lg transition-colors text-sm font-medium whitespace-nowrap ${isSidebarCollapsed ? 'justify-center' : ''}`}
+                >
+                    <LogOut size={16} />
+                    {!isSidebarCollapsed && (userRole === 'ADMIN' ? 'Voltar Admin' : 'Sair')}
                 </button>
             </div>
       </aside>
@@ -1982,10 +4117,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           <header className="bg-white dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 h-16 px-8 flex items-center justify-between sticky top-0 z-30 shadow-sm">
               <div className="flex items-center gap-4">
                   <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="md:hidden text-slate-600"><Menu /></button>
+                  <button onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="hidden md:inline-flex p-2 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800">
+                      <Menu size={18} />
+                  </button>
                   <h1 className="text-xl font-bold text-slate-800 dark:text-white hidden sm:block">
                       {activeSection === 'OVERVIEW' ? 'Painel de Controle' : 
                        activeSection === 'ORDERS' ? 'Gestão de Pedidos' : 
                        activeSection === 'MENU' ? 'Cardápio Digital' : 
+                       activeSection === 'BUILDABLE_PRODUCTS' ? 'Cadastro de Produto Montável' :
                        activeSection === 'COUPONS' ? 'Cupons' :
                        activeSection === 'COURIERS' ? 'Frota de Entregas' :
                        activeSection === 'FINANCE' ? 'Financeiro' :
@@ -2012,6 +4151,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               {activeSection === 'OVERVIEW' && renderOverview()}
               {activeSection === 'SETTINGS' && renderSettings()}
               {activeSection === 'MENU' && renderMenu()}
+              {activeSection === 'BUILDABLE_PRODUCTS' && renderBuildableProducts()}
               {activeSection === 'ORDERS' && renderOrders()}
               {activeSection === 'COUPONS' && renderCoupons()}
               {activeSection === 'COURIERS' && renderCouriers()}
@@ -2057,6 +4197,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   {newProduct.imageUrl ? <img src={newProduct.imageUrl} alt="Product" className="w-full h-full object-cover absolute" /> : <><ImageIcon size={40} className="mb-2" /><span>Enviar Imagem</span></>}
                               </div>
                               <input type="file" ref={productInfoInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'PRODUCT')} accept="image/*" />
+                              {newProduct.imageUrl ? (
+                                  <button
+                                      type="button"
+                                      onClick={handleRemoveProductImage}
+                                      className="text-xs font-bold text-red-600 hover:text-red-700"
+                                  >
+                                      Remover imagem
+                                  </button>
+                              ) : null}
 
                               {newProduct.isPizza && (
                                   <div className="bg-orange-50 dark:bg-orange-900/10 p-4 rounded-xl border border-orange-200 dark:border-orange-800 flex flex-col items-center justify-center animate-fade-in">
@@ -2103,14 +4252,67 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               </div>
                               <div>
                                 <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Categoria</label>
-                                <input type="text" value={newProduct.category || ''} onChange={(e) => setNewProduct({...newProduct, category: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: Lanches" />
+                                <div className="flex gap-2">
+                                    <select
+                                        value={newProduct.category || ''}
+                                        onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                                        className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                    >
+                                        <option value="">Selecione</option>
+                                        {menuCategories.map((category) => (
+                                            <option key={category} value={category}>
+                                                {category}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowCategoryModal(true)}
+                                        className="px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-200 font-bold"
+                                        title="Cadastrar categoria"
+                                    >
+                                        +
+                                    </button>
+                                </div>
                               </div>
                               
                               <label className="flex items-center gap-3 p-3 border border-gray-200 dark:border-slate-700 rounded-lg cursor-pointer bg-gray-50 dark:bg-slate-800 hover:bg-gray-100 dark:hover:bg-slate-700 transition-colors">
                                   <input 
                                     type="checkbox" 
                                     checked={newProduct.isPizza || false} 
-                                    onChange={(e) => setNewProduct({ ...newProduct, isPizza: e.target.checked, maxFlavors: e.target.checked ? (newProduct.maxFlavors || 2) : 1 })}
+                                    onChange={(e) => {
+                                        const checked = e.target.checked;
+                                        setNewProduct((prev) => {
+                                            const nextProduct = {
+                                                ...prev,
+                                                isPizza: checked,
+                                                maxFlavors: checked ? (prev.maxFlavors || 2) : 1,
+                                                maxFlavorsBySize: checked
+                                                    ? (prev.maxFlavorsBySize || {
+                                                        brotinho: 2,
+                                                        pequena: 2,
+                                                        media: 3,
+                                                        grande: 4,
+                                                        familia: 5
+                                                    })
+                                                    : prev.maxFlavorsBySize,
+                                                pricingStrategiesAllowed: checked
+                                                    ? (prev.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX'])
+                                                    : prev.pricingStrategiesAllowed,
+                                                defaultPricingStrategy: checked
+                                                    ? (prev.defaultPricingStrategy || 'MAX')
+                                                    : prev.defaultPricingStrategy,
+                                                customerCanChoosePricingStrategy: checked
+                                                    ? (prev.customerCanChoosePricingStrategy ?? true)
+                                                    : prev.customerCanChoosePricingStrategy
+                                            };
+                                            if (!checked) return nextProduct;
+                                            return {
+                                                ...nextProduct,
+                                                optionGroups: ensurePizzaSizeGroup(nextProduct.optionGroups)
+                                            };
+                                        });
+                                    }}
                                     className="w-5 h-5 accent-orange-500 rounded"
                                   />
                                   <div className="flex flex-col">
@@ -2125,7 +4327,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           <Layers size={14}/> Divisão de Sabores
                                       </h4>
                                       <div className="flex gap-2 mb-4">
-                                          {[1, 2, 3, 4].map(num => (
+                                          {[1, 2, 3, 4, 5].map(num => (
                                               <button
                                                   key={num}
                                                   onClick={() => setNewProduct({ ...newProduct, maxFlavors: num })}
@@ -2139,19 +4341,110 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                               </button>
                                           ))}
                                       </div>
-                                      
-                                      {(newProduct.maxFlavors || 1) > 1 && (
-                                          <div className="mb-4">
-                                              <label className="block text-xs font-bold text-orange-800 dark:text-orange-300 uppercase mb-1">Taxa de Divisão (R$)</label>
-                                              <input 
-                                                  type="number" 
-                                                  value={newProduct.splitSurcharge || ''} 
-                                                  onChange={(e) => setNewProduct({...newProduct, splitSurcharge: parseFloat(e.target.value)})} 
-                                                  className="w-full p-2 border border-orange-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 font-bold text-orange-700 dark:text-orange-400"
-                                                  placeholder="0.00"
-                                              />
+
+                                      <div className="border-t border-orange-200 dark:border-orange-800 pt-4 space-y-4">
+                                          <div>
+                                              <p className="text-xs font-bold text-orange-800 dark:text-orange-300 uppercase mb-2">Limite por tamanho</p>
+                                              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                                                  {PIZZA_SIZE_OPTIONS.map((size) => {
+                                                      const isAvailable = !pizzaSizeGroupForForm || pizzaAvailableSizeKeys.has(size.key);
+                                                      return (
+                                                          <div key={size.key} className="flex flex-col gap-1">
+                                                              <label className={`text-[10px] font-bold uppercase ${isAvailable ? 'text-gray-500' : 'text-gray-300'}`}>{size.label}</label>
+                                                              <input
+                                                                  type="number"
+                                                                  min={1}
+                                                                  max={5}
+                                                                  disabled={!isAvailable}
+                                                                  value={(newProduct.maxFlavorsBySize || {})[size.key] || ''}
+                                                                  onChange={(e) => {
+                                                                      if (!isAvailable) return;
+                                                                      const nextValue = parseInt(e.target.value, 10);
+                                                                      setNewProduct({
+                                                                          ...newProduct,
+                                                                          maxFlavorsBySize: {
+                                                                              ...(newProduct.maxFlavorsBySize || {}),
+                                                                              [size.key]: Number.isFinite(nextValue) ? nextValue : 1
+                                                                          }
+                                                                      });
+                                                                  }}
+                                                                  className={`w-full p-2 border border-orange-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 font-bold ${isAvailable ? 'text-orange-700 dark:text-orange-400' : 'text-gray-300'}`}
+                                                                  placeholder="0"
+                                                              />
+                                                          </div>
+                                                      );
+                                                  })}
+                                              </div>
+                                              <p className="text-[10px] text-orange-600 dark:text-orange-400 mt-2">
+                                                  Se nao definir, sera usado o maximo geral ({newProduct.maxFlavors || 1}).
+                                              </p>
                                           </div>
-                                      )}
+
+                                          <div>
+                                              <p className="text-xs font-bold text-orange-800 dark:text-orange-300 uppercase mb-2">Regras de preco</p>
+                                              <div className="flex flex-wrap gap-2">
+                                                  {PRICING_STRATEGIES.map((strategy) => {
+                                                      const allowed = newProduct.pricingStrategiesAllowed || [];
+                                                      const isChecked = allowed.includes(strategy.id as any);
+                                                      return (
+                                                          <label key={strategy.id} className="flex items-center gap-2 px-3 py-2 rounded-full border border-orange-200 dark:border-orange-800 text-xs font-bold text-orange-700 dark:text-orange-300 bg-white/80 dark:bg-slate-900/80">
+                                                              <input
+                                                                  type="checkbox"
+                                                                  checked={isChecked}
+                                                                  onChange={(e) => {
+                                                                      const current = newProduct.pricingStrategiesAllowed || [];
+                                                                      if (e.target.checked) {
+                                                                          setNewProduct({
+                                                                              ...newProduct,
+                                                                              pricingStrategiesAllowed: [...current, strategy.id as any]
+                                                                          });
+                                                                          return;
+                                                                      }
+                                                                      if (current.length <= 1) return;
+                                                                      const next = current.filter((item) => item !== strategy.id);
+                                                                      setNewProduct({
+                                                                          ...newProduct,
+                                                                          pricingStrategiesAllowed: next,
+                                                                          defaultPricingStrategy: next.includes(newProduct.defaultPricingStrategy as any)
+                                                                              ? newProduct.defaultPricingStrategy
+                                                                              : (next[0] as any)
+                                                                      });
+                                                                  }}
+                                                                  className="w-4 h-4 accent-orange-600"
+                                                              />
+                                                              {strategy.label}
+                                                          </label>
+                                                      );
+                                                  })}
+                                              </div>
+                                          </div>
+
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                              <div>
+                                                  <label className="text-xs font-bold text-orange-800 dark:text-orange-300 uppercase mb-1 block">Regra padrao</label>
+                                                  <select
+                                                      value={newProduct.defaultPricingStrategy || 'MAX'}
+                                                      onChange={(e) => setNewProduct({ ...newProduct, defaultPricingStrategy: e.target.value as any })}
+                                                      className="w-full p-2 border border-orange-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 font-bold text-orange-700 dark:text-orange-400"
+                                                  >
+                                                      {(newProduct.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX']).map((strategy) => (
+                                                          <option key={strategy} value={strategy}>
+                                                              {PRICING_STRATEGIES.find((item) => item.id === strategy)?.label || strategy}
+                                                          </option>
+                                                      ))}
+                                                  </select>
+                                              </div>
+                                              <label className="flex items-center gap-3 p-3 border border-orange-200 dark:border-orange-800 rounded-lg text-xs font-bold text-orange-700 dark:text-orange-300 bg-white/80 dark:bg-slate-900/80">
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={newProduct.customerCanChoosePricingStrategy ?? true}
+                                                      onChange={(e) => setNewProduct({ ...newProduct, customerCanChoosePricingStrategy: e.target.checked })}
+                                                      className="w-4 h-4 accent-orange-600"
+                                                  />
+                                                  Cliente escolhe regra
+                                              </label>
+                                          </div>
+                                      </div>
 
                                       <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 uppercase mb-2 flex items-center gap-2 border-t border-orange-200 dark:border-orange-800 pt-3">
                                           <Database size={14}/> Sabores Disponíveis
@@ -2189,7 +4482,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           </div>
                           
                           <div className="space-y-4">
-                              {newProduct.optionGroups?.map((group, gIdx) => (
+                              {newProduct.optionGroups?.map((group, gIdx) => {
+                                  const isSizeGroup = newProduct.isPizza && isPizzaSizeGroup(group);
+                                  return (
                                   <div key={group.id} className="bg-gray-50 dark:bg-slate-800/50 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
                                       <div className="flex items-start gap-4 mb-4">
                                           <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2197,21 +4492,50 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                               <div className="flex items-center gap-2"><span className="text-xs text-gray-500">Mín:</span><input type="number" value={group.min} onChange={(e) => handleUpdateOptionGroup(group.id, 'min', parseInt(e.target.value))} className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" /></div>
                                               <div className="flex items-center gap-2"><span className="text-xs text-gray-500">Máx:</span><input type="number" value={group.max} onChange={(e) => handleUpdateOptionGroup(group.id, 'max', parseInt(e.target.value))} className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" /></div>
                                           </div>
-                                          <button onClick={() => handleRemoveOptionGroup(group.id)} className="text-gray-400 hover:text-red-500"><Trash2 size={18}/></button>
+                                          {!isSizeGroup && (
+                                              <button onClick={() => handleRemoveOptionGroup(group.id)} className="text-gray-400 hover:text-red-500"><Trash2 size={18}/></button>
+                                          )}
                                       </div>
                                       
                                       <div className="pl-4 border-l-2 border-gray-200 dark:border-slate-600 space-y-2">
                                           {group.options.map((opt, oIdx) => (
                                               <div key={opt.id} className="flex items-center gap-2">
                                                   <input type="text" value={opt.name} onChange={(e) => handleUpdateOption(group.id, opt.id, 'name', e.target.value)} className="flex-1 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="Nome da Opção" />
-                                                  <input type="number" value={opt.price} onChange={(e) => handleUpdateOption(group.id, opt.id, 'price', parseFloat(e.target.value))} className="w-24 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="R$ 0.00" />
-                                                  <button onClick={() => handleRemoveOption(group.id, opt.id)} className="text-gray-300 hover:text-red-500"><X size={16}/></button>
+                                                  <input
+                                                      type="number"
+                                                      value={isSizeGroup ? (opt.price > 0 ? opt.price : '') : opt.price}
+                                                      onChange={(e) => {
+                                                          const raw = e.target.value;
+                                                          if (isSizeGroup && raw === '') {
+                                                              handleUpdateOption(group.id, opt.id, 'price', 0);
+                                                              return;
+                                                          }
+                                                          handleUpdateOption(group.id, opt.id, 'price', parseFloat(raw));
+                                                      }}
+                                                      className="w-24 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                                      placeholder="R$ 0.00"
+                                                  />
+                                                  {isSizeGroup ? (
+                                                      <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                                                          <input
+                                                              type="checkbox"
+                                                              checked={opt.isAvailable !== false}
+                                                              onChange={(e) => handleUpdateOption(group.id, opt.id, 'isAvailable', e.target.checked)}
+                                                              className="w-4 h-4 accent-orange-500 rounded"
+                                                          />
+                                                          Ativo
+                                                      </label>
+                                                  ) : (
+                                                      <button onClick={() => handleRemoveOption(group.id, opt.id)} className="text-gray-300 hover:text-red-500"><X size={16}/></button>
+                                                  )}
                                               </div>
                                           ))}
-                                          <button onClick={() => handleAddOptionToGroup(group.id)} className="text-xs font-bold text-blue-600 mt-2 flex items-center gap-1 hover:underline"><Plus size={12}/> Adicionar Opção</button>
+                                          {!isSizeGroup && (
+                                              <button onClick={() => handleAddOptionToGroup(group.id)} className="text-xs font-bold text-blue-600 mt-2 flex items-center gap-1 hover:underline"><Plus size={12}/> Adicionar Opção</button>
+                                          )}
                                       </div>
                                   </div>
-                              ))}
+                              )})}
                           </div>
                       </div>
 
@@ -2220,6 +4544,278 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   <div className="p-6 border-t border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex justify-end gap-3">
                       <button onClick={() => setShowProductModal(false)} className="px-6 py-3 text-gray-500 font-bold hover:bg-gray-100 dark:hover:bg-slate-800 rounded-xl transition-colors">Cancelar</button>
                       <button onClick={handleSaveProduct} className="px-8 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-lg shadow-red-600/20 transition-transform active:scale-95">Salvar Produto</button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* BUILDABLE PRODUCT MODAL */}
+      {showBuildableProductModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <div className="bg-white dark:bg-slate-900 w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-scale-in">
+                  <div className="p-6 border-b border-gray-200 dark:border-slate-800 flex justify-between items-center bg-emerald-50 dark:bg-slate-800">
+                      <h3 className="font-bold text-lg text-slate-800 dark:text-white">Cadastro de Produto Montável</h3>
+                      <label className="flex items-center cursor-pointer gap-2 bg-white dark:bg-slate-900 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-slate-700 shadow-sm">
+                          <span className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase">Status</span>
+                          <div className="relative">
+                              <input 
+                                  type="checkbox" 
+                                  className="sr-only peer" 
+                                  checked={buildableProduct.isAvailable !== false} 
+                                  onChange={(e) => setBuildableProduct({ ...buildableProduct, isAvailable: e.target.checked })}
+                              />
+                              <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+                          </div>
+                          <span className={`text-xs font-bold ${buildableProduct.isAvailable !== false ? 'text-emerald-600' : 'text-gray-400'}`}>
+                              {buildableProduct.isAvailable !== false ? 'Ativo' : 'Inativo'}
+                          </span>
+                      </label>
+                      <button onClick={() => setShowBuildableProductModal(false)} className="p-2 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-full transition-colors"><X size={20} /></button>
+                  </div>
+
+                  <div className="p-6 md:p-8 overflow-y-auto">
+                      <div className="grid md:grid-cols-[280px_1fr] gap-8 mb-8">
+                          <div className="flex flex-col gap-4">
+                              <div 
+                                  onClick={() => buildableProductInputRef.current?.click()}
+                                  className="aspect-square rounded-xl border-2 border-dashed border-emerald-200 dark:border-slate-700 flex flex-col items-center justify-center text-emerald-500 cursor-pointer hover:border-emerald-400 hover:bg-emerald-50 dark:hover:bg-slate-800/50 transition-all relative overflow-hidden bg-emerald-50/40 dark:bg-slate-800"
+                              >
+                                  {buildableProduct.imageUrl ? <img src={buildableProduct.imageUrl} alt="Produto montável" className="w-full h-full object-cover absolute" /> : <><ImageIcon size={40} className="mb-2" /><span>Enviar Foto</span></>}
+                              </div>
+                              <input type="file" ref={buildableProductInputRef} className="hidden" onChange={(e) => handleFileUpload(e, 'BUILDABLE_PRODUCT')} accept="image/*" />
+                              {buildableProduct.imageUrl ? (
+                                  <button
+                                      type="button"
+                                      onClick={handleRemoveBuildableImage}
+                                      className="text-xs font-bold text-red-600 hover:text-red-700"
+                                  >
+                                      Remover imagem
+                                  </button>
+                              ) : null}
+
+                              <div className="rounded-xl border border-emerald-100 dark:border-slate-700 bg-emerald-50/60 dark:bg-slate-800 p-4 text-xs text-emerald-700 dark:text-emerald-300">
+                                  <p className="font-bold mb-1 uppercase">Dica rapida</p>
+                                  <p>Comece com um modelo e ajuste minimos, maximos e preços em segundos.</p>
+                              </div>
+                          </div>
+
+                          <div className="space-y-4">
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Nome do Produto Base</label>
+                                  <input type="text" value={buildableProduct.name || ''} onChange={(e) => setBuildableProduct({ ...buildableProduct, name: e.target.value })} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: Refeicao do dia - monte do seu jeito" />
+                              </div>
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Descricao (Opcional)</label>
+                                  <textarea value={buildableProduct.description || ''} onChange={(e) => setBuildableProduct({ ...buildableProduct, description: e.target.value })} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" rows={3} placeholder="Explique como funciona o produto." />
+                              </div>
+                              <div className="grid md:grid-cols-2 gap-4">
+                                  <div>
+                                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Categoria</label>
+                                      <div className="flex gap-2">
+                                          <select
+                                              value={buildableProduct.category || ''}
+                                              onChange={(e) => setBuildableProduct({ ...buildableProduct, category: e.target.value })}
+                                              className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                          >
+                                              <option value="">Selecione</option>
+                                              {menuCategories.map((category) => (
+                                                  <option key={category} value={category}>
+                                                      {category}
+                                                  </option>
+                                              ))}
+                                          </select>
+                                          <button
+                                              type="button"
+                                              onClick={() => setShowCategoryModal(true)}
+                                              className="px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-200 font-bold"
+                                              title="Cadastrar categoria"
+                                          >
+                                              +
+                                          </button>
+                                      </div>
+                                  </div>
+                                  <div>
+                                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Modo de preço</label>
+                                      <div className="flex gap-2">
+                                          <button
+                                              onClick={() => setBuildableProduct({ ...buildableProduct, priceMode: 'BASE' })}
+                                              className={`flex-1 px-3 py-2 rounded-lg text-xs font-bold border ${buildableProduct.priceMode !== 'BY_SIZE' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-slate-900 text-slate-500 border-gray-200 dark:border-slate-700'}`}
+                                          >
+                                              Preço base
+                                          </button>
+                                          <button
+                                              onClick={() => setBuildableProduct({ ...buildableProduct, priceMode: 'BY_SIZE' })}
+                                              className={`flex-1 px-3 py-2 rounded-lg text-xs font-bold border ${buildableProduct.priceMode === 'BY_SIZE' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-slate-900 text-slate-500 border-gray-200 dark:border-slate-700'}`}
+                                          >
+                                              Por tamanho
+                                          </button>
+                                      </div>
+                                  </div>
+                              </div>
+                              {buildableProduct.priceMode === 'BY_SIZE' ? (
+                                  <div className="rounded-xl border border-emerald-100 dark:border-slate-700 bg-emerald-50/60 dark:bg-slate-800 p-4 text-xs text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-4">
+                                      <span>Use o grupo "Tamanho" para definir preços diferentes.</span>
+                                      <button onClick={handleAddSizeGroup} className="px-3 py-2 rounded-lg bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-slate-700 font-bold text-xs">
+                                          Criar grupo de tamanho
+                                      </button>
+                                  </div>
+                              ) : (
+                                  <div>
+                                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Preço base (R$)</label>
+                                      <input type="number" value={buildableProduct.price || ''} onChange={(e) => setBuildableProduct({ ...buildableProduct, price: parseFloat(e.target.value) })} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white font-bold" placeholder="0.00" />
+                                  </div>
+                              )}
+                          </div>
+                      </div>
+
+                      <div className="border-t border-gray-100 dark:border-slate-800 pt-6">
+                          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                              <h4 className="font-bold text-slate-800 dark:text-white flex items-center gap-2"><Layers size={18}/> Grupos de escolha</h4>
+                              <button onClick={handleAddBuildableGroup} className="text-sm font-bold text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 px-3 py-1.5 rounded-lg transition-colors">+ Adicionar grupo</button>
+                          </div>
+
+                          <div className="space-y-4">
+                              {[...(buildableProduct.optionGroups || [])].sort((a, b) => (a.order || 0) - (b.order || 0)).map((group) => (
+                                  <div key={group.id} className="bg-gray-50 dark:bg-slate-800/50 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
+                                      <div className="flex flex-wrap items-center gap-3 mb-4">
+                                          <input type="text" value={group.name} onChange={(e) => handleUpdateBuildableGroup(group.id, 'name', e.target.value)} className="flex-1 min-w-[180px] p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm font-bold" placeholder="Nome do grupo" />
+                                          <label className="flex items-center gap-2 text-xs font-bold text-slate-500">
+                                              Obrigatorio
+                                              <input
+                                                  type="checkbox"
+                                                  checked={group.isRequired || false}
+                                                  onChange={(e) => {
+                                                      const isRequired = e.target.checked;
+                                                      const nextMin = isRequired ? Math.max(1, group.min || 0) : 0;
+                                                      handlePatchBuildableGroup(group.id, { isRequired, min: nextMin });
+                                                  }}
+                                                  className="w-4 h-4 accent-emerald-600 rounded"
+                                              />
+                                          </label>
+                                          <select
+                                              value={group.selectionType || (group.max === 1 ? 'SINGLE' : 'MULTIPLE')}
+                                              onChange={(e) => {
+                                                  const selectionType = e.target.value as 'SINGLE' | 'MULTIPLE';
+                                                  const nextMax = selectionType === 'SINGLE' ? 1 : Math.max(2, group.max || 2);
+                                                  handlePatchBuildableGroup(group.id, { selectionType, max: nextMax });
+                                              }}
+                                              className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-xs font-bold"
+                                          >
+                                              <option value="SINGLE">Escolha unica</option>
+                                              <option value="MULTIPLE">Multipla</option>
+                                          </select>
+                                          <div className="flex items-center gap-2 text-xs text-gray-500">
+                                              Min
+                                              <input type="number" value={group.min} onChange={(e) => handleUpdateBuildableGroup(group.id, 'min', parseInt(e.target.value))} className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" />
+                                          </div>
+                                          <div className="flex items-center gap-2 text-xs text-gray-500">
+                                              Max
+                                              <input type="number" value={group.max} onChange={(e) => handleUpdateBuildableGroup(group.id, 'max', parseInt(e.target.value))} className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" />
+                                          </div>
+                                          <div className="flex items-center gap-2 text-xs text-gray-500">
+                                              Ordem
+                                              <input type="number" value={group.order || 0} onChange={(e) => handleUpdateBuildableGroup(group.id, 'order', parseInt(e.target.value))} className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" />
+                                          </div>
+                                          <button onClick={() => handleRemoveBuildableGroup(group.id)} className="text-gray-400 hover:text-red-500"><Trash2 size={18}/></button>
+                                      </div>
+
+                                      <div className="grid md:grid-cols-2 gap-3 mb-4 text-xs text-gray-500">
+                                          <div className="flex items-center gap-2">
+                                              Regra de adicional (após)
+                                              <input type="number" value={group.extraChargeAfter || 0} onChange={(e) => handleUpdateBuildableGroup(group.id, 'extraChargeAfter', parseInt(e.target.value))} className="w-20 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" />
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                              Valor por extra (R$)
+                                              <input type="number" value={group.extraChargeAmount || 0} onChange={(e) => handleUpdateBuildableGroup(group.id, 'extraChargeAmount', parseFloat(e.target.value))} className="w-24 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" />
+                                          </div>
+                                      </div>
+
+                                      <div className="pl-4 border-l-2 border-gray-200 dark:border-slate-600 space-y-2">
+                                          {[...(group.options || [])].sort((a, b) => (a.order || 0) - (b.order || 0)).map((opt) => (
+                                              <div key={opt.id} className="grid md:grid-cols-[1.3fr_0.6fr_0.6fr_0.8fr_auto] gap-2 items-center">
+                                                  <input type="text" value={opt.name} onChange={(e) => handleUpdateBuildableOption(group.id, opt.id, 'name', e.target.value)} className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="Nome do item" />
+                                                  <input type="number" value={opt.price} onChange={(e) => handleUpdateBuildableOption(group.id, opt.id, 'price', parseFloat(e.target.value))} className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="R$ 0.00" />
+                                                  <input type="number" value={opt.order || 0} onChange={(e) => handleUpdateBuildableOption(group.id, opt.id, 'order', parseInt(e.target.value))} className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="Ordem" />
+                                                  <input type="text" value={opt.stockProductId || ''} onChange={(e) => handleUpdateBuildableOption(group.id, opt.id, 'stockProductId', e.target.value)} className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm" placeholder="Vinculo estoque" />
+                                                  <div className="flex items-center gap-2">
+                                                      <label className="flex items-center gap-1 text-xs text-slate-500">
+                                                          <input type="checkbox" checked={opt.isAvailable !== false} onChange={(e) => handleUpdateBuildableOption(group.id, opt.id, 'isAvailable', e.target.checked)} className="w-4 h-4 accent-emerald-600 rounded" />
+                                                          Ativo
+                                                      </label>
+                                                      <button onClick={() => handleRemoveBuildableOption(group.id, opt.id)} className="text-gray-300 hover:text-red-500"><X size={16}/></button>
+                                                  </div>
+                                              </div>
+                                          ))}
+                                          <button onClick={() => handleAddBuildableOption(group.id)} className="text-xs font-bold text-blue-600 mt-2 flex items-center gap-1 hover:underline"><Plus size={12}/> Adicionar item</button>
+                                      </div>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+
+                      {buildableError && <div className="mt-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg font-bold">{buildableError}</div>}
+                  </div>
+                  <div className="p-6 border-t border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex justify-end gap-3">
+                      <button onClick={() => setShowBuildableProductModal(false)} className="px-6 py-3 text-gray-500 font-bold hover:bg-gray-100 dark:hover:bg-slate-800 rounded-xl transition-colors">Cancelar</button>
+                      <button onClick={handleSaveBuildableProduct} className="px-8 py-3 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 shadow-lg shadow-emerald-600/20 transition-transform active:scale-95">Salvar Produto Montável</button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* CATEGORY MANAGER MODAL */}
+      {showCategoryModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-scale-in">
+                  <div className="p-6 border-b border-gray-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-800">
+                      <h3 className="font-bold text-lg text-slate-800 dark:text-white flex items-center gap-2">
+                          <Tag size={20} className="text-rose-600" /> Categorias do cardapio
+                      </h3>
+                      <button onClick={() => setShowCategoryModal(false)} className="p-2 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-full transition-colors">
+                          <X size={20} />
+                      </button>
+                  </div>
+
+                  <div className="p-6 flex-1 overflow-y-auto bg-white dark:bg-slate-900 space-y-4">
+                      <div className="flex flex-col gap-2">
+                          <label className="text-xs font-bold text-gray-500 uppercase">Nova categoria</label>
+                          <div className="flex gap-2">
+                              <input
+                                  type="text"
+                                  value={newCategoryName}
+                                  onChange={(e) => setNewCategoryName(e.target.value)}
+                                  className="flex-1 p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                  placeholder="Ex: Lanches"
+                              />
+                              <button
+                                  onClick={handleAddMenuCategory}
+                                  disabled={isSavingCategories || !newCategoryName.trim()}
+                                  className="px-4 py-3 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-700 disabled:opacity-70"
+                              >
+                                  Adicionar
+                              </button>
+                          </div>
+                      </div>
+
+                      <div className="space-y-2">
+                          <p className="text-xs font-bold text-gray-400 uppercase">Cadastradas</p>
+                          {menuCategories.length === 0 ? (
+                              <p className="text-sm text-gray-400">Nenhuma categoria cadastrada.</p>
+                          ) : (
+                              menuCategories.map((category) => (
+                                  <div key={category} className="flex items-center justify-between p-3 rounded-xl border border-gray-100 dark:border-slate-800">
+                                      <span className="text-sm font-semibold text-slate-700 dark:text-gray-200">{category}</span>
+                                      <button
+                                          onClick={() => handleRemoveMenuCategory(category)}
+                                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-slate-800 rounded-full"
+                                          title="Remover categoria"
+                                      >
+                                          <Trash2 size={16} />
+                                      </button>
+                                  </div>
+                              ))
+                          )}
+                      </div>
                   </div>
               </div>
           </div>
@@ -2274,6 +4870,40 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   )}
                               </div>
                           </div>
+                          <div className="mt-4">
+                              <p className="text-[10px] font-bold text-gray-500 uppercase mb-2">Preco por tamanho</p>
+                                      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                                          {PIZZA_SIZE_OPTIONS.map((size) => (
+                                              <div key={size.key} className="flex flex-col gap-1">
+                                                  <label className="text-[10px] font-bold text-gray-400 uppercase">{size.label}</label>
+                                                  <input
+                                                      type="number"
+                                                      value={(newFlavor.pricesBySize || {})[size.key] ?? ''}
+                                                      onChange={(e) => {
+                                                          const raw = e.target.value;
+                                                          const nextPrices = { ...(newFlavor.pricesBySize || {}) } as Record<string, number>;
+                                                          if (raw === '') {
+                                                              delete nextPrices[size.key];
+                                                          } else {
+                                                              const parsed = Number(raw);
+                                                              if (Number.isFinite(parsed) && parsed > 0) {
+                                                                  nextPrices[size.key] = parsed;
+                                                              } else {
+                                                                  delete nextPrices[size.key];
+                                                              }
+                                                          }
+                                                          setNewFlavor({
+                                                              ...newFlavor,
+                                                              pricesBySize: nextPrices
+                                                          });
+                                                      }}
+                                                      className="w-full p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-xs font-bold"
+                                                      placeholder="0.00"
+                                                  />
+                                              </div>
+                                          ))}
+                              </div>
+                          </div>
                       </div>
 
                       {/* Flavors List */}
@@ -2291,7 +4921,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       <div className="font-bold text-slate-800 dark:text-white text-sm w-1/3">{flavor.name}</div>
                                       <div className="text-xs text-gray-500 dark:text-gray-400 flex-1 truncate px-2">{flavor.description}</div>
                                       <div className="flex gap-1 w-20 justify-end opacity-50 group-hover:opacity-100 transition-opacity">
-                                          <button onClick={() => setNewFlavor(flavor)} className="p-1.5 text-blue-500 hover:bg-blue-50 rounded"><Edit size={14}/></button>
+                                          <button
+                                              onClick={() => setNewFlavor({ ...flavor, pricesBySize: normalizeFlavorPrices(flavor.pricesBySize) })}
+                                              className="p-1.5 text-blue-500 hover:bg-blue-50 rounded"
+                                          >
+                                              <Edit size={14}/>
+                                          </button>
                                           <button onClick={() => handleDeleteFlavor(flavor.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded"><Trash2 size={14}/></button>
                                       </div>
                                   </div>

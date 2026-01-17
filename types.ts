@@ -3,6 +3,7 @@
 export enum ViewState {
   HOME = 'HOME',
   ADMIN = 'ADMIN',
+  API_DOCS = 'API_DOCS',
   REGISTER_BUSINESS = 'REGISTER_BUSINESS',
   LOGIN = 'LOGIN',
   STORE_DETAILS = 'STORE_DETAILS',
@@ -16,7 +17,7 @@ export enum ViewState {
 
 export type UserRole = 'GUEST' | 'CLIENT' | 'BUSINESS' | 'ADMIN' | 'COURIER';
 
-export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES' | 'TABLES';
+export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'BUILDABLE_PRODUCTS' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES' | 'TABLES';
 
 export interface Coordinates {
   lat: number;
@@ -39,6 +40,24 @@ export interface ScheduleDay {
   afternoonCloseTime: string; // '23:59'
   isMorningOpen: boolean; // Se funciona de manhã
   isAfternoonOpen: boolean; // Se funciona de tarde
+}
+
+export interface StorePause {
+  active: boolean;
+  reason?: string;
+  minutes?: number;
+  startedAt?: string;
+  endsAt?: string;
+}
+
+export interface StoreAvailability {
+  storeId: string;
+  isOpen: boolean;
+  reason: string;
+  scheduleOpen: boolean;
+  autoOpenClose: boolean;
+  pause: StorePause | null;
+  nextChangeAt?: string | null;
 }
 
 export interface Store {
@@ -68,6 +87,8 @@ export interface Store {
   closedPeriods?: ClosedPeriod[];
   schedule?: ScheduleDay[];
   autoOpenClose?: boolean;
+  autoAcceptOrders?: boolean;
+  pause?: StorePause;
   acceptsCardOnDelivery?: boolean;
   // Novas configurações
   acceptsDelivery: boolean;
@@ -79,6 +100,7 @@ export interface Store {
   state?: string;
   ownerId?: string;
   customUrl?: string;
+  menuCategories?: string[];
 
   // Dados de Bloqueio Administrativo
   blockReason?: string;
@@ -89,6 +111,13 @@ export interface Store {
   // Segurança
   adminPassword?: string; // Senha administrativa para exclusões
   logoUrl?: string;
+  logoFileId?: string;
+  imageFileId?: string;
+
+  // Integracoes
+  merchantId?: string;
+  merchantIdCreatedAt?: string;
+  merchantIdRevokedAt?: string;
 }
 
 export interface StoreRequest {
@@ -124,6 +153,8 @@ export interface ProductOption {
   name: string;
   price: number; // 0 se for grátis
   isAvailable: boolean;
+  order?: number;
+  stockProductId?: string;
 }
 
 export interface ProductOptionGroup {
@@ -132,6 +163,11 @@ export interface ProductOptionGroup {
   min: number; // 0 = Opcional, 1 = Obrigatório
   max: number; // 1 = Única escolha, >1 = Múltipla escolha
   options: ProductOption[];
+  isRequired?: boolean;
+  selectionType?: 'SINGLE' | 'MULTIPLE';
+  order?: number;
+  extraChargeAfter?: number;
+  extraChargeAmount?: number;
 }
 
 export interface PizzaFlavor {
@@ -140,6 +176,7 @@ export interface PizzaFlavor {
     name: string;
     description?: string;
     isAvailable: boolean;
+    pricesBySize?: Record<string, number>;
 }
 
 export interface Product {
@@ -148,6 +185,8 @@ export interface Product {
     name: string;
     description: string;
     price: number;
+    priceMode?: 'BASE' | 'BY_SIZE';
+    isBuildable?: boolean;
     
     // Promoção Avançada
     promoPrice?: number; 
@@ -155,6 +194,7 @@ export interface Product {
     discountExpiresAt?: string; 
     
     imageUrl: string;
+    imageFileId?: string;
     category: string;
     isAvailable: boolean;
     
@@ -162,8 +202,11 @@ export interface Product {
     isPizza: boolean;
     allowHalfHalf: boolean; // Deprecated in favor of maxFlavors logic, but kept for legacy
     maxFlavors?: number; // 1 = Inteira, 2 = Meio a Meio, 3 = 3 Sabores, 4 = 4 Sabores
-    splitSurcharge?: number; // Valor adicional se a pizza for dividida (opcional)
     availableFlavorIds?: string[]; // IDs dos sabores permitidos para esta pizza
+    maxFlavorsBySize?: Record<string, number>;
+    pricingStrategiesAllowed?: Array<'NORMAL' | 'PROPORCIONAL' | 'MAX'>;
+    defaultPricingStrategy?: 'NORMAL' | 'PROPORCIONAL' | 'MAX';
+    customerCanChoosePricingStrategy?: boolean;
     
     optionGroups: ProductOptionGroup[]; 
 }
@@ -194,19 +237,45 @@ export interface OrderItem {
     options?: string[]; 
 }
 
+export interface OrderLineItem {
+    productId?: string;
+    name: string;
+    quantity: number;
+    unitPrice?: number;
+    totalPrice?: number;
+    notes?: string;
+    options?: { groupName?: string; optionName?: string; price?: number }[];
+    pizza?: {
+        splitCount: number;
+        flavors: { flavorId: string; fraction: number }[];
+        sizeKeyOrSizeOptionId?: string;
+        sizeKey?: string;
+        sizeOptionId?: string;
+        pricingStrategySelected?: 'NORMAL' | 'PROPORCIONAL' | 'MAX';
+    };
+}
+
 export interface Order {
     id: string;
     storeId?: string;
+    storeName?: string;
     userId?: string;
     createdAt?: string;
     customerName: string;
+    customerPhone?: string;
+    customerId?: string;
+    deliveryAddress?: Address;
+    storeAddress?: Address;
+    courierStage?: 'ASSIGNED' | 'PICKED' | 'TO_CUSTOMER';
     items: string[]; 
+    lineItems?: OrderLineItem[];
     total: number;
     status: 'PENDING' | 'PREPARING' | 'WAITING_COURIER' | 'DELIVERING' | 'COMPLETED' | 'CANCELLED';
     time: string;
     notes?: string; 
     paymentMethod?: string;
     courierId?: string; 
+    deliveryFee?: number;
     
     // Geolocation para rastreio
     storeCoordinates?: Coordinates;
@@ -218,9 +287,12 @@ export interface Order {
     // Reembolso e Chat
     refundStatus?: 'NONE' | 'REQUESTED' | 'APPROVED' | 'REJECTED';
     refundReason?: string;
+    cancelReason?: string;
     chat?: ChatMessage[];
     
     type?: 'DELIVERY' | 'PICKUP' | 'TABLE';
+    pickup?: boolean;
+    isPickup?: boolean;
     tableNumber?: string;
     tableSessionId?: string;
     
@@ -300,6 +372,14 @@ export interface CartItem {
   options: { groupName: string; optionName: string; price: number }[];
   notes?: string;
   totalPrice: number;
+  pizza?: {
+      splitCount: number;
+      flavors: { flavorId: string; fraction: number }[];
+      sizeKeyOrSizeOptionId?: string;
+      sizeKey?: string;
+      sizeOptionId?: string;
+      pricingStrategySelected?: 'NORMAL' | 'PROPORCIONAL' | 'MAX';
+  };
 }
 
 // --- FINANCIAL TYPES ---

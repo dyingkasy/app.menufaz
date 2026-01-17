@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LayoutDashboard, Building2, Users, LogOut, Search, CheckCircle, XCircle, Trash2, ExternalLink, TrendingUp, DollarSign, ShieldCheck, Inbox, Phone, MapPin, User, Check, X, Mail, Copy, Send, Loader2, AlertTriangle, Settings, Save, HelpCircle, Info, Lock, Unlock, Banknote, ListChecks, Filter, Upload, Download } from 'lucide-react';
-import { Store, StoreRequest, AppSettings, ErrorLogEntry, Product } from '../types';
+import { Store, StoreRequest, AppSettings, ErrorLogEntry, Product, Order } from '../types';
 import { CATEGORIES } from '../constants';
-import { getStores, toggleStoreStatus, deleteStore, getStoreRequests, approveStoreRequest, rejectStoreRequest, getAppSettings, saveAppSettings, getErrorLogs, setErrorLogResolved, clearErrorLogs, createStoreWithUser, saveProduct, importProductsBulk } from '../services/db';
+import { getStores, toggleStoreStatus, deleteStore, getStoreRequests, approveStoreRequest, rejectStoreRequest, getAppSettings, saveAppSettings, getErrorLogs, setErrorLogResolved, clearErrorLogs, createStoreWithUser, saveProduct, importProductsBulk, getOrders } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
+import { compressImageFile } from '../utils/image';
+import { uploadImageKit, deleteImageKit } from '../services/imagekit';
+import { fetchCepData } from '../utils/geo';
 import { useAuth } from '../contexts/AuthContext';
 import emailjs from '@emailjs/browser';
 import * as XLSX from 'xlsx';
@@ -11,12 +14,33 @@ import * as XLSX from 'xlsx';
 interface SuperAdminDashboardProps {
     onLogout: () => void;
     onManageStore: (store: Store) => void;
+    onAccessApi: () => void;
 }
 
-const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onManageStore }) => {
+const buildPizzaSizeGroup = () => ({
+    id: 'size-group',
+    name: 'Tamanho',
+    min: 1,
+    max: 1,
+    options: [
+        { id: 'size-brotinho', name: 'Brotinho', price: 0, isAvailable: true, order: 1, stockProductId: '' },
+        { id: 'size-pequena', name: 'Pequena', price: 0, isAvailable: true, order: 2, stockProductId: '' },
+        { id: 'size-media', name: 'Média', price: 0, isAvailable: true, order: 3, stockProductId: '' },
+        { id: 'size-grande', name: 'Grande', price: 0, isAvailable: true, order: 4, stockProductId: '' },
+        { id: 'size-familia', name: 'Família', price: 0, isAvailable: true, order: 5, stockProductId: '' }
+    ],
+    isRequired: true,
+    selectionType: 'SINGLE',
+    order: 1,
+    extraChargeAfter: 0,
+    extraChargeAmount: 0
+});
+
+const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onManageStore, onAccessApi }) => {
     const { user } = useAuth();
     const [stores, setStores] = useState<Store[]>([]);
     const [requests, setRequests] = useState<StoreRequest[]>([]);
+    const [orders, setOrders] = useState<Order[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'STORES' | 'REQUESTS' | 'USERS' | 'SETTINGS' | 'LOGS'>('OVERVIEW');
@@ -84,8 +108,10 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
         deliveryTime: '30-40 min',
         pickupTime: '20-30 min',
         deliveryFee: '5',
-        imageData: '',
-        logoData: '',
+        imageUrl: '',
+        logoUrl: '',
+        imageFileId: '',
+        logoFileId: '',
         acceptsDelivery: true,
         acceptsPickup: true,
         acceptsTableOrders: false,
@@ -137,14 +163,16 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
     const loadData = async () => {
         setLoading(true);
         try {
-            const [storesData, requestsData, settingsData] = await Promise.all([
+            const [storesData, requestsData, settingsData, ordersData] = await Promise.all([
                 getStores(),
                 getStoreRequests(),
-                getAppSettings()
+                getAppSettings(),
+                getOrders()
             ]);
             setStores(storesData);
             setRequests(requestsData);
             setSettings((prev) => ({ ...prev, ...settingsData }));
+            setOrders(ordersData);
 
             // Inicializa EmailJS se a public key estiver salva
             if (settingsData.emailJsPublicKey) {
@@ -172,9 +200,28 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
         }
     };
 
+    const handleNewStoreCepBlur = async () => {
+        const cepData = await fetchCepData(newStore.cep);
+        if (cepData) {
+            setNewStore(prev => ({
+                ...prev,
+                street: cepData.street,
+                district: cepData.district,
+                city: cepData.city,
+                state: cepData.state
+            }));
+        } else if (newStore.cep.replace(/\D/g, '').length === 8) {
+            alert('CEP não encontrado.');
+        }
+    };
+
     const handleCreateStore = async () => {
         if (!newStore.ownerName.trim() || !newStore.name.trim() || !newStore.city.trim() || !newStore.email.trim() || !newStore.password.trim()) {
             alert('Preencha responsável, nome, cidade, e-mail e senha.');
+            return;
+        }
+        if (!newStore.street.trim() || !newStore.number.trim() || !newStore.state.trim()) {
+            alert('Preencha endereço completo (rua, número e estado).');
             return;
         }
 
@@ -194,8 +241,10 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                     deliveryTime: newStore.deliveryTime.trim() || '30-40 min',
                     pickupTime: newStore.pickupTime.trim() || '20-30 min',
                     deliveryFee: Number(newStore.deliveryFee) || 0,
-                    imageUrl: newStore.imageData || '',
-                    logoUrl: newStore.logoData || '',
+                    imageUrl: newStore.imageUrl || '',
+                    imageFileId: newStore.imageFileId || '',
+                    logoUrl: newStore.logoUrl || '',
+                    logoFileId: newStore.logoFileId || '',
                     isPopular: false,
                     isActive: true,
                     coordinates: { lat: -23.561684, lng: -46.655981 },
@@ -237,8 +286,10 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                 deliveryTime: '30-40 min',
                 pickupTime: '20-30 min',
                 deliveryFee: '5',
-                imageData: '',
-                logoData: '',
+                imageUrl: '',
+                logoUrl: '',
+                imageFileId: '',
+                logoFileId: '',
                 acceptsDelivery: true,
                 acceptsPickup: true,
                 acceptsTableOrders: false,
@@ -255,26 +306,38 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
         }
     };
 
-    const handleStoreImageChange = (file: File | null) => {
+    const handleStoreImageChange = async (file: File | null) => {
         if (!file) return;
         setStoreImageName(file.name);
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = typeof reader.result === 'string' ? reader.result : '';
-            setNewStore((prev) => ({ ...prev, imageData: result }));
-        };
-        reader.readAsDataURL(file);
+        try {
+            const base64 = await compressImageFile(file, { maxWidth: 1280, maxHeight: 720, mimeType: 'image/jpeg', quality: 0.75 });
+            const upload = await uploadImageKit(base64, file.name);
+            const previousId = newStore.imageFileId;
+            setNewStore((prev) => ({ ...prev, imageUrl: upload.url, imageFileId: upload.fileId }));
+            if (previousId) {
+                try { await deleteImageKit(previousId); } catch {}
+            }
+        } catch (error) {
+            console.error('Image upload failed', error);
+            alert('Falha ao enviar imagem. Tente novamente.');
+        }
     };
 
-    const handleStoreLogoChange = (file: File | null) => {
+    const handleStoreLogoChange = async (file: File | null) => {
         if (!file) return;
         setStoreLogoName(file.name);
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = typeof reader.result === 'string' ? reader.result : '';
-            setNewStore((prev) => ({ ...prev, logoData: result }));
-        };
-        reader.readAsDataURL(file);
+        try {
+            const base64 = await compressImageFile(file, { maxWidth: 384, maxHeight: 384, mimeType: file.type === 'image/png' ? 'image/png' : 'image/jpeg', quality: 0.8 });
+            const upload = await uploadImageKit(base64, file.name);
+            const previousId = newStore.logoFileId;
+            setNewStore((prev) => ({ ...prev, logoUrl: upload.url, logoFileId: upload.fileId }));
+            if (previousId) {
+                try { await deleteImageKit(previousId); } catch {}
+            }
+        } catch (error) {
+            console.error('Image upload failed', error);
+            alert('Falha ao enviar imagem. Tente novamente.');
+        }
     };
 
     const normalizeHeader = (value: string) =>
@@ -490,10 +553,15 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                 isAvailable: row.isAvailable,
                 isPizza: row.isPizza,
                 allowHalfHalf: false,
-                maxFlavors: undefined,
-                splitSurcharge: undefined,
+                maxFlavors: row.isPizza ? 4 : undefined,
+                maxFlavorsBySize: row.isPizza
+                    ? { brotinho: 2, pequena: 2, media: 3, grande: 4, familia: 5 }
+                    : undefined,
+                pricingStrategiesAllowed: row.isPizza ? ['NORMAL', 'PROPORCIONAL', 'MAX'] : undefined,
+                defaultPricingStrategy: row.isPizza ? 'MAX' : undefined,
+                customerCanChoosePricingStrategy: row.isPizza ? true : undefined,
                 availableFlavorIds: [],
-                optionGroups: []
+                optionGroups: row.isPizza ? [buildPizzaSizeGroup()] : []
             }));
 
             const result = await importProductsBulk(items);
@@ -760,48 +828,102 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
         s.id.includes(searchTerm)
     );
 
-    const totalRevenue = stores.length * 12500; 
+    const totalRevenue = orders
+        .filter((order) => order.status !== 'CANCELLED')
+        .reduce((sum, order) => sum + (order.total || 0), 0);
     const activeStores = stores.filter(s => s.isActive).length;
     const pendingRequests = requests.filter(r => r.status === 'PENDING');
+    const totalOrders = orders.length;
+    const completedOrders = orders.filter((order) => order.status === 'COMPLETED').length;
+    const cancelledOrders = orders.filter((order) => order.status === 'CANCELLED').length;
+    const completionRate = totalOrders > 0 ? Math.round((completedOrders / totalOrders) * 100) : 0;
+    const cancelRate = totalOrders > 0 ? Math.round((cancelledOrders / totalOrders) * 100) : 0;
+    const getOrderTimestamp = (order: Order) => {
+        if (!order.createdAt) return 0;
+        const stamp = Date.parse(order.createdAt);
+        return Number.isNaN(stamp) ? 0 : stamp;
+    };
+    const latestOrders = [...orders]
+        .sort((a, b) => getOrderTimestamp(b) - getOrderTimestamp(a))
+        .slice(0, 4);
+    const orderStatusMeta = (status: Order['status']) => {
+        switch (status) {
+            case 'PENDING':
+                return { label: 'Pendente', className: 'bg-amber-100 text-amber-700' };
+            case 'PREPARING':
+                return { label: 'Preparando', className: 'bg-blue-100 text-blue-700' };
+            case 'WAITING_COURIER':
+                return { label: 'Aguardando', className: 'bg-amber-100 text-amber-700' };
+            case 'DELIVERING':
+                return { label: 'Em rota', className: 'bg-sky-100 text-sky-700' };
+            case 'COMPLETED':
+                return { label: 'Concluido', className: 'bg-emerald-100 text-emerald-700' };
+            case 'CANCELLED':
+                return { label: 'Cancelado', className: 'bg-rose-100 text-rose-700' };
+            default:
+                return { label: status, className: 'bg-slate-100 text-slate-600' };
+        }
+    };
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">
-                <Loader2 className="animate-spin w-10 h-10 text-purple-500" />
+            <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white font-body">
+                <div className="w-full max-w-xl px-6">
+                    <div className="h-6 w-40 rounded-full skeleton-shimmer mb-6 mx-auto" />
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="h-28 rounded-2xl skeleton-shimmer" />
+                        <div className="h-28 rounded-2xl skeleton-shimmer" />
+                        <div className="h-28 rounded-2xl skeleton-shimmer" />
+                        <div className="h-28 rounded-2xl skeleton-shimmer" />
+                    </div>
+                </div>
             </div>
         );
     }
 
     return (
-        <div className="min-h-screen bg-slate-100 dark:bg-slate-950 flex font-sans">
+        <div className="min-h-screen bg-[#f6f4f1] dark:bg-slate-950 flex font-body relative">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(248,113,113,0.14),transparent_55%)]" />
             {/* Sidebar */}
-            <aside className="w-64 bg-slate-900 text-white flex flex-col fixed h-full z-10">
-                <div className="p-6 border-b border-slate-800 flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-red-600 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
+            <aside className="w-72 bg-slate-950 text-white flex flex-col fixed h-full z-10 border-r border-white/5">
+                <div className="p-6 border-b border-white/5 flex items-center gap-3">
+                    <div className="w-11 h-11 bg-gradient-to-br from-red-600 via-orange-500 to-amber-400 rounded-2xl flex items-center justify-center shadow-lg">
                         <ShieldCheck size={24} className="text-white" />
                     </div>
                     <div>
-                        <h2 className="text-lg font-bold tracking-tight">MenuFaz</h2>
-                        <p className="text-[10px] text-purple-400 font-bold uppercase tracking-widest">Super Admin</p>
+                        <h2 className="text-lg font-bold tracking-tight font-display">MenuFaz</h2>
+                        <p className="text-[10px] text-red-300 font-bold uppercase tracking-[0.3em]">Super Admin</p>
                     </div>
                 </div>
 
-                <nav className="flex-1 p-4 space-y-2">
+                <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
                     <button 
                         onClick={() => setActiveTab('OVERVIEW')}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'OVERVIEW' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'OVERVIEW'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <LayoutDashboard size={20} /> Visão Geral
                     </button>
                     <button 
                         onClick={() => setActiveTab('STORES')}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'STORES' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'STORES'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <Building2 size={20} /> Empresas
                     </button>
                     <button 
                         onClick={() => setActiveTab('REQUESTS')}
-                        className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all ${activeTab === 'REQUESTS' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'REQUESTS'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <div className="flex items-center gap-3">
                             <Inbox size={20} /> Solicitações
@@ -812,28 +934,47 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                     </button>
                     <button 
                         onClick={() => setActiveTab('USERS')}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'USERS' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'USERS'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <Users size={20} /> Usuários
                     </button>
                     <button 
                         onClick={() => setActiveTab('SETTINGS')}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'SETTINGS' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'SETTINGS'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <Settings size={20} /> Configurações
                     </button>
                     <button 
                         onClick={() => setActiveTab('LOGS')}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'LOGS' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all text-sm font-semibold ${
+                            activeTab === 'LOGS'
+                                ? 'bg-white text-slate-900 shadow-lg'
+                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                        }`}
                     >
                         <ListChecks size={20} /> Logs de Erro
                     </button>
+
+                    <button
+                        onClick={onAccessApi}
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl border border-white/10 bg-white/5 text-sm font-semibold text-white hover:bg-white/10 transition-all"
+                    >
+                        <ExternalLink size={20} /> Acessar API
+                    </button>
                 </nav>
 
-                <div className="p-4 border-t border-slate-800">
+                <div className="p-4 border-t border-white/5">
                     <button 
                         onClick={onLogout}
-                        className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-red-600/20 hover:text-red-500 text-slate-400 py-2 rounded-lg transition-colors text-sm font-bold"
+                        className="w-full flex items-center justify-center gap-2 bg-white/5 hover:bg-red-600/20 hover:text-red-200 text-slate-300 py-2.5 rounded-xl transition-colors text-sm font-bold"
                     >
                         <LogOut size={16} /> Sair
                     </button>
@@ -841,73 +982,194 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1 ml-64 p-8">
-                <header className="flex justify-between items-center mb-8">
-                    <div>
-                        <h1 className="text-3xl font-bold text-slate-900 dark:text-white">
+            <main className="flex-1 ml-72 p-6 lg:p-8 relative">
+                <header className="sticky top-0 z-20 -mx-6 lg:-mx-8 px-6 lg:px-8 py-6 bg-[#f6f4f1]/90 dark:bg-slate-950/90 backdrop-blur-xl border-b border-slate-200/60 dark:border-slate-800">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div>
+                            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Painel</p>
+                            <h1 className="text-3xl font-bold text-slate-900 dark:text-white font-display">
                             {activeTab === 'OVERVIEW' ? 'Visão Geral' : 
                              activeTab === 'STORES' ? 'Gerenciar Empresas' : 
                              activeTab === 'REQUESTS' ? 'Solicitações de Cadastro' : 
                              activeTab === 'SETTINGS' ? 'Configurações do Sistema' :
                              activeTab === 'LOGS' ? 'Monitoramento de Erros' :
                              'Usuários do Sistema'}
-                        </h1>
-                        <p className="text-gray-500 dark:text-gray-400">Controle total da plataforma MenuFaz.</p>
-                    </div>
-                    <div className="flex gap-4">
-                        <button onClick={loadData} className="p-2 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-gray-500 hover:text-purple-600 transition-colors">
-                             <TrendingUp size={20} />
-                        </button>
+                            </h1>
+                            <p className="text-gray-500 dark:text-gray-400">Controle total da plataforma MenuFaz.</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                            {activeTab === 'STORES' && (
+                                <div className="relative">
+                                    <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <input
+                                        type="text"
+                                        value={searchTerm}
+                                        onChange={(e) => setSearchTerm(e.target.value)}
+                                        placeholder="Buscar empresa por nome ou ID"
+                                        className="pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-white/80 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-red-500 focus:border-red-400"
+                                    />
+                                </div>
+                            )}
+                            <button
+                                onClick={loadData}
+                                className="px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:text-red-600 hover:border-red-300 transition-colors text-sm font-bold flex items-center gap-2"
+                            >
+                                <TrendingUp size={16} /> Atualizar dados
+                            </button>
+                        </div>
                     </div>
                 </header>
 
                 {activeTab === 'OVERVIEW' && (
                     <div className="space-y-8 animate-fade-in">
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                            <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div>
-                                        <p className="text-gray-500 dark:text-gray-400 text-xs font-bold uppercase">Total Empresas</p>
-                                        <h3 className="text-3xl font-bold text-slate-800 dark:text-white">{stores.length}</h3>
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                            <div className="lg:col-span-7 bg-white/90 dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 shadow-lg p-6 relative overflow-hidden">
+                                <div className="absolute -right-24 -top-16 h-48 w-48 rounded-full bg-red-500/10 blur-3xl" />
+                                <div className="absolute -left-24 -bottom-20 h-56 w-56 rounded-full bg-orange-400/10 blur-3xl" />
+                                <div className="relative z-10">
+                                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Panorama Geral</p>
+                                    <h3 className="text-3xl font-bold text-slate-900 dark:text-white font-display mt-2">
+                                        {formatCurrencyBRL(totalRevenue)}
+                                    </h3>
+                                    <p className="text-sm text-slate-500 dark:text-slate-300">Receita total em pedidos validos</p>
+
+                                    <div className="mt-6 grid grid-cols-2 gap-4">
+                                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 bg-white/80 dark:bg-slate-900/70">
+                                            <p className="text-xs text-slate-400 uppercase tracking-[0.2em]">Pedidos</p>
+                                            <p className="text-2xl font-bold text-slate-900 dark:text-white">{totalOrders}</p>
+                                            <p className="text-xs text-slate-500 mt-1">{completionRate}% concluido · {cancelRate}% cancelado</p>
+                                        </div>
+                                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 bg-white/80 dark:bg-slate-900/70">
+                                            <p className="text-xs text-slate-400 uppercase tracking-[0.2em]">Lojas ativas</p>
+                                            <p className="text-2xl font-bold text-slate-900 dark:text-white">{activeStores}</p>
+                                            <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
+                                                <div
+                                                    className="h-2 rounded-full bg-red-500"
+                                                    style={{ width: `${(activeStores / (stores.length || 1)) * 100}%` }}
+                                                />
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div className="p-3 bg-blue-100 dark:bg-blue-900/20 text-blue-600 rounded-xl"><Building2 /></div>
-                                </div>
-                                <div className="flex items-center gap-2 text-xs text-green-600 font-bold">
-                                    <TrendingUp size={14} /> +12% este mês
+
+                                    <div className="mt-6 flex flex-wrap gap-3">
+                                        <button
+                                            onClick={() => setActiveTab('REQUESTS')}
+                                            className="px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-bold shadow-lg shadow-red-600/20"
+                                        >
+                                            Ver solicitacoes ({pendingRequests.length})
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveTab('STORES')}
+                                            className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-bold hover:border-red-300 hover:text-red-600 bg-white"
+                                        >
+                                            Criar nova loja
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div>
-                                        <p className="text-gray-500 dark:text-gray-400 text-xs font-bold uppercase">Pendentes</p>
-                                        <h3 className="text-3xl font-bold text-slate-800 dark:text-white">{pendingRequests.length}</h3>
+                            <div className="lg:col-span-5 grid gap-4">
+                                <div className="rounded-3xl border border-slate-200/70 dark:border-slate-800 bg-white p-5 shadow-sm">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Total empresas</p>
+                                            <p className="text-2xl font-bold text-slate-900">{stores.length}</p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center">
+                                            <Building2 size={22} />
+                                        </div>
                                     </div>
-                                    <div className="p-3 bg-orange-100 dark:bg-orange-900/20 text-orange-600 rounded-xl"><Inbox /></div>
+                                    <p className="text-xs text-slate-400 mt-3">Crescimento organico da rede</p>
                                 </div>
-                                <div className="text-xs text-gray-400">Aguardando aprovação</div>
+                                <div className="rounded-3xl border border-slate-200/70 dark:border-slate-800 bg-white p-5 shadow-sm">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Solicitacoes pendentes</p>
+                                            <p className="text-2xl font-bold text-slate-900">{pendingRequests.length}</p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center">
+                                            <Inbox size={22} />
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-slate-400 mt-3">Precisa de aprovacao manual</p>
+                                </div>
+                                <div className="rounded-3xl border border-slate-200/70 dark:border-slate-800 bg-white p-5 shadow-sm">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Receita global</p>
+                                            <p className="text-2xl font-bold text-slate-900">{formatCurrencyBRL(totalRevenue)}</p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                                            <DollarSign size={22} />
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-slate-400 mt-3">Pedidos concluidos e ativos</p>
+                                </div>
                             </div>
 
-                            <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div>
-                                        <p className="text-gray-500 dark:text-gray-400 text-xs font-bold uppercase">Receita Global</p>
-                                        <h3 className="text-3xl font-bold text-slate-800 dark:text-white">R$ {totalRevenue.toLocaleString()}</h3>
-                                    </div>
-                                    <div className="p-3 bg-green-100 dark:bg-green-900/20 text-green-600 rounded-xl"><DollarSign /></div>
+                            <div className="lg:col-span-8 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 shadow-sm p-6">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white">Pedidos recentes</h3>
+                                    <span className="text-xs text-slate-400">{totalOrders} pedidos no total</span>
                                 </div>
+                                {latestOrders.length === 0 ? (
+                                    <div className="py-10 text-center text-slate-400">Nenhum pedido registrado ainda.</div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {latestOrders.map((order) => {
+                                            const meta = orderStatusMeta(order.status);
+                                            return (
+                                                <div key={order.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/70 dark:border-slate-800 p-4 bg-slate-50/80 dark:bg-slate-950/40">
+                                                    <div>
+                                                        <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                                                            {order.customerName || 'Cliente'}
+                                                        </p>
+                                                        <p className="text-xs text-slate-500">Pedido #{order.id.slice(0, 6)}</p>
+                                                    </div>
+                                                    <div className="flex items-center gap-3">
+                                                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${meta.className}`}>{meta.label}</span>
+                                                        <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                                            {formatCurrencyBRL(order.total || 0)}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
 
-                            <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div>
-                                        <p className="text-gray-500 dark:text-gray-400 text-xs font-bold uppercase">Lojas Ativas</p>
-                                        <h3 className="text-3xl font-bold text-slate-800 dark:text-white">{activeStores}</h3>
+                            <div className="lg:col-span-4 bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 shadow-sm p-6">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white">Saude operacional</h3>
+                                    <div className="w-10 h-10 rounded-2xl bg-slate-100 text-slate-600 flex items-center justify-center">
+                                        <ShieldCheck size={18} />
                                     </div>
-                                    <div className="p-3 bg-purple-100 dark:bg-purple-900/20 text-purple-600 rounded-xl"><CheckCircle /></div>
                                 </div>
-                                <div className="w-full bg-gray-100 rounded-full h-1.5 mt-2">
-                                    <div className="bg-purple-600 h-1.5 rounded-full" style={{ width: `${(activeStores/stores.length || 1)*100}%` }}></div>
+                                <div className="space-y-4">
+                                    <div>
+                                        <div className="flex items-center justify-between text-xs text-slate-500">
+                                            <span>Conclusao</span>
+                                            <span>{completionRate}%</span>
+                                        </div>
+                                        <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
+                                            <div className="h-2 rounded-full bg-emerald-500" style={{ width: `${completionRate}%` }} />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div className="flex items-center justify-between text-xs text-slate-500">
+                                            <span>Cancelamentos</span>
+                                            <span>{cancelRate}%</span>
+                                        </div>
+                                        <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
+                                            <div className="h-2 rounded-full bg-rose-500" style={{ width: `${cancelRate}%` }} />
+                                        </div>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 bg-slate-50/80">
+                                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Pendencias</p>
+                                        <p className="text-2xl font-bold text-slate-900">{pendingRequests.length}</p>
+                                        <p className="text-xs text-slate-500 mt-1">Solicitacoes aguardando aprovacao</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -916,13 +1178,13 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
 
                 {activeTab === 'SETTINGS' && (
                     <div className="grid lg:grid-cols-2 gap-8 animate-fade-in">
-                        <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-8">
+                        <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-8">
                             <div className="flex items-center gap-3 mb-6">
-                                <div className="w-12 h-12 bg-purple-100 dark:bg-purple-900/20 rounded-xl flex items-center justify-center text-purple-600">
+                                <div className="w-12 h-12 bg-red-100 dark:bg-red-900/20 rounded-xl flex items-center justify-center text-red-600">
                                     <Mail size={24} />
                                 </div>
                                 <div>
-                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Automação de E-mail</h3>
+                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white font-display">Automação de E-mail</h3>
                                     <p className="text-gray-500 text-sm">Configure o EmailJS para envio automático.</p>
                                 </div>
                             </div>
@@ -935,7 +1197,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         value={settings.emailJsServiceId}
                                         onChange={(e) => setSettings({...settings, emailJsServiceId: e.target.value})}
                                         placeholder="Ex: service_xxxxx"
-                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                     />
                                 </div>
                                 <div>
@@ -945,7 +1207,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         value={settings.emailJsTemplateId}
                                         onChange={(e) => setSettings({...settings, emailJsTemplateId: e.target.value})}
                                         placeholder="Ex: template_xxxxx"
-                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                     />
                                 </div>
                                 <div>
@@ -955,7 +1217,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             href="https://dashboard.emailjs.com/admin/account" 
                                             target="_blank" 
                                             rel="noopener noreferrer"
-                                            className="text-xs text-purple-600 hover:underline flex items-center gap-1"
+                                            className="text-xs text-red-600 hover:underline flex items-center gap-1"
                                         >
                                             Onde encontrar? <ExternalLink size={12} />
                                         </a>
@@ -966,7 +1228,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={settings.emailJsPublicKey}
                                             onChange={(e) => setSettings({...settings, emailJsPublicKey: e.target.value})}
                                             placeholder="Ex: user_xxxxx (Antigo User ID)"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                 </div>
@@ -976,7 +1238,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                 <button 
                                     onClick={handleSaveSettings}
                                     disabled={savingSettings}
-                                    className="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl flex items-center gap-2 transition-all disabled:opacity-70"
+                                    className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl flex items-center gap-2 transition-all disabled:opacity-70"
                                 >
                                     {savingSettings ? <Loader2 className="animate-spin" /> : <Save size={18} />}
                                     Salvar Configurações
@@ -984,13 +1246,13 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                             </div>
                         </div>
 
-                        <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-8">
+                        <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-8">
                             <div className="flex items-center gap-3 mb-6">
                                 <div className="w-12 h-12 bg-red-100 dark:bg-red-900/20 rounded-xl flex items-center justify-center text-red-600">
                                     <AlertTriangle size={24} />
                                 </div>
                                 <div>
-                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Notificações de Erro</h3>
+                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white font-display">Notificações de Erro</h3>
                                     <p className="text-gray-500 text-sm">Dispare alertas por e-mail e WhatsApp quando ocorrerem erros.</p>
                                 </div>
                             </div>
@@ -1010,14 +1272,14 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                     value={settings.errorNotifyEmailTo}
                                     onChange={(e) => setSettings({ ...settings, errorNotifyEmailTo: e.target.value })}
                                     placeholder="E-mail de destino"
-                                    className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                    className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                 />
                                 <input
                                     type="text"
                                     value={settings.errorNotifyEmailTemplateId}
                                     onChange={(e) => setSettings({ ...settings, errorNotifyEmailTemplateId: e.target.value })}
                                     placeholder="Template ID (opcional)"
-                                    className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                    className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                 />
 
                                 <div className="border-t border-gray-100 dark:border-slate-800 pt-4">
@@ -1027,7 +1289,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         min="0"
                                         value={settings.errorNotifyCooldownSec}
                                         onChange={(e) => setSettings({ ...settings, errorNotifyCooldownSec: Number(e.target.value) })}
-                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                        className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                     />
                                 </div>
                             </div>
@@ -1036,7 +1298,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                 <button 
                                     onClick={handleSaveSettings}
                                     disabled={savingSettings}
-                                    className="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl flex items-center gap-2 transition-all disabled:opacity-70"
+                                    className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl flex items-center gap-2 transition-all disabled:opacity-70"
                                 >
                                     {savingSettings ? <Loader2 className="animate-spin" /> : <Save size={18} />}
                                     Salvar Configurações
@@ -1064,12 +1326,12 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                         return (
                             <div className="space-y-6 animate-fade-in">
                                 <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 text-white p-6 shadow-2xl">
-                                    <div className="absolute -top-16 -right-10 h-40 w-40 rounded-full bg-purple-500/30 blur-3xl"></div>
+                                    <div className="absolute -top-16 -right-10 h-40 w-40 rounded-full bg-red-500/30 blur-3xl"></div>
                                     <div className="absolute -bottom-20 -left-10 h-44 w-44 rounded-full bg-red-500/20 blur-3xl"></div>
                                     <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
                                         <div>
-                                            <p className="text-xs uppercase tracking-[0.2em] text-purple-200">Observatorio de Erros</p>
-                                            <h2 className="text-2xl font-bold">Radar em tempo real</h2>
+                                            <p className="text-xs uppercase tracking-[0.2em] text-red-200">Observatorio de Erros</p>
+                                            <h2 className="text-2xl font-bold font-display">Radar em tempo real</h2>
                                             <p className="text-sm text-slate-300">Visualize sinais, contexto e resolucoes em um unico painel.</p>
                                         </div>
                                         <div className="flex flex-wrap items-center gap-2">
@@ -1112,7 +1374,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                     </div>
                                 </div>
 
-                                <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-5">
+                                <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-6">
                                     <div className="flex flex-wrap items-center gap-3">
                                         <div className="flex items-center gap-2 text-slate-600 dark:text-gray-300 font-bold">
                                             <Filter size={18} /> Filtros inteligentes
@@ -1120,10 +1382,10 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         <div className="ml-auto flex gap-2">
                                             <button
                                                 onClick={() => loadLogs(0)}
-                                                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold flex items-center gap-2 text-sm"
-                                            >
-                                                <Search size={14} /> Aplicar
-                                            </button>
+                                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold flex items-center gap-2 text-sm shadow-md shadow-red-600/20"
+                                        >
+                                            <Search size={14} /> Aplicar
+                                        </button>
                                             <button
                                                 onClick={() => {
                                                     setLogsFilters({ source: '', level: '', search: '', from: '', to: '' });
@@ -1141,12 +1403,12 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={logsFilters.search}
                                             onChange={(e) => setLogsFilters({ ...logsFilters, search: e.target.value })}
                                             placeholder="Buscar mensagem"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                         <select
                                             value={logsFilters.source}
                                             onChange={(e) => setLogsFilters({ ...logsFilters, source: e.target.value })}
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         >
                                             <option value="">Fonte (todas)</option>
                                             <option value="server">server</option>
@@ -1155,7 +1417,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         <select
                                             value={logsFilters.level}
                                             onChange={(e) => setLogsFilters({ ...logsFilters, level: e.target.value })}
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         >
                                             <option value="">Nivel (todos)</option>
                                             <option value="error">error</option>
@@ -1166,26 +1428,26 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             type="date"
                                             value={logsFilters.from}
                                             onChange={(e) => setLogsFilters({ ...logsFilters, from: e.target.value })}
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                         <input
                                             type="date"
                                             value={logsFilters.to}
                                             onChange={(e) => setLogsFilters({ ...logsFilters, to: e.target.value })}
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-slate-200 dark:border-slate-700 rounded-xl outline-none bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                 </div>
 
                                 <div className="grid lg:grid-cols-[minmax(0,1.6fr)_minmax(320px,1fr)] gap-6">
-                                    <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-6">
+                                    <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-6">
                                         <div className="flex items-center justify-between mb-4">
                                             <h3 className="font-bold text-slate-800 dark:text-white">Fluxo de Sinais</h3>
                                             <span className="text-sm text-gray-400">{logsTotal} registros</span>
                                         </div>
                                         {logsLoading ? (
                                             <div className="flex items-center justify-center py-16">
-                                                <Loader2 className="animate-spin text-purple-500" />
+                                                <Loader2 className="animate-spin text-red-500" />
                                             </div>
                                         ) : logs.length === 0 ? (
                                             <div className="text-center text-gray-400 py-12">
@@ -1201,8 +1463,8 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                             onClick={() => setSelectedLogId(log.id)}
                                                             className={`w-full text-left rounded-2xl border p-4 transition-all ${
                                                                 isActive
-                                                                    ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/30'
-                                                                    : 'border-gray-100 dark:border-slate-800 hover:border-purple-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                                                                    ? 'border-red-500 bg-red-50 dark:bg-red-900/30'
+                                                                    : 'border-slate-200/80 dark:border-slate-800 hover:border-red-300 hover:bg-red-50/40 dark:hover:bg-slate-800'
                                                             }`}
                                                         >
                                                             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
@@ -1245,7 +1507,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         )}
                                     </div>
 
-                                    <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-6 lg:sticky lg:top-24 self-start">
+                                    <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-6 lg:sticky lg:top-24 self-start">
                                         <div className="flex items-center justify-between mb-4">
                                             <h3 className="font-bold text-slate-800 dark:text-white">Inspecao</h3>
                                             {selectedLog && (
@@ -1299,6 +1561,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                         )}
                                     </div>
                                 </div>
+
                             </div>
                         );
                     })()
@@ -1307,16 +1570,16 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                 {activeTab === 'REQUESTS' && (
                     <div className="space-y-4 animate-fade-in">
                         {pendingRequests.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center h-96 bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 text-gray-400">
+                            <div className="flex flex-col items-center justify-center h-96 bg-white/95 dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 text-gray-400">
                                 <Inbox size={48} className="mb-4 opacity-20" />
                                 <p>Nenhuma solicitação pendente.</p>
                             </div>
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {pendingRequests.map(req => (
-                                    <div key={req.id} className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 p-6 shadow-sm hover:shadow-md transition-shadow">
+                                    <div key={req.id} className="bg-white/95 dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 p-6 shadow-sm hover:shadow-md transition-shadow">
                                         <div className="flex justify-between items-start mb-4">
-                                            <div className="w-12 h-12 bg-purple-50 dark:bg-purple-900/20 rounded-xl flex items-center justify-center text-purple-600">
+                                            <div className="w-12 h-12 bg-red-50 dark:bg-red-900/20 rounded-xl flex items-center justify-center text-red-600">
                                                 <Building2 size={24} />
                                             </div>
                                             <span className="text-xs font-bold bg-orange-100 text-orange-700 px-2 py-1 rounded-full">
@@ -1324,7 +1587,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             </span>
                                         </div>
                                         
-                                        <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-1">{req.storeName}</h3>
+                                        <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-1 font-display">{req.storeName}</h3>
                                         <div className="space-y-2 mb-6">
                                             <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
                                                 <User size={16} className="text-gray-400" /> {req.ownerName}
@@ -1363,13 +1626,13 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
 
                 {activeTab === 'STORES' && (
                     <div className="space-y-6 animate-fade-in">
-                        <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 p-6">
+                        <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 p-7">
                             <div className="flex items-center gap-3 mb-6">
-                                <div className="w-12 h-12 bg-purple-100 dark:bg-purple-900/20 rounded-xl flex items-center justify-center text-purple-600">
+                                <div className="w-12 h-12 bg-red-100 dark:bg-red-900/20 rounded-xl flex items-center justify-center text-red-600">
                                     <Building2 size={24} />
                                 </div>
                                 <div>
-                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Criar Loja</h3>
+                                    <h3 className="text-xl font-bold text-slate-800 dark:text-white font-display">Criar Loja</h3>
                                     <p className="text-gray-500 text-sm">Cadastro direto sem aprovação.</p>
                                 </div>
                             </div>
@@ -1383,7 +1646,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.ownerName}
                                             onChange={(e) => setNewStore({ ...newStore, ownerName: e.target.value })}
                                             placeholder="Nome do responsavel"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1394,7 +1657,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.phone}
                                             onChange={(e) => setNewStore({ ...newStore, phone: e.target.value })}
                                             placeholder="Telefone do responsavel"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1405,7 +1668,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.whatsapp}
                                             onChange={(e) => setNewStore({ ...newStore, whatsapp: e.target.value })}
                                             placeholder="WhatsApp do comercio"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1416,7 +1679,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.email}
                                             onChange={(e) => setNewStore({ ...newStore, email: e.target.value })}
                                             placeholder="E-mail de login"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1427,7 +1690,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.password}
                                             onChange={(e) => setNewStore({ ...newStore, password: e.target.value })}
                                             placeholder="Senha de login"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                 </div>
@@ -1441,7 +1704,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.name}
                                             onChange={(e) => setNewStore({ ...newStore, name: e.target.value })}
                                             placeholder="Nome da loja"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1465,7 +1728,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.customUrl}
                                             onChange={(e) => setNewStore({ ...newStore, customUrl: e.target.value })}
                                             placeholder="URL personalizada (ex: pizzaria-do-joao)"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1476,7 +1739,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.deliveryTime}
                                             onChange={(e) => setNewStore({ ...newStore, deliveryTime: e.target.value })}
                                             placeholder="Tempo de entrega (ex: 30-40 min)"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1487,7 +1750,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.pickupTime}
                                             onChange={(e) => setNewStore({ ...newStore, pickupTime: e.target.value })}
                                             placeholder="Tempo de retirada (ex: 20-30 min)"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1499,7 +1762,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.deliveryFee}
                                             onChange={(e) => setNewStore({ ...newStore, deliveryFee: e.target.value })}
                                             placeholder="Taxa de entrega"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                 </div>
@@ -1512,8 +1775,9 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             type="text"
                                             value={newStore.cep}
                                             onChange={(e) => setNewStore({ ...newStore, cep: e.target.value })}
+                                            onBlur={handleNewStoreCepBlur}
                                             placeholder="CEP"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1524,7 +1788,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.street}
                                             onChange={(e) => setNewStore({ ...newStore, street: e.target.value })}
                                             placeholder="Rua / Logradouro"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1535,7 +1799,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.number}
                                             onChange={(e) => setNewStore({ ...newStore, number: e.target.value })}
                                             placeholder="Numero"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1546,7 +1810,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.district}
                                             onChange={(e) => setNewStore({ ...newStore, district: e.target.value })}
                                             placeholder="Bairro"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1557,7 +1821,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.city}
                                             onChange={(e) => setNewStore({ ...newStore, city: e.target.value })}
                                             placeholder="Cidade"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1568,7 +1832,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.state}
                                             onChange={(e) => setNewStore({ ...newStore, state: e.target.value })}
                                             placeholder="Estado (UF)"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1579,7 +1843,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             value={newStore.complement}
                                             onChange={(e) => setNewStore({ ...newStore, complement: e.target.value })}
                                             placeholder="Complemento"
-                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
+                                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white"
                                         />
                                     </div>
                                     <div>
@@ -1592,13 +1856,13 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             onChange={(e) => setNewStore({ ...newStore, tableCount: e.target.value })}
                                             placeholder="Quantidade de mesas"
                                             disabled={!newStore.acceptsTableOrders}
-                                            className={`w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50 dark:bg-slate-800 dark:text-white ${newStore.acceptsTableOrders ? '' : 'opacity-60 cursor-not-allowed'}`}
+                                            className={`w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 bg-gray-50 dark:bg-slate-800 dark:text-white ${newStore.acceptsTableOrders ? '' : 'opacity-60 cursor-not-allowed'}`}
                                         />
                                     </div>
                                     <div className="flex flex-col gap-2">
                                         <label className="text-xs font-bold text-gray-500 uppercase">Logo</label>
-                                        <p className="text-xs text-gray-400">Mostrada para clientes.</p>
-                                        <label className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-slate-600 dark:text-slate-200 cursor-pointer hover:border-purple-400">
+                                        <p className="text-xs text-gray-400">Mostrada para clientes. Recomendado: 512x512 px.</p>
+                                        <label className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-slate-600 dark:text-slate-200 cursor-pointer hover:border-red-400">
                                             <Upload size={16} />
                                             {storeLogoName || 'Selecionar logo'}
                                             <input
@@ -1608,18 +1872,35 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                 className="hidden"
                                             />
                                         </label>
-                                        {newStore.logoData ? (
-                                            <img
-                                                src={newStore.logoData}
-                                                alt="Logo"
-                                                className="h-16 w-16 rounded-full object-cover border border-gray-200 dark:border-slate-700"
-                                            />
+                                        {newStore.logoUrl ? (
+                                            <>
+                                                <img
+                                                    src={newStore.logoUrl}
+                                                    alt="Logo"
+                                                    className="h-16 w-16 rounded-full object-cover border border-gray-200 dark:border-slate-700"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        if (!confirm('Remover logo da loja?')) return;
+                                                        const previousId = newStore.logoFileId;
+                                                        if (previousId) {
+                                                            try { await deleteImageKit(previousId); } catch {}
+                                                        }
+                                                        setNewStore((prev) => ({ ...prev, logoUrl: '', logoFileId: '' }));
+                                                        setStoreLogoName('');
+                                                    }}
+                                                    className="text-xs font-bold text-red-600 hover:text-red-700"
+                                                >
+                                                    Remover logo
+                                                </button>
+                                            </>
                                         ) : null}
                                     </div>
                                     <div className="flex flex-col gap-2">
                                         <label className="text-xs font-bold text-gray-500 uppercase">Capa</label>
-                                        <p className="text-xs text-gray-400">Imagem destaque no topo.</p>
-                                        <label className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-slate-600 dark:text-slate-200 cursor-pointer hover:border-purple-400">
+                                        <p className="text-xs text-gray-400">Imagem destaque no topo. Recomendado: 1600x900 px.</p>
+                                        <label className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-slate-600 dark:text-slate-200 cursor-pointer hover:border-red-400">
                                             <Upload size={16} />
                                             {storeImageName || 'Selecionar capa'}
                                             <input
@@ -1629,12 +1910,29 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                 className="hidden"
                                             />
                                         </label>
-                                        {newStore.imageData ? (
-                                            <img
-                                                src={newStore.imageData}
-                                                alt="Preview"
-                                                className="h-16 w-full rounded-lg object-cover border border-gray-200 dark:border-slate-700"
-                                            />
+                                        {newStore.imageUrl ? (
+                                            <>
+                                                <img
+                                                    src={newStore.imageUrl}
+                                                    alt="Preview"
+                                                    className="h-16 w-full rounded-lg object-cover border border-gray-200 dark:border-slate-700"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        if (!confirm('Remover capa da loja?')) return;
+                                                        const previousId = newStore.imageFileId;
+                                                        if (previousId) {
+                                                            try { await deleteImageKit(previousId); } catch {}
+                                                        }
+                                                        setNewStore((prev) => ({ ...prev, imageUrl: '', imageFileId: '' }));
+                                                        setStoreImageName('');
+                                                    }}
+                                                    className="text-xs font-bold text-red-600 hover:text-red-700"
+                                                >
+                                                    Remover capa
+                                                </button>
+                                            </>
                                         ) : null}
                                     </div>
                                 </div>
@@ -1670,7 +1968,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                 <button
                                     onClick={handleCreateStore}
                                     disabled={creatingStore}
-                                    className="ml-auto px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-70"
+                                    className="ml-auto px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-70"
                                 >
                                     {creatingStore ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
                                     Criar Loja
@@ -1678,17 +1976,11 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                             </div>
                         </div>
 
-                        <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 overflow-hidden">
-                        <div className="p-6 border-b border-gray-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-                            <div className="relative w-full md:w-96">
-                                <input 
-                                    type="text" 
-                                    placeholder="Buscar empresa por nome ou ID..." 
-                                    value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
-                                    className="w-full pl-10 pr-4 py-2 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg outline-none focus:ring-2 focus:ring-purple-500"
-                                />
-                                <Search className="absolute left-3 top-2.5 text-gray-400" size={18} />
+                        <div className="bg-white/95 dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200/70 dark:border-slate-800 overflow-hidden">
+                        <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white font-display">Lojas cadastradas</h3>
+                                <p className="text-sm text-slate-500">{filteredStores.length} lojas na rede</p>
                             </div>
                             <div className="flex flex-wrap gap-2">
                                 <button
@@ -1699,7 +1991,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                 </button>
                                 <button
                                     onClick={() => handleDownloadTemplate('xlsx')}
-                                    className="px-4 py-2 border border-gray-200 dark:border-slate-700 rounded-lg font-bold text-sm text-gray-600 dark:text-gray-300 flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                    className="px-4 py-2 border border-slate-200 dark:border-slate-700 rounded-lg font-bold text-sm text-slate-600 dark:text-slate-300 flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-800"
                                 >
                                     <Download size={16} /> Baixar XLSX
                                 </button>
@@ -1708,7 +2000,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
 
                             <div className="overflow-x-auto">
                                 <table className="w-full">
-                                    <thead className="bg-gray-50 dark:bg-slate-800 text-left">
+                                    <thead className="bg-slate-50 dark:bg-slate-800 text-left">
                                         <tr>
                                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Empresa</th>
                                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Categoria</th>
@@ -1758,7 +2050,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                     <div className="flex items-center justify-end gap-2">
                                                         <button 
                                                             onClick={() => onManageStore(store)}
-                                                            className="p-2 text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors" 
+                                                            className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors" 
                                                             title="Acessar Painel da Loja"
                                                         >
                                                             <ExternalLink size={18} />
@@ -1798,7 +2090,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                 )}
 
                 {activeTab === 'USERS' && (
-                    <div className="flex flex-col items-center justify-center h-96 bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 text-gray-400">
+                    <div className="flex flex-col items-center justify-center h-96 bg-white/95 dark:bg-slate-900 rounded-3xl border border-slate-200/70 dark:border-slate-800 text-gray-400">
                         <Users size={48} className="mb-4 opacity-20" />
                         <p>Gestão de Usuários em desenvolvimento.</p>
                     </div>
@@ -1941,7 +2233,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                             <button
                                 onClick={handleConfirmImport}
                                 disabled={importingProducts}
-                                className="px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold flex items-center gap-2 disabled:opacity-70"
+                                className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold flex items-center gap-2 disabled:opacity-70"
                             >
                                 {importingProducts ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
                                 Importar produtos

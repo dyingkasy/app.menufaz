@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, Wifi, ShoppingBag, Bike, Plus, Loader2, CheckCircle, ShieldCheck, AlertCircle, User, Utensils } from 'lucide-react';
+import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils } from 'lucide-react';
 import { CartItem, Store, Address } from '../types';
-import { createOrder, getUserCards, saveUserCard, EncryptedCard } from '../services/db';
+import { createOrder } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCurrencyBRL } from '../utils/format';
+import { imageKitUrl } from '../utils/imagekit';
+import { searchAddress } from '../utils/geo';
 
 interface CheckoutProps {
   store: Store;
@@ -36,38 +38,6 @@ const isValidCPF = (cpf: string) => {
     return true;
 };
 
-const luhnCheck = (val: string) => {
-    if (!val) return false;
-    let checksum = 0;
-    let j = 1;
-    for (let i = val.length - 1; i >= 0; i--) {
-        let calc = 0;
-        calc = Number(val.charAt(i)) * j;
-        if (calc > 9) {
-            checksum = checksum + 1;
-            calc = calc - 10;
-        }
-        checksum = checksum + calc;
-        if (j == 1) j = 2;
-        else j = 1;
-    }
-    return (checksum % 10) == 0;
-};
-
-const validateExpiry = (val: string) => {
-    if (val.length !== 5) return false;
-    const [month, year] = val.split('/').map(Number);
-    if (!month || !year || month < 1 || month > 12) return false;
-    
-    const now = new Date();
-    const currentYear = parseInt(now.getFullYear().toString().slice(-2));
-    const currentMonth = now.getMonth() + 1;
-
-    if (year < currentYear) return false;
-    if (year === currentYear && month < currentMonth) return false;
-    return true;
-};
-
 const Checkout: React.FC<CheckoutProps> = ({ 
   store, 
   cartItems, 
@@ -78,14 +48,20 @@ const Checkout: React.FC<CheckoutProps> = ({
   tableContext
 }) => {
   const { user } = useAuth();
-  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(tableContext ? 'MONEY' : 'CREDIT');
-  const [cardPaymentType, setCardPaymentType] = useState<'ONLINE' | 'DELIVERY'>('ONLINE');
+  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(
+    tableContext ? 'MONEY' : store.acceptsCardOnDelivery ? 'CREDIT' : 'PIX'
+  );
   const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(tableContext ? 'TABLE' : 'DELIVERY');
   const [tableNumber, setTableNumber] = useState(tableContext?.tableNumber || '');
+  const [customerName, setCustomerName] = useState('');
+  const [customerNameError, setCustomerNameError] = useState('');
   const [cpf, setCpf] = useState('');
+  const [showCpf, setShowCpf] = useState(false);
   const [cpfError, setCpfError] = useState('');
+  const [phone, setPhone] = useState('');
+  const [phoneError, setPhoneError] = useState('');
   const isTableFlow = !!tableContext;
-  const canUseCard = !!user;
+  const canUseCard = store.acceptsCardOnDelivery && orderType === 'DELIVERY';
   
   // Discount & Processing
   const [couponCode, setCouponCode] = useState('');
@@ -94,30 +70,22 @@ const Checkout: React.FC<CheckoutProps> = ({
   const [isSuccess, setIsSuccess] = useState(false);
   const [moneyChange, setMoneyChange] = useState('');
 
-  // Card Management State
-  const [savedCards, setSavedCards] = useState<EncryptedCard[]>([]);
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
-  const [showAddCard, setShowAddCard] = useState(false);
-  const [loadingCards, setLoadingCards] = useState(false);
-
-  // New Card Form
-  const [newCard, setNewCard] = useState({ number: '', name: '', expiry: '', cvv: '' });
-  const [cardBrand, setCardBrand] = useState<string>('');
-  const [cardErrors, setCardErrors] = useState({ number: false, expiry: false, cvv: false });
-  const [isSavingCard, setIsSavingCard] = useState(false);
-
   // --- EFFECTS ---
 
   useEffect(() => {
       if (user) {
           if((user as any).cpf) {
               setCpf((user as any).cpf);
+              setShowCpf(true);
           }
-          if (paymentMethod === 'CREDIT' && cardPaymentType === 'ONLINE') {
-              loadUserCards();
+          if ((user as any).phone) {
+              setPhone((user as any).phone);
+          }
+          if ((user as any).name) {
+              setCustomerName((user as any).name);
           }
       }
-  }, [user, paymentMethod, cardPaymentType]);
+  }, [user]);
 
   useEffect(() => {
       if (isTableFlow) return;
@@ -141,84 +109,6 @@ const Checkout: React.FC<CheckoutProps> = ({
       }
   }, [canUseCard, isTableFlow, paymentMethod]);
 
-  const getCardBrand = (number: string) => {
-      const n = number.replace(/\D/g, '');
-      if (n.match(/^4/)) return 'Visa';
-      if (n.match(/^5[1-5]/)) return 'Mastercard';
-      if (n.match(/^3[47]/)) return 'Amex';
-      if (n.match(/^(606282|3841)/)) return 'Hipercard';
-      if (n.match(/^(4011|4312|4389|4514|4576|5041|5066|5090|6277|6362|6363|650|6516|6550)/)) return 'Elo';
-      return '';
-  };
-
-  useEffect(() => {
-      // Real-time card number validation & formatting
-      const cleanNumber = newCard.number.replace(/\D/g, '');
-      const brand = getCardBrand(cleanNumber);
-      setCardBrand(brand);
-
-      // Basic validation trigger (only if length sufficient to check)
-      if (cleanNumber.length >= 13) {
-          setCardErrors(prev => ({ ...prev, number: !luhnCheck(cleanNumber) }));
-      } else {
-          setCardErrors(prev => ({ ...prev, number: false })); // Reset error while typing
-      }
-  }, [newCard.number]);
-
-  const loadUserCards = async () => {
-      if (!user) return;
-      setLoadingCards(true);
-      try {
-          const cards = await getUserCards(user.uid);
-          setSavedCards(cards);
-          if (cards.length > 0 && !selectedCardId) {
-              setSelectedCardId(cards[0].id);
-          }
-      } catch (e) {
-          console.error(e);
-      } finally {
-          setLoadingCards(false);
-      }
-  };
-
-  const handleSaveNewCard = async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!user) return;
-
-      // Final Validation
-      const cleanNumber = newCard.number.replace(/\D/g, '');
-      if (!luhnCheck(cleanNumber) || cleanNumber.length < 13) {
-          alert("Número do cartão inválido.");
-          return;
-      }
-      if (!validateExpiry(newCard.expiry)) {
-          alert("Data de validade inválida ou expirada.");
-          return;
-      }
-      if (newCard.cvv.length < 3) {
-          alert("CVV inválido.");
-          return;
-      }
-
-      setIsSavingCard(true);
-      try {
-          await saveUserCard(user.uid, {
-              number: cleanNumber,
-              name: newCard.name,
-              expiry: newCard.expiry,
-              cvv: newCard.cvv,
-              brand: cardBrand || 'Outro'
-          });
-          await loadUserCards();
-          setShowAddCard(false);
-          setNewCard({ number: '', name: '', expiry: '', cvv: '' });
-      } catch (e) {
-          alert("Erro ao salvar cartão.");
-      } finally {
-          setIsSavingCard(false);
-      }
-  };
-
   // Calculations
   const subtotal = cartItems.reduce((acc, item) => acc + item.totalPrice, 0);
   const deliveryFee = Number(store.deliveryFee) || 0;
@@ -228,42 +118,56 @@ const Checkout: React.FC<CheckoutProps> = ({
 
   const handlePlaceOrder = async () => {
     if (orderType === 'DELIVERY' && !address) {
-      alert('Por favor, selecione um endereço de entrega.');
+      onChangeAddress();
+      return;
+    }
+    if (!customerName.trim()) {
+      setCustomerNameError('Informe o nome do cliente.');
       return;
     }
     if (orderType === 'TABLE' && !tableNumber.trim()) {
       alert('Informe o número da mesa.');
       return;
     }
-    if (!user && !isTableFlow) {
-      alert('Você precisa estar logado.');
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (!phoneDigits) {
+      alert('Informe um telefone para contato.');
+      return;
+    }
+    if (phoneDigits.length < 10 || phoneDigits.length > 11) {
+      alert('Telefone inválido. Informe DDD + número.');
       return;
     }
 
     // Validação CPF
-    if (cpf && !isValidCPF(cpf)) {
+    if (showCpf && cpf && !isValidCPF(cpf)) {
         alert('CPF inválido. Verifique os números.');
         return;
-    }
-
-    if (!isTableFlow && paymentMethod === 'CREDIT' && cardPaymentType === 'ONLINE') {
-        if (savedCards.length === 0 && !showAddCard) {
-            alert("Adicione um cartão para pagar online.");
-            return;
-        }
-        if (!selectedCardId && !showAddCard) {
-            alert("Selecione um cartão.");
-            return;
-        }
-        if (showAddCard) {
-            alert("Salve o novo cartão antes de finalizar.");
-            return;
-        }
     }
 
     setIsProcessing(true);
     
     try {
+        let deliveryCoords = address?.coordinates;
+        if (orderType === 'DELIVERY' && address && (!deliveryCoords || !Number.isFinite(deliveryCoords.lat) || !Number.isFinite(deliveryCoords.lng))) {
+            const queryParts = [address.street, address.number, address.district, address.city, address.state]
+                .map((value) => String(value || '').trim())
+                .filter(Boolean);
+            const queryText = queryParts.join(', ');
+            if (!queryText) {
+                alert('Endereço incompleto. Confirme rua, número e cidade.');
+                setIsProcessing(false);
+                return;
+            }
+            const results = await searchAddress(queryText);
+            if (!results.length) {
+                alert('Não foi possível localizar o endereço para entrega.');
+                setIsProcessing(false);
+                return;
+            }
+            deliveryCoords = results[0].coordinates;
+        }
+
         const itemsDescription = cartItems.map(item => {
             const opts = item.options.map(o => o.optionName).join(', ');
             return `${item.quantity}x ${item.product.name} ${opts ? `(${opts})` : ''} ${item.notes ? `[Obs: ${item.notes}]` : ''}`;
@@ -273,12 +177,7 @@ const Checkout: React.FC<CheckoutProps> = ({
         if (orderType === 'TABLE') {
             paymentDescription = 'Pagamento na mesa';
         } else if (paymentMethod === 'CREDIT') {
-            if (cardPaymentType === 'ONLINE') {
-                const card = savedCards.find(c => c.id === selectedCardId);
-                paymentDescription = `Online: ${card?.brand} final ${card?.last4}`;
-            } else {
-                paymentDescription = 'Cartão na Entrega (Maquininha)';
-            }
+            paymentDescription = 'Cartão na Entrega (Maquininha)';
         } else if (paymentMethod === 'PIX') {
             paymentDescription = 'Pix';
         } else {
@@ -286,24 +185,73 @@ const Checkout: React.FC<CheckoutProps> = ({
         }
 
         const tableValue = tableNumber.trim();
-        await createOrder({
+        const storeAddressPayload = (store.street || store.number || store.city)
+            ? {
+                id: store.id,
+                label: store.name,
+                street: store.street || '',
+                number: store.number || '',
+                district: store.district || '',
+                city: store.city || '',
+                state: store.state || '',
+                coordinates: store.coordinates
+            }
+            : undefined;
+
+        const lineItems = cartItems.map((item) => ({
+            productId: item.product.id,
+            name: item.product.name,
+            quantity: item.quantity,
+            unitPrice: item.totalPrice / Math.max(1, item.quantity),
+            totalPrice: item.totalPrice,
+            notes: item.notes,
+            options: item.options,
+            pizza: item.pizza
+        }));
+
+        const createdOrder = await createOrder({
             storeId: store.id,
+            storeName: store.name,
             userId: user?.uid,
-            customerName: user?.name || `Mesa ${tableValue}`,
+            customerName: customerName.trim(),
             items: itemsDescription,
+            lineItems,
             total: total,
+            deliveryFee: orderType === 'DELIVERY' ? Number(store.deliveryFee) || 0 : 0,
             time: new Date().toLocaleTimeString(),
             notes: orderType === 'PICKUP' ? 'RETIRADA NO BALCÃO' : orderType === 'TABLE' ? `MESA ${tableValue}` : '', 
             paymentMethod: paymentDescription,
             refundStatus: 'NONE',
             storeCity: store.city, 
             storeCoordinates: store.coordinates,
-            deliveryCoordinates: orderType === 'DELIVERY' && address ? address.coordinates : undefined,
+            deliveryCoordinates: orderType === 'DELIVERY' ? deliveryCoords : undefined,
+            storeAddress: storeAddressPayload,
+            deliveryAddress: orderType === 'DELIVERY' && address ? {
+                street: address.street,
+                number: address.number,
+                district: address.district,
+                city: address.city,
+                state: address.state,
+                complement: address.complement,
+                label: address.label,
+                coordinates: deliveryCoords || address.coordinates
+            } : undefined,
             type: orderType,
+            pickup: orderType === 'PICKUP',
             tableNumber: orderType === 'TABLE' ? tableValue : undefined,
             tableSessionId: orderType === 'TABLE' ? tableContext?.sessionId : undefined,
-            cpf: cpf 
+            cpf: showCpf ? cpf : '',
+            customerPhone: phoneDigits
         });
+        if (createdOrder?.customerId) {
+            localStorage.setItem('customerId', createdOrder.customerId);
+        }
+        if (phoneDigits) {
+            localStorage.setItem('customerPhone', phoneDigits);
+        }
+        if (createdOrder?.id) {
+            localStorage.setItem('lastOrderId', createdOrder.id);
+        }
 
         setIsSuccess(true);
         setTimeout(() => {
@@ -329,7 +277,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           A loja <span className="font-bold text-slate-800 dark:text-white">{store.name}</span> já recebeu seu pedido e começará o preparo em instantes.
         </p>
         <p className="text-sm text-gray-400 animate-pulse">
-          {isTableFlow ? 'Abrindo acompanhamento da mesa...' : 'Redirecionando para Meus Pedidos...'}
+          {isTableFlow ? 'Abrindo acompanhamento da mesa...' : user ? 'Redirecionando para Meus Pedidos...' : 'Voltando para a tela inicial...'}
         </p>
       </div>
     );
@@ -351,7 +299,13 @@ const Checkout: React.FC<CheckoutProps> = ({
           </div>
           <div className="text-sm font-bold text-gray-500 dark:text-gray-400 hidden sm:flex items-center gap-2">
              {store.logoUrl && (
-                <img src={store.logoUrl} alt={`Logo ${store.name}`} className="w-6 h-6 rounded-full object-cover border border-gray-200 dark:border-slate-700" />
+                <img
+                    src={imageKitUrl(store.logoUrl, { width: 80, quality: 70 })}
+                    alt={`Logo ${store.name}`}
+                    loading="lazy"
+                    decoding="async"
+                    className="w-6 h-6 rounded-full object-contain border border-gray-200 dark:border-slate-700 bg-white p-0.5"
+                />
              )}
              {store.name}
           </div>
@@ -496,29 +450,93 @@ const Checkout: React.FC<CheckoutProps> = ({
             </div>
         </section>
 
+        {/* Contact Phone */}
+        <section>
+            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                <User size={16} /> Nome do cliente
+            </h3>
+            <input
+                type="text"
+                placeholder="Nome completo"
+                value={customerName}
+                onChange={(e) => {
+                    setCustomerName(e.target.value);
+                    if (e.target.value.trim()) setCustomerNameError('');
+                }}
+                className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${customerNameError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
+            />
+            {customerNameError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{customerNameError}</p>}
+        </section>
+
+        <section>
+            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                <User size={16} /> Telefone para contato
+            </h3>
+            <input
+                type="tel"
+                placeholder="(11) 99999-9999"
+                value={phone}
+                onChange={(e) => {
+                    let v = e.target.value.replace(/\D/g, '');
+                    if (v.length > 11) v = v.slice(0, 11);
+                    v = v.replace(/(\d{2})(\d)/, '($1) $2');
+                    v = v.replace(/(\d{5})(\d)/, '$1-$2');
+                    setPhone(v);
+                    const digits = v.replace(/\D/g, '');
+                    if (digits.length > 0 && digits.length < 10) {
+                        setPhoneError('Informe DDD + número.');
+                    } else {
+                        setPhoneError('');
+                    }
+                }}
+                className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${phoneError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
+            />
+            {phoneError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{phoneError}</p>}
+        </section>
+
         {/* CPF Optional */}
         <section>
             <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <User size={16} /> CPF na Nota (Opcional)
             </h3>
-            <input 
-                type="text" 
-                placeholder="000.000.000-00" 
-                value={cpf}
-                onChange={(e) => {
-                    let v = e.target.value.replace(/\D/g, '');
-                    if(v.length > 11) v = v.slice(0, 11);
-                    v = v.replace(/(\d{3})(\d)/, '$1.$2');
-                    v = v.replace(/(\d{3})(\d)/, '$1.$2');
-                    v = v.replace(/(\d{3})(\d{1,2})$/, '$1-$2');
-                    setCpf(v);
-                    
-                    if(v && !isValidCPF(v)) setCpfError('CPF inválido');
-                    else setCpfError('');
-                }}
-                className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${cpfError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
-            />
-            {cpfError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{cpfError}</p>}
+            <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300 font-medium mb-3">
+                <input
+                    type="checkbox"
+                    checked={showCpf}
+                    onChange={(e) => {
+                        const checked = e.target.checked;
+                        setShowCpf(checked);
+                        if (!checked) {
+                            setCpf('');
+                            setCpfError('');
+                        }
+                    }}
+                    className="h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                />
+                Quero informar CPF na nota
+            </label>
+            {showCpf && (
+                <>
+                    <input 
+                        type="text" 
+                        placeholder="000.000.000-00" 
+                        value={cpf}
+                        onChange={(e) => {
+                            let v = e.target.value.replace(/\D/g, '');
+                            if(v.length > 11) v = v.slice(0, 11);
+                            v = v.replace(/(\d{3})(\d)/, '$1.$2');
+                            v = v.replace(/(\d{3})(\d)/, '$1.$2');
+                            v = v.replace(/(\d{3})(\d{1,2})$/, '$1-$2');
+                            setCpf(v);
+                            
+                            if(v && !isValidCPF(v)) setCpfError('CPF inválido');
+                            else setCpfError('');
+                        }}
+                        className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${cpfError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
+                    />
+                    {cpfError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{cpfError}</p>}
+                </>
+            )}
         </section>
 
         {/* Payment Methods UI */}
@@ -537,132 +555,8 @@ const Checkout: React.FC<CheckoutProps> = ({
                 </div>
                 <div className="p-6">
                     {paymentMethod === 'CREDIT' && (
-                        <div className="space-y-4">
-                            <div className="flex gap-3 mb-4">
-                                <button onClick={() => setCardPaymentType('ONLINE')} className={`flex-1 p-3 rounded-xl border text-sm font-bold flex flex-col items-center gap-2 ${cardPaymentType === 'ONLINE' ? 'border-red-600 bg-red-50 text-red-700' : 'border-gray-200 text-gray-500'}`}><Wifi size={20} /> Pagar no App</button>
-                                {store.acceptsCardOnDelivery && <button onClick={() => setCardPaymentType('DELIVERY')} className={`flex-1 p-3 rounded-xl border text-sm font-bold flex flex-col items-center gap-2 ${cardPaymentType === 'DELIVERY' ? 'border-red-600 bg-red-50 text-red-700' : 'border-gray-200 text-gray-500'}`}><CreditCard size={20} /> Pagar na Entrega</button>}
-                            </div>
-                            
-                            {cardPaymentType === 'ONLINE' && (
-                                <div className="space-y-4 animate-fade-in">
-                                    {loadingCards ? (
-                                        <div className="flex justify-center py-4"><Loader2 className="animate-spin text-red-600" /></div>
-                                    ) : !showAddCard ? (
-                                        <>
-                                            <div className="space-y-2">
-                                                {savedCards.map(card => (
-                                                    <div 
-                                                        key={card.id}
-                                                        onClick={() => setSelectedCardId(card.id)}
-                                                        className={`p-4 rounded-xl border cursor-pointer flex items-center justify-between transition-all ${selectedCardId === card.id ? 'border-red-500 bg-red-50 dark:bg-red-900/10 ring-1 ring-red-500' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
-                                                    >
-                                                        <div className="flex items-center gap-3">
-                                                            <div className="w-10 h-8 bg-gray-200 dark:bg-slate-600 rounded flex items-center justify-center text-xs font-bold uppercase text-gray-500 dark:text-gray-300">
-                                                                {card.brand.substring(0,4)}
-                                                            </div>
-                                                            <div>
-                                                                <p className="text-sm font-bold text-slate-800 dark:text-white">•••• {card.last4}</p>
-                                                                <p className="text-xs text-gray-500 uppercase">{card.holder}</p>
-                                                            </div>
-                                                        </div>
-                                                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${selectedCardId === card.id ? 'border-red-600' : 'border-gray-300'}`}>
-                                                            {selectedCardId === card.id && <div className="w-2.5 h-2.5 bg-red-600 rounded-full" />}
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                            <button 
-                                                onClick={() => setShowAddCard(true)}
-                                                className="w-full py-3 border-2 border-dashed border-gray-300 dark:border-slate-700 rounded-xl flex items-center justify-center gap-2 text-gray-500 hover:text-red-600 hover:border-red-500 transition-colors font-bold text-sm"
-                                            >
-                                                <Plus size={18} /> Adicionar Novo Cartão
-                                            </button>
-                                        </>
-                                    ) : (
-                                        <div className="bg-gray-50 dark:bg-slate-800 p-4 rounded-xl border border-gray-200 dark:border-slate-700">
-                                            <h4 className="font-bold text-slate-800 dark:text-white mb-4 flex items-center gap-2">
-                                                <ShieldCheck size={18} className="text-green-600" /> Novo Cartão
-                                            </h4>
-                                            <form className="space-y-3">
-                                                <div>
-                                                    <div className="relative">
-                                                        <input 
-                                                            type="text"
-                                                            placeholder="Número do Cartão"
-                                                            value={newCard.number}
-                                                            maxLength={19}
-                                                            onChange={e => {
-                                                                setCardErrors(prev => ({...prev, number: false}));
-                                                                const val = e.target.value.replace(/\D/g, '').replace(/(.{4})/g, '$1 ').trim();
-                                                                setNewCard({...newCard, number: val.slice(0, 19)});
-                                                            }}
-                                                            className={`w-full p-3 pl-12 border rounded-lg outline-none dark:bg-slate-900 dark:text-white transition-all ${cardErrors.number ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-slate-600 focus:ring-green-500'}`}
-                                                        />
-                                                        <div className="absolute left-3 top-1/2 -translate-y-1/2 w-7 h-5 bg-gray-200 dark:bg-slate-700 rounded flex items-center justify-center text-[10px] font-bold uppercase text-gray-500">
-                                                            {cardBrand || '?'}
-                                                        </div>
-                                                    </div>
-                                                    {cardErrors.number && <span className="text-[10px] text-red-500 mt-1">Número inválido</span>}
-                                                </div>
-                                                <input 
-                                                    type="text"
-                                                    placeholder="Nome do Titular"
-                                                    value={newCard.name}
-                                                    onChange={e => setNewCard({...newCard, name: e.target.value.toUpperCase()})}
-                                                    className="w-full p-3 border border-gray-300 dark:border-slate-600 rounded-lg outline-none focus:ring-2 focus:ring-green-500 dark:bg-slate-900 dark:text-white"
-                                                />
-                                                <div className="grid grid-cols-2 gap-3">
-                                                    <div>
-                                                        <input 
-                                                            type="text"
-                                                            placeholder="MM/AA"
-                                                            maxLength={5}
-                                                            value={newCard.expiry}
-                                                            onChange={e => {
-                                                                setCardErrors(prev => ({...prev, expiry: false}));
-                                                                let val = e.target.value.replace(/\D/g, '');
-                                                                if (val.length >= 2) val = val.slice(0,2) + '/' + val.slice(2,4);
-                                                                setNewCard({...newCard, expiry: val});
-                                                            }}
-                                                            className={`w-full p-3 border rounded-lg outline-none focus:ring-2 dark:bg-slate-900 dark:text-white text-center ${cardErrors.expiry ? 'border-red-500' : 'border-gray-300 dark:border-slate-600 focus:ring-green-500'}`}
-                                                        />
-                                                    </div>
-                                                    <div>
-                                                        <input 
-                                                            type="text"
-                                                            placeholder="CVV"
-                                                            maxLength={4}
-                                                            value={newCard.cvv}
-                                                            onChange={e => {
-                                                                setCardErrors(prev => ({...prev, cvv: false}));
-                                                                setNewCard({...newCard, cvv: e.target.value.replace(/\D/g, '')});
-                                                            }}
-                                                            className={`w-full p-3 border rounded-lg outline-none focus:ring-2 dark:bg-slate-900 dark:text-white text-center ${cardErrors.cvv ? 'border-red-500' : 'border-gray-300 dark:border-slate-600 focus:ring-green-500'}`}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div className="flex gap-2 pt-2">
-                                                    <button 
-                                                        type="button"
-                                                        onClick={() => setShowAddCard(false)}
-                                                        className="flex-1 py-2 text-gray-500 font-bold hover:bg-gray-200 rounded-lg text-sm"
-                                                    >
-                                                        Cancelar
-                                                    </button>
-                                                    <button 
-                                                        type="button"
-                                                        onClick={handleSaveNewCard}
-                                                        disabled={isSavingCard}
-                                                        className="flex-1 py-2 bg-green-600 text-white font-bold rounded-lg text-sm flex items-center justify-center gap-2 disabled:opacity-70"
-                                                    >
-                                                        {isSavingCard ? <Loader2 className="animate-spin" size={16} /> : 'Salvar'}
-                                                    </button>
-                                                </div>
-                                            </form>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                        <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 p-4 text-sm text-gray-600 dark:text-gray-300">
+                            Pagamento com cartão será realizado na entrega, direto na maquininha.
                         </div>
                     )}
                     {paymentMethod === 'MONEY' && (

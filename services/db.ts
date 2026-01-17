@@ -10,6 +10,7 @@ import {
   Product,
   Review,
   Store,
+  StoreAvailability,
   StoreRequest,
   ErrorLogEntry
 } from '../types';
@@ -100,6 +101,88 @@ export const updateStore = async (storeId: string, updates: Partial<Store>) => {
   });
 };
 
+export const updateStoreSchedule = async (
+  storeId: string,
+  schedule: Store['schedule'],
+  autoOpenClose?: boolean
+) => {
+  ensureApi();
+  return apiFetch<{ storeId: string; schedule: Store['schedule']; autoOpenClose: boolean }>(
+    `/stores/${storeId}/schedule`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        schedule,
+        ...(typeof autoOpenClose === 'boolean' ? { autoOpenClose } : {})
+      })
+    }
+  );
+};
+
+export const updateStoreAutoAccept = async (storeId: string, enabled: boolean) => {
+  ensureApi();
+  return apiFetch<{ storeId: string; autoAcceptOrders: boolean }>(`/stores/${storeId}/auto-accept`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled })
+  });
+};
+
+export const updateStoreAutoOpen = async (storeId: string, enabled: boolean) => {
+  ensureApi();
+  return apiFetch<{ storeId: string; autoOpenClose: boolean }>(`/stores/${storeId}/auto-open`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled })
+  });
+};
+
+export const getStoreAvailability = async (storeId: string): Promise<StoreAvailability> => {
+  ensureApi();
+  return apiFetch<StoreAvailability>(`/stores/${storeId}/availability`);
+};
+
+export const pauseStore = async (storeId: string, minutes: number, reason: string) => {
+  ensureApi();
+  return apiFetch<{ storeId: string; pause: Store['pause'] }>(`/stores/${storeId}/pause`, {
+    method: 'POST',
+    body: JSON.stringify({ minutes, reason })
+  });
+};
+
+export const resumeStorePause = async (storeId: string) => {
+  ensureApi();
+  return apiFetch<{ storeId: string; pause: Store['pause'] }>(`/stores/${storeId}/pause`, {
+    method: 'DELETE'
+  });
+};
+
+export interface StoreCompanyProfile {
+  storeId: string;
+  store: Store;
+  owner: (UserProfile & { id: string }) | null;
+}
+
+export const getStoreCompanyProfile = async (storeId: string): Promise<StoreCompanyProfile> => {
+  ensureApi();
+  return apiFetch<StoreCompanyProfile>(`/stores/${storeId}/company-profile`);
+};
+
+export const generateMerchantId = async (storeId: string) => {
+  ensureApi();
+  return apiFetch<{ merchantId: string; createdAt: string; status?: 'existing' | 'created' }>(
+    `/stores/${storeId}/merchant-id`,
+    {
+      method: 'POST'
+    }
+  );
+};
+
+export const revokeMerchantId = async (storeId: string) => {
+  ensureApi();
+  return apiFetch<{ revokedAt: string }>(`/stores/${storeId}/merchant-id`, {
+    method: 'DELETE'
+  });
+};
+
 export const toggleStoreStatus = async (storeId: string, updates: Partial<Store>) => {
   await updateStore(storeId, updates);
 };
@@ -107,6 +190,24 @@ export const toggleStoreStatus = async (storeId: string, updates: Partial<Store>
 export const deleteStore = async (storeId: string) => {
   ensureApi();
   await apiFetch(`/stores/${storeId}`, { method: 'DELETE' });
+};
+
+export const getFavoriteStores = async (): Promise<string[]> => {
+  ensureApi();
+  return apiFetch<string[]>('/favorites');
+};
+
+export const addFavoriteStore = async (storeId: string) => {
+  ensureApi();
+  await apiFetch('/favorites', {
+    method: 'POST',
+    body: JSON.stringify({ storeId })
+  });
+};
+
+export const removeFavoriteStore = async (storeId: string) => {
+  ensureApi();
+  await apiFetch(`/favorites/${storeId}`, { method: 'DELETE' });
 };
 
 export const createStore = async (store: Omit<Store, 'id'>) => {
@@ -163,22 +264,46 @@ export const deleteProduct = async (productId: string) => {
   await apiFetch(`/products/${productId}`, { method: 'DELETE' });
 };
 
+const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'] as const;
+
+const normalizePricesBySize = (value?: Record<string, unknown>) => {
+  if (!value || typeof value !== 'object') return {};
+  const allowed = new Set(PIZZA_SIZE_KEYS);
+  return Object.entries(value).reduce<Record<string, number>>((acc, [key, raw]) => {
+    if (!allowed.has(key as typeof PIZZA_SIZE_KEYS[number])) return acc;
+    if (raw === '' || raw === null || raw === undefined) return acc;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      acc[key] = parsed;
+    }
+    return acc;
+  }, {});
+};
+
 export const getPizzaFlavorsByStore = async (storeId: string): Promise<PizzaFlavor[]> => {
   ensureApi();
-  return apiFetch<PizzaFlavor[]>(`/pizza-flavors?storeId=${encodeURIComponent(storeId)}`);
+  const flavors = await apiFetch<PizzaFlavor[]>(`/pizza-flavors?storeId=${encodeURIComponent(storeId)}`);
+  return flavors.map((flavor) => ({
+    ...flavor,
+    pricesBySize: normalizePricesBySize(flavor.pricesBySize as Record<string, unknown>)
+  }));
 };
 
 export const savePizzaFlavor = async (flavor: PizzaFlavor) => {
   ensureApi();
+  const payload = {
+    ...flavor,
+    pricesBySize: normalizePricesBySize(flavor.pricesBySize as Record<string, unknown>)
+  };
   if (flavor.id) {
     return apiFetch<PizzaFlavor>(`/pizza-flavors/${flavor.id}`, {
       method: 'PUT',
-      body: JSON.stringify(flavor)
+      body: JSON.stringify(payload)
     });
   }
   return apiFetch<PizzaFlavor>('/pizza-flavors', {
     method: 'POST',
-    body: JSON.stringify(flavor)
+    body: JSON.stringify(payload)
   });
 };
 
@@ -277,12 +402,65 @@ export const deleteExpense = async (expenseId: string) => {
   await apiFetch(`/expenses/${expenseId}`, { method: 'DELETE' });
 };
 
+export const getOrders = async (filters: {
+  storeId?: string;
+  userId?: string;
+  courierId?: string;
+  status?: string;
+  city?: string;
+  tableNumber?: string;
+  tableSessionId?: string;
+} = {}): Promise<Order[]> => {
+  ensureApi();
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      params.set(key, String(value));
+    }
+  });
+  const query = params.toString();
+  return apiFetch<Order[]>(`/orders${query ? `?${query}` : ''}`);
+};
+
+export const searchCatalog = async (query: string) => {
+  ensureApi();
+  return apiFetch<{
+    stores: Array<{
+      id: string;
+      name?: string;
+      category?: string;
+      imageUrl?: string;
+      logoUrl?: string;
+    }>;
+    products: Array<{
+      id: string;
+      name?: string;
+      description?: string;
+      storeId?: string;
+      storeName?: string;
+      storeCategory?: string;
+      storeImageUrl?: string;
+      storeLogoUrl?: string;
+    }>;
+  }>(`/search?q=${encodeURIComponent(query)}`);
+};
+
 export const createOrder = async (order: Omit<Order, 'id' | 'status' | 'createdAt'> & Partial<Order>) => {
   ensureApi();
-  await apiFetch('/orders', {
+  return apiFetch<Order>('/orders', {
     method: 'POST',
     body: JSON.stringify(order)
   });
+};
+
+export const subscribeToCustomerOrders = (customerId: string, listener: OrderListener) => {
+  ensureApi();
+  return poller(() => apiFetch<Order[]>(`/orders?customerId=${encodeURIComponent(customerId)}`), listener);
+};
+
+export const subscribeToCustomerPhoneOrders = (customerPhone: string, listener: OrderListener) => {
+  ensureApi();
+  return poller(() => apiFetch<Order[]>(`/orders?customerPhone=${encodeURIComponent(customerPhone)}`), listener);
 };
 
 export const subscribeToOrders = (storeId: string, listener: OrderListener) => {
@@ -308,11 +486,11 @@ export const subscribeToTableOrders = (
   return poller(() => apiFetch<Order[]>(query), listener);
 };
 
-export const updateOrderStatus = async (orderId: string, status: Order['status']) => {
+export const updateOrderStatus = async (orderId: string, status: Order['status'], reason?: string) => {
   ensureApi();
   await apiFetch(`/orders/${orderId}/status`, {
     method: 'PUT',
-    body: JSON.stringify({ status })
+    body: JSON.stringify(reason ? { status, reason } : { status })
   });
 };
 
@@ -392,6 +570,14 @@ export const updateCourierLocation = async (courierId: string, coords: Coordinat
   await apiFetch(`/couriers/${courierId}/location`, {
     method: 'PUT',
     body: JSON.stringify(coords)
+  });
+};
+
+export const updateOrderCourierStage = async (orderId: string, stage: string) => {
+  ensureApi();
+  await apiFetch(`/orders/${orderId}/courier-stage`, {
+    method: 'PUT',
+    body: JSON.stringify({ stage })
   });
 };
 

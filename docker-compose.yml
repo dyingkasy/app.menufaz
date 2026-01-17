@@ -24,6 +24,9 @@
         DATABASE_URL: postgres://menufaz:${POSTGRES_PASSWORD}@postgres:5432/menufaz
         JWT_SECRET: ${JWT_SECRET}
         CORS_ORIGIN: https://app.menufaz.com
+        IMAGEKIT_PRIVATE_KEY: ${IMAGEKIT_PRIVATE_KEY}
+        GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+        GEMINI_API_KEY: ${GEMINI_API_KEY}
       depends_on:
         - postgres
       restart: unless-stopped
@@ -37,7 +40,11 @@
       build:
         context: .
         args:
-          VITE_API_BASE_URL: https://app.menufaz.com/api
+          VITE_API_BASE_URL: /api
+          VITE_IMAGEKIT_PUBLIC_KEY: ${VITE_IMAGEKIT_PUBLIC_KEY}
+          VITE_IMAGEKIT_URL_ENDPOINT: ${VITE_IMAGEKIT_URL_ENDPOINT}
+          VITE_IMAGEKIT_FOLDER: ${VITE_IMAGEKIT_FOLDER}
+          VITE_GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
       depends_on:
         - api
       restart: unless-stopped
@@ -47,6 +54,26 @@
         timeout: 5s
         retries: 5
 
+    frontend-dev:
+      image: node:20-alpine
+      working_dir: /app
+      command: npm run dev -- --host 0.0.0.0 --port 3000
+      volumes:
+        - ./:/app
+        - /app/node_modules
+      environment:
+        VITE_API_BASE_URL: http://api:3001/api
+        VITE_IMAGEKIT_PUBLIC_KEY: ${VITE_IMAGEKIT_PUBLIC_KEY}
+        VITE_IMAGEKIT_URL_ENDPOINT: ${VITE_IMAGEKIT_URL_ENDPOINT}
+        VITE_IMAGEKIT_FOLDER: ${VITE_IMAGEKIT_FOLDER}
+        VITE_GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      depends_on:
+        - api
+      profiles:
+        - dev
+      ports:
+        - "3000:3000"
+
     caddy:
       image: caddy:2
       ports:
@@ -54,6 +81,7 @@
         - "443:443"
       volumes:
         - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+        - ./downloads:/srv/downloads:ro
         - caddy_data:/data
         - caddy_config:/config
       depends_on:

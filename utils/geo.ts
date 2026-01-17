@@ -2,7 +2,113 @@
 import { Coordinates, SearchResult } from '../types';
 
 export const GEO_API_ENABLED = true;
-const FALLBACK_COORDS: Coordinates = { lat: -23.561684, lng: -46.655981 };
+const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+const toNumber = (value: string | number | null | undefined) => {
+  const parsed = typeof value === 'string' ? Number.parseFloat(value) : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeQuery = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const mapNominatimAddress = (address: any, displayName = ''): AddressComponents => {
+  const street = address?.road || address?.pedestrian || address?.path || displayName.split(',')[0] || '';
+  const number = address?.house_number || '';
+  const district = address?.suburb || address?.neighbourhood || address?.quarter || '';
+  const city = address?.city || address?.town || address?.village || address?.municipality || '';
+  const state = address?.state || '';
+  let fullText = street;
+  if (number) fullText += `, ${number}`;
+  if (district) fullText += ` - ${district}`;
+  if (city) fullText += ` - ${city}`;
+  if (!fullText.trim()) fullText = displayName;
+  return { street, number, district, city, state, fullText };
+};
+
+const searchAddressFallback = async (query: string): Promise<SearchResult[]> => {
+  const url = `${NOMINATIM_BASE_URL}/search?format=jsonv2&addressdetails=1&limit=6&countrycodes=br&q=${encodeURIComponent(
+    query
+  )}`;
+  const response = await fetch(url, {
+    headers: { 'Accept-Language': 'pt-BR' }
+  });
+  const data = await response.json();
+  if (!Array.isArray(data)) return [];
+
+  return data.map((item: any) => {
+    const mapped = mapNominatimAddress(item.address, item.display_name || '');
+    const lat = toNumber(item.lat);
+    const lng = toNumber(item.lon);
+    if (lat === null || lng === null) return null;
+    return {
+      street: mapped.street,
+      district: mapped.district ? `${mapped.district}${mapped.city ? ` - ${mapped.city}` : ''}` : mapped.city,
+      fullAddress: mapped.fullText,
+      coordinates: {
+        lat,
+        lng
+      },
+      city: mapped.city,
+      state: mapped.state
+    };
+  }).filter(Boolean) as SearchResult[];
+};
+
+const reverseGeocodeFallback = async (lat: number, lng: number): Promise<AddressComponents | null> => {
+  const url = `${NOMINATIM_BASE_URL}/reverse?format=jsonv2&addressdetails=1&lat=${encodeURIComponent(
+    lat
+  )}&lon=${encodeURIComponent(lng)}`;
+  const response = await fetch(url, {
+    headers: { 'Accept-Language': 'pt-BR' }
+  });
+  const data = await response.json();
+  if (!data || !data.address) return null;
+  return mapNominatimAddress(data.address, data.display_name || '');
+};
+
+const searchAddressServer = async (query: string): Promise<SearchResult[]> => {
+  if (!API_BASE_URL) return [];
+  const response = await fetch(`${API_BASE_URL}/geocode/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) return [];
+  return response.json();
+};
+
+const reverseGeocodeServer = async (lat: number, lng: number): Promise<AddressComponents | null> => {
+  if (!API_BASE_URL) return null;
+  const response = await fetch(
+    `${API_BASE_URL}/geocode/reverse?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`
+  );
+  if (!response.ok) return null;
+  return response.json();
+};
+
+let googleMapsLoading: Promise<boolean> | null = null;
+
+export const ensureGoogleMapsLoaded = async (): Promise<boolean> => {
+  if (typeof window === 'undefined') return false;
+  if (window.google && window.google.maps) return true;
+  if (!GOOGLE_MAPS_API_KEY) return false;
+  if (!googleMapsLoading) {
+    googleMapsLoading = new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=places`;
+      script.async = true;
+      script.defer = true;
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.head.appendChild(script);
+    });
+  }
+  return googleMapsLoading;
+};
 
 // Haversine formula to calculate distance between two coords in KM
 export function calculateDistance(coord1: Coordinates, coord2: Coordinates): number {
@@ -127,8 +233,18 @@ export async function getReverseGeocoding(lat: number, lng: number): Promise<Add
     if (!GEO_API_ENABLED) return null;
 
     if (!window.google || !window.google.maps) {
-        console.error("Google Maps API not loaded");
-        return null;
+        await ensureGoogleMapsLoaded();
+    }
+
+    if (!window.google || !window.google.maps) {
+        try {
+            const serverResult = await reverseGeocodeServer(lat, lng);
+            if (serverResult) return serverResult;
+            return await reverseGeocodeFallback(lat, lng);
+        } catch (error) {
+            console.error("Reverse geocoding fallback failed", error);
+            return null;
+        }
     }
 
     const geocoder = new window.google.maps.Geocoder();
@@ -197,19 +313,54 @@ export async function searchAddress(query: string): Promise<SearchResult[]> {
     const normalized = query.trim();
     if (!normalized) return [];
     if (!GEO_API_ENABLED) {
-        return [
-            {
-                street: normalized,
-                district: '',
-                fullAddress: normalized,
-                coordinates: FALLBACK_COORDS,
-                city: '',
-                state: ''
-            }
-        ];
+        return [];
     }
 
-    if (!window.google || !window.google.maps) return [];
+    if (!window.google || !window.google.maps) {
+        await ensureGoogleMapsLoaded();
+    }
+
+    if (!window.google || !window.google.maps) {
+        try {
+            const serverResults = await searchAddressServer(query);
+            if (serverResults.length > 0) return serverResults;
+
+            const fallbackQueries = [];
+            const seen = new Set<string>();
+            const addQuery = (value: string) => {
+                const clean = value.trim();
+                if (!clean) return;
+                const key = clean.toLowerCase();
+                if (seen.has(key)) return;
+                seen.add(key);
+                fallbackQueries.push(clean);
+            };
+
+            const normalizedQuery = normalizeQuery(query);
+            addQuery(query);
+            if (normalizedQuery && normalizedQuery !== query) addQuery(normalizedQuery);
+            addQuery(`${query} Brasil`);
+            if (normalizedQuery && normalizedQuery !== query) addQuery(`${normalizedQuery} Brasil`);
+
+            const merged: SearchResult[] = [];
+            const seenResult = new Set<string>();
+            for (const fallbackQuery of fallbackQueries) {
+                const results = await searchAddressFallback(fallbackQuery);
+                for (const result of results) {
+                    const key = `${result.coordinates.lat},${result.coordinates.lng},${result.fullAddress}`;
+                    if (seenResult.has(key)) continue;
+                    seenResult.add(key);
+                    merged.push(result);
+                    if (merged.length >= 6) break;
+                }
+                if (merged.length >= 6) break;
+            }
+            return merged;
+        } catch (error) {
+            console.error("Search fallback failed", error);
+            return [];
+        }
+    }
 
     const geocoder = new window.google.maps.Geocoder();
 

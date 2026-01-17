@@ -1,0 +1,38 @@
+name: Menufaz Print Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: menufaz-print/package-lock.json
+
+      - name: Install dependencies
+        working-directory: menufaz-print
+        run: npm install --legacy-peer-deps
+
+      - name: Build installer
+        working-directory: menufaz-print
+        run: npm run dist
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: menufaz-print-installer
+          path: menufaz-print/dist/**/*.exe

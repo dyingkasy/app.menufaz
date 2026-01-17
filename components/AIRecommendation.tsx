@@ -5,12 +5,16 @@ import { getFoodRecommendation } from '../services/geminiService';
 
 interface AIRecommendationProps {
   onCategorySelect: (category: string) => void;
+  onProductSelect?: (storeId: string, productId: string) => void;
 }
 
-const AIRecommendation: React.FC<AIRecommendationProps> = ({ onCategorySelect }) => {
+const AIRecommendation: React.FC<AIRecommendationProps> = ({ onCategorySelect, onProductSelect }) => {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [suggestion, setSuggestion] = useState<string | null>(null);
+  const [recommendedProducts, setRecommendedProducts] = useState<
+    Array<{ productId: string; productName: string; storeId: string; storeName?: string }>
+  >([]);
 
   const handleAskAI = async () => {
     if (!prompt.trim()) return;
@@ -19,8 +23,9 @@ const AIRecommendation: React.FC<AIRecommendationProps> = ({ onCategorySelect })
     setSuggestion(null);
     
     const result = await getFoodRecommendation(prompt);
-    
+
     setSuggestion(result.suggestion);
+    setRecommendedProducts(result.recommendedProducts || []);
     if (result.recommendedCategory) {
       onCategorySelect(result.recommendedCategory);
     }
@@ -60,8 +65,21 @@ const AIRecommendation: React.FC<AIRecommendationProps> = ({ onCategorySelect })
         </div>
 
         {suggestion && (
-          <div className="mt-4 bg-white/10 backdrop-blur-md rounded-lg p-4 border border-white/20 animate-fade-in">
+          <div className="mt-4 bg-white/10 backdrop-blur-md rounded-lg p-4 border border-white/20 animate-fade-in space-y-3">
             <p className="font-medium text-lg">💡 {suggestion}</p>
+            {recommendedProducts.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {recommendedProducts.map((product) => (
+                  <button
+                    key={product.productId}
+                    onClick={() => onProductSelect && onProductSelect(product.storeId, product.productId)}
+                    className="px-3 py-1.5 rounded-full bg-white text-red-600 font-bold text-xs hover:bg-gray-100 transition-colors"
+                  >
+                    {product.productName}{product.storeName ? ` • ${product.storeName}` : ''}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

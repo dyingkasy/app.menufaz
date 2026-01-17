@@ -1,0 +1,32 @@
+{
+  "name": "menufaz-print",
+  "version": "0.1.0",
+  "description": "Menufaz Print - local Windows app for automatic order printing",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "printer": "^0.4.0"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.menufaz.print",
+    "productName": "Menufaz Print",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

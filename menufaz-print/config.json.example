@@ -1,0 +1,7 @@
+{
+  "merchantId": "YOUR_MERCHANT_ID",
+  "machineId": "",
+  "printToken": "",
+  "apiUrl": "http://localhost:3001",
+  "printerName": ""
+}

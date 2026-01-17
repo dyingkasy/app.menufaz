@@ -1,11 +1,26 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, MapPin, Heart, Share2, Sparkles, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
 import { Store, Product, CartItem, Review, PizzaFlavor } from '../types';
 import { getProductsByStore, getPizzaFlavorsByStore, getReviewsByStore, addReview } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
+import { imageKitUrl } from '../utils/imagekit';
 import StoreReviews from './StoreReviews';
 import { useAuth } from '../contexts/AuthContext';
+
+const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'] as const;
+const PIZZA_SIZE_ID_MAP: Record<string, string> = {
+    sizebrotinho: 'brotinho',
+    sizepequena: 'pequena',
+    sizemedia: 'media',
+    sizegrande: 'grande',
+    sizefamilia: 'familia'
+};
+const PRICING_STRATEGIES = [
+    { id: 'NORMAL', label: 'Normal' },
+    { id: 'PROPORCIONAL', label: 'Proporcional' },
+    { id: 'MAX', label: 'Maior sabor' }
+] as const;
 
 interface StoreDetailsProps {
   store: Store;
@@ -17,6 +32,10 @@ interface StoreDetailsProps {
   onOpenCart: () => void; 
   tableNumber?: string;
   onTrackTable?: () => void;
+  isFavorited?: boolean;
+  onToggleFavorite?: () => void;
+  initialProductId?: string;
+  onProductOpened?: () => void;
 }
 
 const StoreDetails: React.FC<StoreDetailsProps> = ({ 
@@ -26,11 +45,17 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     cartItems, 
     onOpenCart,
     tableNumber,
-    onTrackTable
+    onTrackTable,
+    isFavorited = false,
+    onToggleFavorite,
+    initialProductId,
+    onProductOpened
 }) => {
   const { user } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const productModalRef = useRef<HTMLDivElement | null>(null);
+  const scrollLockRef = useRef<{ top: number; bodyStyle: Partial<CSSStyleDeclaration>; htmlStyle: Partial<CSSStyleDeclaration>; rootStyle: Partial<CSSStyleDeclaration> } | null>(null);
   const [storeProducts, setStoreProducts] = useState<Product[]>([]);
   const [storeFlavors, setStoreFlavors] = useState<PizzaFlavor[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
@@ -72,10 +97,13 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const [quantity, setQuantity] = useState(1);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const [notes, setNotes] = useState('');
+  const [buildableStep, setBuildableStep] = useState(0);
+  const [buildableAlert, setBuildableAlert] = useState<string | null>(null);
 
   // Pizza State
   const [splitCount, setSplitCount] = useState(1);
-  const [selectedFlavorIds, setSelectedFlavorIds] = useState<(string | null)[]>([]); 
+  const [selectedFlavorIds, setSelectedFlavorIds] = useState<(string | null)[]>([]);
+  const [pricingStrategy, setPricingStrategy] = useState<'NORMAL' | 'PROPORCIONAL' | 'MAX'>('NORMAL');
   const [selectingFlavorIndex, setSelectingFlavorIndex] = useState<number | null>(null); 
 
   // Reviews
@@ -148,6 +176,26 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       return allowedFlavors.length > 0 ? allowedFlavors : activeStoreFlavors;
   }, [selectedProduct, storeFlavors]);
 
+  const normalizeSizeKey = (value: string) =>
+      value
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, '')
+          .trim();
+
+  const resolveSizeKey = (value: string) => {
+      const normalized = normalizeSizeKey(value);
+      if (PIZZA_SIZE_KEYS.includes(normalized as any)) return normalized;
+      if (PIZZA_SIZE_ID_MAP[normalized]) return PIZZA_SIZE_ID_MAP[normalized];
+      if (normalized.includes('brotinho')) return 'brotinho';
+      if (normalized.includes('pequena')) return 'pequena';
+      if (normalized.includes('media') || normalized.includes('medio')) return 'media';
+      if (normalized.includes('grande')) return 'grande';
+      if (normalized.includes('familia')) return 'familia';
+      return '';
+  };
+
   // --- HANDLERS ---
 
   const handleOpenProduct = (product: Product) => {
@@ -155,22 +203,213 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       setQuantity(1);
       setSelectedOptions({});
       setNotes('');
+      setBuildableStep(0);
+      setBuildableAlert(null);
       
       // Reset Pizza State
       setSplitCount(1);
-      setSelectedFlavorIds([null, null, null, null]); 
+      setSelectedFlavorIds([null, null, null, null, null]);
       setSelectingFlavorIndex(null);
+      const allowed = product.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX'];
+      const defaultStrategy = product.defaultPricingStrategy || allowed[0] || 'NORMAL';
+      setPricingStrategy(defaultStrategy);
   };
+
+  useEffect(() => {
+      if (!initialProductId) return;
+      if (storeProducts.length === 0) return;
+      const match = storeProducts.find((product) => product.id === initialProductId);
+      if (!match) return;
+      handleOpenProduct(match);
+      if (onProductOpened) onProductOpened();
+  }, [initialProductId, storeProducts]);
 
   const handleCloseProduct = () => {
       setSelectedProduct(null);
   };
 
+  useEffect(() => {
+      if (!selectedProduct) return;
+      const root = document.getElementById('root');
+      const scrollTop = window.scrollY || window.pageYOffset;
+      scrollLockRef.current = {
+          top: scrollTop,
+          bodyStyle: {
+              overflow: document.body.style.overflow,
+              position: document.body.style.position,
+              top: document.body.style.top,
+              width: document.body.style.width
+          },
+          htmlStyle: {
+              overflow: document.documentElement.style.overflow
+          },
+          rootStyle: {
+              overflow: root?.style.overflow
+          }
+      };
+
+      document.body.style.overflow = 'hidden';
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${scrollTop}px`;
+      document.body.style.width = '100%';
+      document.documentElement.style.overflow = 'hidden';
+      if (root) {
+          root.style.overflow = 'hidden';
+      }
+
+      const handleWheel = (event: WheelEvent) => {
+          const target = event.target as Node | null;
+          if (!target) return;
+          if (productModalRef.current && productModalRef.current.contains(target)) return;
+          event.preventDefault();
+      };
+      const handleTouchMove = (event: TouchEvent) => {
+          const target = event.target as Node | null;
+          if (!target) return;
+          if (productModalRef.current && productModalRef.current.contains(target)) return;
+          event.preventDefault();
+      };
+      window.addEventListener('wheel', handleWheel, { passive: false });
+      window.addEventListener('touchmove', handleTouchMove, { passive: false });
+      return () => {
+          window.removeEventListener('wheel', handleWheel);
+          window.removeEventListener('touchmove', handleTouchMove);
+          const lock = scrollLockRef.current;
+          document.body.style.overflow = lock?.bodyStyle.overflow || '';
+          document.body.style.position = lock?.bodyStyle.position || '';
+          document.body.style.top = lock?.bodyStyle.top || '';
+          document.body.style.width = lock?.bodyStyle.width || '';
+          document.documentElement.style.overflow = lock?.htmlStyle.overflow || '';
+          if (root) {
+              root.style.overflow = lock?.rootStyle.overflow || '';
+          }
+          if (lock) {
+              window.scrollTo(0, lock.top);
+          }
+          scrollLockRef.current = null;
+      };
+  }, [selectedProduct]);
+
+  const orderedOptionGroups = useMemo(() => {
+      if (!selectedProduct) return [];
+      return [...(selectedProduct.optionGroups || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
+  }, [selectedProduct]);
+
+  const sizeGroup = useMemo(() => {
+      if (!selectedProduct) return null;
+      return orderedOptionGroups.find(group => group.id === 'size-group' || /tamanho|gramatura/i.test(group.name));
+  }, [orderedOptionGroups, selectedProduct]);
+
+  const selectedSizeOption = useMemo(() => {
+      if (!sizeGroup) return null;
+      const sizeId = (selectedOptions[sizeGroup.id] || [])[0];
+      const option = sizeGroup.options.find(opt => opt.id === sizeId) || null;
+      if (option && option.isAvailable === false) return null;
+      return option;
+  }, [sizeGroup, selectedOptions]);
+
+  const selectedSizeKey = useMemo(() => {
+      if (selectedSizeOption?.id) {
+          const resolved = resolveSizeKey(selectedSizeOption.id);
+          if (resolved) return resolved;
+      }
+      if (selectedSizeOption?.name) {
+          const resolved = resolveSizeKey(selectedSizeOption.name);
+          if (resolved) return resolved;
+      }
+      return '';
+  }, [selectedSizeOption]);
+
+  const maxFlavorsAllowed = useMemo(() => {
+      if (!selectedProduct) return 1;
+      const maxBySize = selectedProduct.maxFlavorsBySize || {};
+      const maxFromSize = selectedSizeKey ? maxBySize[selectedSizeKey] : undefined;
+      const fallback = selectedProduct.maxFlavors || 1;
+      const resolved = Number(maxFromSize || fallback || 1);
+      return Math.max(1, Math.min(5, Number.isFinite(resolved) ? resolved : 1));
+  }, [selectedProduct, selectedSizeKey]);
+
+  useEffect(() => {
+      if (splitCount > maxFlavorsAllowed) {
+          setSplitCount(maxFlavorsAllowed);
+      }
+  }, [maxFlavorsAllowed, splitCount]);
+
+  useEffect(() => {
+      if (!selectedProduct?.isPizza) return;
+      if (!selectedSizeKey && !selectedSizeOption?.id) return;
+      setSelectedFlavorIds((prev) => {
+          let changed = false;
+          const next = prev.map((id) => {
+              if (!id) return null;
+              const flavor = validFlavorsForCurrentProduct.find((f) => f.id === id) || null;
+              if (!resolveFlavorPrice(flavor).found) {
+                  changed = true;
+                  return null;
+              }
+              return id;
+          });
+          return changed ? next : prev;
+      });
+  }, [selectedProduct, selectedSizeKey, selectedSizeOption?.id, validFlavorsForCurrentProduct]);
+
+  const effectivePricingStrategy = useMemo(() => {
+      if (!selectedProduct?.isPizza) return 'NORMAL';
+      const allowed = selectedProduct.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX'];
+      const defaultStrategy = selectedProduct.defaultPricingStrategy || allowed[0] || 'NORMAL';
+      if (selectedProduct.customerCanChoosePricingStrategy === false) {
+          return defaultStrategy;
+      }
+      return allowed.includes(pricingStrategy) ? pricingStrategy : defaultStrategy;
+  }, [selectedProduct, pricingStrategy]);
+
+  const resolveFlavorPrice = (flavor: PizzaFlavor | null) => {
+      if (!flavor) return { value: 0, found: false };
+      const prices = flavor.pricesBySize || {};
+      const resolvePriceKey = (key?: string) => {
+          if (!key) return '';
+          if (key in prices) return key;
+          const normalized = normalizeSizeKey(key);
+          const match = Object.keys(prices).find((candidate) => normalizeSizeKey(candidate) === normalized);
+          return match || '';
+      };
+      const pickPrice = (key?: string) => {
+          if (!key) return { value: 0, found: false };
+          const raw = (prices as Record<string, unknown>)[key];
+          if (raw === '' || raw === null || raw === undefined) return { value: 0, found: false };
+          const parsed = Number(raw);
+          return Number.isFinite(parsed) && parsed > 0 ? { value: parsed, found: true } : { value: 0, found: false };
+      };
+      const byKey = pickPrice(resolvePriceKey(selectedSizeKey));
+      if (byKey.found) return byKey;
+      const byOption = pickPrice(selectedSizeOption?.id);
+      if (byOption.found) return byOption;
+      return { value: 0, found: false };
+  };
+
+  const getFlavorPriceForSize = (flavorId: string) => {
+      const flavor = validFlavorsForCurrentProduct.find(f => f.id === flavorId) || null;
+      return resolveFlavorPrice(flavor).value;
+  };
+
+  const isBuildableFlow = !!(selectedProduct?.isBuildable || selectedProduct?.priceMode === 'BY_SIZE');
+  const useBuildableWizard = isBuildableFlow && orderedOptionGroups.length <= 1 && !selectedProduct?.isPizza;
+
   const handleOptionToggle = (groupId: string, optionId: string, max: number) => {
+      if (isBuildableFlow) {
+          setBuildableAlert(null);
+      }
       setSelectedOptions(prev => {
           const current = prev[groupId] || [];
           if (max === 1) {
-              if (current.includes(optionId)) return prev; 
+              if (current.includes(optionId)) {
+                  const next = current.filter(id => id !== optionId);
+                  if (next.length === 0) {
+                      const { [groupId]: _removed, ...rest } = prev;
+                      return rest;
+                  }
+                  return { ...prev, [groupId]: next };
+              }
               return { ...prev, [groupId]: [optionId] };
           }
           if (current.includes(optionId)) {
@@ -187,43 +426,107 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       if (!selectedProduct) return 0;
       
       let basePrice = selectedProduct.promoPrice || selectedProduct.price;
-      
-      if (selectedProduct.isPizza && splitCount > 1) {
-          const surcharge = selectedProduct.splitSurcharge || 0;
-          basePrice += surcharge;
+      let baseNormal = basePrice;
+
+      if (selectedProduct.priceMode === 'BY_SIZE' && sizeGroup) {
+          const sizeId = (selectedOptions[sizeGroup.id] || [])[0];
+          const sizeOption = sizeGroup.options.find(opt => opt.id === sizeId);
+          baseNormal = sizeOption ? sizeOption.price : 0;
+          basePrice = baseNormal;
+      }
+
+      if (selectedProduct.isPizza) {
+          const flavorIds = selectedFlavorIds.slice(0, splitCount).filter(Boolean) as string[];
+          const flavorPrices = flavorIds.map((id) => getFlavorPriceForSize(id));
+          const hasFlavorPrices = flavorPrices.length > 0;
+          const avgFlavorPrice = hasFlavorPrices
+              ? flavorPrices.reduce((sum, value) => sum + value, 0) / flavorPrices.length
+              : 0;
+          const maxFlavorPrice = hasFlavorPrices ? Math.max(...flavorPrices) : 0;
+
+          if (effectivePricingStrategy === 'PROPORCIONAL') {
+              basePrice = avgFlavorPrice > 0 ? avgFlavorPrice : baseNormal;
+          } else if (effectivePricingStrategy === 'MAX') {
+              basePrice = maxFlavorPrice > 0 ? maxFlavorPrice : baseNormal;
+          } else {
+              basePrice = baseNormal;
+          }
       }
       
       let optionsTotal = 0;
+      let extraChargeTotal = 0;
       selectedProduct.optionGroups.forEach(group => {
           const selectedIds = selectedOptions[group.id] || [];
           selectedIds.forEach(optId => {
               const opt = group.options.find(o => o.id === optId);
-              if (opt) optionsTotal += opt.price;
+              if (!opt) return;
+              if (!(selectedProduct.priceMode === 'BY_SIZE' && sizeGroup && group.id === sizeGroup.id)) {
+                  optionsTotal += opt.price;
+              }
           });
+          const extraAfter = group.extraChargeAfter || 0;
+          const extraAmount = group.extraChargeAmount || 0;
+          if (extraAmount > 0 && selectedIds.length > extraAfter) {
+              extraChargeTotal += (selectedIds.length - extraAfter) * extraAmount;
+          }
       });
       
-      return (basePrice + optionsTotal) * quantity;
+      return (basePrice + optionsTotal + extraChargeTotal) * quantity;
   };
 
   const handleConfirmAdd = () => {
       if (!selectedProduct) return;
+      const isBuildable = isBuildableFlow;
+      const reportValidation = (message: string) => {
+          if (isBuildable) {
+              setBuildableAlert(message);
+          } else {
+              alert(message);
+          }
+      };
 
       // Validate Pizza Splits
       if (selectedProduct.isPizza) {
+          if (splitCount > maxFlavorsAllowed) {
+              reportValidation(`Este tamanho permite até ${maxFlavorsAllowed} sabores.`);
+              return;
+          }
+          const chosenIds = selectedFlavorIds.slice(0, splitCount).filter(Boolean) as string[];
+          const uniqueIds = new Set(chosenIds);
+          if (uniqueIds.size !== chosenIds.length) {
+              reportValidation('Não é permitido repetir sabores.');
+              return;
+          }
           for(let i=0; i < splitCount; i++) {
               if (!selectedFlavorIds[i]) {
-                  if ((selectedProduct.maxFlavors || 1) > 1 || validFlavorsForCurrentProduct.length > 0) {
-                       alert(`Por favor, escolha o Sabor ${i+1}.`);
+                  if (maxFlavorsAllowed > 1 || validFlavorsForCurrentProduct.length > 0) {
+                       reportValidation(`Por favor, escolha o Sabor ${i+1}.`);
                        return;
                   }
               }
+          }
+          const missingFlavorPrice = chosenIds.some((id) => {
+              const flavor = validFlavorsForCurrentProduct.find((f) => f.id === id) || null;
+              return !resolveFlavorPrice(flavor).found;
+          });
+          if (missingFlavorPrice) {
+              reportValidation('Um ou mais sabores nao possuem preco para este tamanho.');
+              return;
+          }
+      }
+
+      if (selectedProduct.priceMode === 'BY_SIZE' && sizeGroup) {
+          const sizeSelected = (selectedOptions[sizeGroup.id] || []).length > 0;
+          if (!sizeSelected) {
+              reportValidation('Escolha um tamanho para continuar.');
+              return;
           }
       }
 
       for (const group of selectedProduct.optionGroups) {
           const selectedCount = (selectedOptions[group.id] || []).length;
           if (selectedCount < group.min) {
-              alert(`Por favor, selecione pelo menos ${group.min} opção(ões) em "${group.name}"`);
+              reportValidation(`Escolha mais ${group.min - selectedCount} opção(ões) em "${group.name}" para continuar.`);
               return;
           }
       }
@@ -237,10 +540,21 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                   optionsSummary.push({
                       groupName: group.name,
                       optionName: opt.name,
-                      price: opt.price
+                      price: (selectedProduct.priceMode === 'BY_SIZE' && sizeGroup && group.id === sizeGroup.id) ? 0 : opt.price
                   });
               }
           });
+          const extraAfter = group.extraChargeAfter || 0;
+          const extraAmount = group.extraChargeAmount || 0;
+          if (extraAmount > 0 && selectedIds.length > extraAfter) {
+              const extraCount = selectedIds.length - extraAfter;
+              const extraTotal = extraCount * extraAmount;
+              optionsSummary.push({
+                  groupName: group.name,
+                  optionName: `Adicional (${extraCount}x)`,
+                  price: extraTotal
+              });
+          }
       });
 
       // Construct Item Name
@@ -258,9 +572,29 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                   finalName = `${selectedProduct.name} (${splitCount} Sabores): ${selectedFlavorNames.join(' / ')}`;
               }
           }
+      } else if (selectedProduct.priceMode === 'BY_SIZE' && sizeGroup) {
+          const sizeId = (selectedOptions[sizeGroup.id] || [])[0];
+          const sizeOption = sizeGroup.options.find(opt => opt.id === sizeId);
+          if (sizeOption) {
+              finalName = `${selectedProduct.name} - ${sizeOption.name}`;
+          }
       }
 
       const productForCart = { ...selectedProduct, name: finalName };
+
+      const pizzaPayload = selectedProduct.isPizza
+          ? {
+              splitCount,
+              flavors: selectedFlavorIds
+                  .slice(0, splitCount)
+                  .filter(Boolean)
+                  .map((id) => ({ flavorId: id as string, fraction: 1 / splitCount })),
+              sizeKeyOrSizeOptionId: selectedSizeOption?.id || selectedSizeKey || undefined,
+              sizeKey: selectedSizeKey || undefined,
+              sizeOptionId: selectedSizeOption?.id || undefined,
+              pricingStrategySelected: effectivePricingStrategy
+          }
+          : undefined;
 
       const cartItem: CartItem = {
           id: Date.now().toString(),
@@ -268,7 +602,8 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
           quantity,
           options: optionsSummary,
           notes,
-          totalPrice: calculateTotal()
+          totalPrice: calculateTotal(),
+          ...(pizzaPayload ? { pizza: pizzaPayload } : {})
       };
 
       onAddToCart(cartItem);
@@ -301,92 +636,159 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       }
   };
 
+  const handleBuildableNext = () => {
+      if (!selectedProduct) return;
+      if (!isBuildableFlow) return;
+      setBuildableAlert(null);
+
+      const current = buildableCurrent;
+      if (current?.type === 'GROUP' && current.group) {
+          const selectedCount = (selectedOptions[current.group.id] || []).length;
+          if (selectedCount < current.group.min) {
+              setBuildableAlert(`Escolha mais ${current.group.min - selectedCount} opção(ões) para continuar.`);
+              return;
+          }
+      }
+
+      if (current?.type === 'REVIEW') {
+          handleConfirmAdd();
+          return;
+      }
+
+      setBuildableStep(prev => Math.min(prev + 1, buildableSteps.length - 1));
+  };
+
+  const handleBuildableBack = () => {
+      setBuildableAlert(null);
+      setBuildableStep(prev => Math.max(prev - 1, 0));
+  };
+
+  const buildableSteps = useMemo(() => {
+      if (!selectedProduct || !isBuildableFlow) return [];
+      const groupSteps = orderedOptionGroups.map(group => ({ type: 'GROUP' as const, group }));
+      return [...groupSteps, { type: 'NOTES' as const }, { type: 'REVIEW' as const }];
+  }, [isBuildableFlow, orderedOptionGroups, selectedProduct]);
+
+  const buildableCurrent = buildableSteps[buildableStep];
+
   return (
     <div className="bg-gray-50 dark:bg-slate-950 min-h-screen pb-24 font-sans">
         {/* Navbar */}
-        <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'bg-white dark:bg-slate-900 shadow-md py-2' : 'bg-transparent py-4'}`}>
+        <nav className={`fixed top-0 left-0 right-0 z-50 pointer-events-none transition-all duration-300 ${scrolled ? 'bg-white dark:bg-slate-900 shadow-md py-2' : 'bg-transparent py-4'}`}>
             <div className="max-w-5xl mx-auto px-4 flex justify-between items-center">
-                <button 
-                    onClick={onBack}
-                    className={`p-2 rounded-full transition-colors ${scrolled ? 'text-gray-700 dark:text-white hover:bg-gray-100 dark:hover:bg-slate-800' : 'bg-black/30 text-white hover:bg-black/50 backdrop-blur-md'}`}
-                >
-                    <ArrowLeft size={20} />
-                </button>
+                {scrolled ? (
+                    <button 
+                        onClick={onBack}
+                        className="pointer-events-auto flex items-center gap-2 px-3 py-2 rounded-full text-gray-700 dark:text-white hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
+                        aria-label="Voltar"
+                    >
+                        <ArrowLeft size={18} />
+                        <span className="text-sm font-bold">Voltar</span>
+                    </button>
+                ) : (
+                    <span />
+                )}
                 {scrolled && (
                     <span className="font-bold text-gray-800 dark:text-white truncate max-w-[200px] animate-fade-in">
                         {store.name}
                     </span>
                 )}
-                <div className="flex gap-2">
-                    <button className={`p-2 rounded-full transition-colors ${scrolled ? 'text-gray-700 dark:text-white hover:bg-gray-100 dark:hover:bg-slate-800' : 'bg-black/30 text-white hover:bg-black/50 backdrop-blur-md'}`}>
-                        <Search size={20} />
-                    </button>
-                </div>
+                <span />
             </div>
         </nav>
 
         {/* Hero Banner */}
-        <div className="relative bg-white dark:bg-slate-900 mb-4 pb-4">
-            <div className="h-[280px] md:h-[350px] w-full relative">
-                <img src={store.imageUrl} alt={store.name} className={`w-full h-full object-cover ${!store.isActive ? 'grayscale' : ''}`} />
-                <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-black/60" />
+        <div className="relative bg-white dark:bg-slate-900 mb-6 pb-4">
+            <div className="h-[260px] md:h-[340px] w-full relative overflow-hidden rounded-b-3xl">
+                {!scrolled && (
+                    <button
+                        onClick={onBack}
+                        className="absolute top-4 left-4 z-20 flex items-center gap-2 px-3 py-2 rounded-full bg-white/90 text-slate-700 shadow-lg hover:bg-white transition-colors"
+                        aria-label="Voltar"
+                    >
+                        <ArrowLeft size={18} />
+                        <span className="text-sm font-bold">Voltar</span>
+                    </button>
+                )}
+                {store.imageUrl ? (
+                    <img
+                        src={imageKitUrl(store.imageUrl, { width: 1280, quality: 70 })}
+                        alt={store.name}
+                        loading="eager"
+                        decoding="async"
+                        className={`w-full h-full object-cover login-blur-image ${!store.isActive ? 'grayscale' : ''}`}
+                    />
+                ) : (
+                    <div className="w-full h-full bg-gradient-to-br from-slate-200 via-slate-100 to-slate-50 dark:from-slate-800 dark:via-slate-900 dark:to-slate-950" />
+                )}
+                <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/70" />
             </div>
             
             <div className="max-w-5xl mx-auto px-4 relative -mt-16 md:-mt-20 z-10">
-                <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl p-6 border border-gray-100 dark:border-slate-800">
+                <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl rounded-3xl shadow-xl p-6 border border-gray-100 dark:border-slate-800">
                     <div className="flex justify-between items-start mb-4">
                         <div className="flex items-center gap-4">
                             {store.logoUrl && (
-                                <img
-                                    src={store.logoUrl}
-                                    alt={`Logo ${store.name}`}
-                                    className="w-14 h-14 rounded-full border border-white/80 shadow-md object-cover"
-                                />
+                                <div className="w-16 h-16 rounded-2xl bg-white dark:bg-slate-950 border border-white/80 shadow-md flex items-center justify-center p-2">
+                                    <img
+                                        src={imageKitUrl(store.logoUrl || '', { width: 160, quality: 70 })}
+                                        alt={`Logo ${store.name}`}
+                                        loading="lazy"
+                                        decoding="async"
+                                        className="w-full h-full object-contain"
+                                    />
+                                </div>
                             )}
-                            <h1 className="text-2xl md:text-4xl font-extrabold text-slate-800 dark:text-white leading-tight">
-                                {store.name}
-                            </h1>
+                            <div>
+                                <h1 className="text-2xl md:text-4xl font-extrabold text-slate-800 dark:text-white leading-tight">
+                                    {store.name}
+                                </h1>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">{store.category}</p>
+                            </div>
                         </div>
-                        <button className="p-2 bg-gray-50 dark:bg-slate-800 rounded-full text-gray-400 hover:text-red-500 transition-colors">
-                            <Heart size={24} />
+                        <button
+                            type="button"
+                            onClick={() => onToggleFavorite && onToggleFavorite()}
+                            className={`p-2 rounded-full transition-colors ${
+                                isFavorited
+                                    ? 'bg-red-600 text-white'
+                                    : 'bg-gray-50 dark:bg-slate-800 text-gray-400 hover:text-red-500'
+                            }`}
+                            aria-label={isFavorited ? 'Remover favorito' : 'Favoritar loja'}
+                        >
+                            <Heart size={22} fill={isFavorited ? 'currentColor' : 'none'} />
                         </button>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-y-2 gap-x-6 text-sm text-gray-600 dark:text-gray-300 mb-4">
+                    <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-sm text-gray-600 dark:text-gray-300 mb-4">
                          <span className={`flex items-center gap-1 font-bold px-2 py-0.5 rounded-lg ${ratingCount > 0 ? 'text-yellow-500 bg-yellow-50 dark:bg-yellow-900/20' : 'text-gray-400 bg-gray-100 dark:bg-slate-800'}`}>
                              <Star size={14} fill={ratingCount > 0 ? 'currentColor' : 'none'} /> {displayRating}
                          </span>
                          <span className="flex items-center gap-1">
-                             <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                             {store.category}
+                             <MapPin size={14} /> 2.4km
                          </span>
                          <span className="flex items-center gap-1">
-                             <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                             <MapPin size={14} /> 2.4km
+                             <Sparkles size={14} className="text-red-500" /> {store.isPopular ? 'Popular' : 'Alta avaliacao'}
                          </span>
                     </div>
 
-                    <div className="flex items-center gap-4 pt-4 border-t border-gray-100 dark:border-slate-800">
-                        <div className="flex-1">
-                            <p className="text-xs text-gray-400 uppercase font-bold mb-1">Entrega</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-4 border-t border-gray-100 dark:border-slate-800">
+                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                            <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Entrega</p>
                             <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
                                 <Clock size={16} className="text-gray-400" /> {store.deliveryTime}
                             </div>
                         </div>
                         {store.acceptsPickup && pickupTime && (
-                            <>
-                                <div className="w-px h-8 bg-gray-100 dark:bg-slate-800"></div>
-                                <div className="flex-1">
-                                    <p className="text-xs text-gray-400 uppercase font-bold mb-1">Retirada</p>
-                                    <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
-                                        <Clock size={16} className="text-gray-400" /> {pickupTime}
-                                    </div>
+                            <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                                <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Retirada</p>
+                                <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
+                                    <Clock size={16} className="text-gray-400" /> {pickupTime}
                                 </div>
-                            </>
+                            </div>
                         )}
-                        <div className="w-px h-8 bg-gray-100 dark:bg-slate-800"></div>
-                        <div className="flex-1">
-                            <p className="text-xs text-gray-400 uppercase font-bold mb-1">Taxa</p>
+                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                            <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Taxa</p>
                             <div className="font-bold text-green-600">
                                 {deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}
                             </div>
@@ -408,14 +810,15 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                             <p className="text-lg font-extrabold text-slate-800 dark:text-white">{tableNumber}</p>
                         </div>
                     </div>
-                    <button
-                        onClick={onTrackTable}
-                        className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold hover:opacity-90 shadow-sm"
-                    >
-                        Acompanhar mesa
-                    </button>
-                </div>
+                <button 
+                    onClick={onTrackTable}
+                    className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold hover:opacity-90 shadow-sm moving-border"
+                    style={{ '--moving-border-bg': '#0f172a' } as React.CSSProperties}
+                >
+                    Acompanhar mesa
+                </button>
             </div>
+        </div>
         )}
 
         {/* Sticky Categories */}
@@ -447,10 +850,67 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                     </div>
                 </div>
             )}
+
+            <div className="grid lg:grid-cols-[1.2fr,0.8fr] gap-4">
+                <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
+                    <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Buscar no cardápio</p>
+                    <div className="relative mt-4">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                        <input
+                            type="text"
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            placeholder="Digite o nome do produto"
+                            className="w-full pl-11 pr-4 py-3.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-white focus:ring-2 focus:ring-red-500 outline-none"
+                        />
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                        <span className="px-3 py-1.5 rounded-full text-xs font-bold border border-slate-200 bg-white text-slate-600">
+                            {displayProducts.length} itens encontrados
+                        </span>
+                        <span className="px-3 py-1.5 rounded-full text-xs font-bold border border-slate-200 bg-white text-slate-600">
+                            {categories.length} categorias
+                        </span>
+                    </div>
+                </div>
+                <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
+                    <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Resumo rápido</p>
+                    <div className="mt-4 space-y-3">
+                        <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
+                            <span>Entrega</span>
+                            <span className="font-bold text-slate-900 dark:text-white">{store.deliveryTime}</span>
+                        </div>
+                        {store.acceptsPickup && pickupTime && (
+                            <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
+                                <span>Retirada</span>
+                                <span className="font-bold text-slate-900 dark:text-white">{pickupTime}</span>
+                            </div>
+                        )}
+                        <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
+                            <span>Taxa</span>
+                            <span className="font-bold text-emerald-600">
+                                {deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
             
             {/* Products List */}
             {loadingProducts ? (
-                <div className="py-20 text-center text-gray-500">Carregando cardápio...</div>
+                <div className="grid md:grid-cols-2 gap-6">
+                    {Array.from({ length: 4 }).map((_, idx) => (
+                        <div key={idx} className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex gap-4">
+                            <div className="flex-1 space-y-3">
+                                <div className="h-4 w-2/3 rounded-full skeleton-shimmer" />
+                                <div className="h-3 w-full rounded-full skeleton-shimmer" />
+                                <div className="h-3 w-4/5 rounded-full skeleton-shimmer" />
+                                <div className="h-4 w-24 rounded-full skeleton-shimmer" />
+                            </div>
+                            <div className="w-32 h-32 rounded-xl skeleton-shimmer" />
+                        </div>
+                    ))}
+                </div>
             ) : (
                 categories.map(cat => {
                     const catProducts = displayProducts.filter(
@@ -494,9 +954,11 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                         <div className="w-32 h-32 flex-shrink-0 rounded-xl overflow-hidden relative bg-gray-100 dark:bg-slate-800">
                                             {product.imageUrl ? (
                                                 <img 
-                                                    src={product.imageUrl} 
+                                                    src={imageKitUrl(product.imageUrl, { width: 640, quality: 70 })} 
                                                     alt={product.name} 
-                                                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" 
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500 login-blur-image" 
                                                 />
                                             ) : (
                                                 <div className="w-full h-full flex items-center justify-center text-gray-300">
@@ -527,7 +989,8 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
             <div className="fixed bottom-6 left-0 w-full px-4 z-40 pointer-events-none">
                 <button 
                     onClick={onOpenCart}
-                    className="pointer-events-auto w-full max-w-3xl mx-auto bg-red-600 hover:bg-red-700 text-white p-4 rounded-2xl shadow-xl shadow-red-900/30 flex justify-between items-center font-bold transform hover:-translate-y-1 transition-all"
+                    className="pointer-events-auto w-full max-w-3xl mx-auto bg-red-600 hover:bg-red-700 text-white p-4 rounded-2xl shadow-xl shadow-red-900/30 flex justify-between items-center font-bold transform hover:-translate-y-1 transition-all moving-border"
+                    style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
                 >
                     <div className="flex items-center gap-3">
                         <div className="bg-red-800 w-8 h-8 rounded-full flex items-center justify-center text-xs animate-bounce-subtle">
@@ -547,194 +1010,426 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
         {selectedProduct && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-6">
                 <div className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fade-in" onClick={handleCloseProduct} />
-                <div className="bg-white dark:bg-slate-900 w-full max-w-xl max-h-[90vh] rounded-3xl relative z-10 flex flex-col overflow-hidden animate-scale-in shadow-2xl">
+                <div
+                    ref={productModalRef}
+                    className="bg-white dark:bg-slate-900 w-full max-w-xl max-h-[90vh] rounded-3xl relative z-10 flex flex-col overflow-hidden animate-scale-in shadow-2xl min-h-0 overscroll-contain"
+                    onWheel={(event) => event.stopPropagation()}
+                >
                     
                     {/* Main Scroll Area */}
-                    <div className="flex-1 overflow-y-auto scrollbar-hide relative">
+                    <div className="flex-1 overflow-y-auto scrollbar-hide relative min-h-0 overscroll-contain">
                          {/* Image Header */}
                          <div className="relative h-64">
-                            <img src={selectedProduct.imageUrl} alt={selectedProduct.name} className="w-full h-full object-cover" />
+                            <img
+                                src={imageKitUrl(selectedProduct.imageUrl, { width: 960, quality: 75 })}
+                                alt={selectedProduct.name}
+                                loading="eager"
+                                decoding="async"
+                                className="w-full h-full object-cover login-blur-image"
+                            />
                             <button 
                                 onClick={handleCloseProduct} 
-                                className="absolute top-4 right-4 bg-white/20 backdrop-blur-md text-white hover:bg-white/40 p-2 rounded-full transition-colors"
+                                className="absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white p-2 rounded-full transition-colors shadow-lg"
+                                aria-label="Fechar"
                             >
                                 <X size={20}/>
                             </button>
                          </div>
                          
                          <div className="p-6 -mt-6 bg-white dark:bg-slate-900 rounded-t-3xl relative z-10">
-                             <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
-                             <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 leading-relaxed">{selectedProduct.description}</p>
-                             
-                             <div className="flex items-center justify-between mb-8 p-4 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900/30">
-                                 <span className="text-sm font-bold text-green-800 dark:text-green-400">Preço do item</span>
-                                 <span className="text-2xl font-extrabold text-green-600">
-                                     {formatCurrencyBRL(calculateTotal())}
-                                 </span>
-                             </div>
-
-                             {/* PIZZA FLAVOR CONFIGURATION */}
-                             {selectedProduct.isPizza && (
-                                 <div className="mb-8 animate-fade-in bg-orange-50 dark:bg-orange-900/10 p-5 rounded-2xl border border-orange-100 dark:border-orange-900/30">
-                                     <div className="flex justify-between items-center mb-4">
-                                         <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2 text-lg">
-                                             <Slice size={20} className="text-orange-500"/> Dividir Pizza
-                                         </h3>
+                             {useBuildableWizard ? (
+                                 <div className="space-y-6">
+                                     <div>
+                                         <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
+                                         <p className="text-gray-500 dark:text-gray-400 text-sm leading-relaxed">{selectedProduct.description}</p>
                                      </div>
 
-                                     {/* PIZZA VISUALIZATION FOR CUSTOMER */}
-                                     <div className="flex justify-center mb-6">
-                                         <div className="w-32 h-32">
-                                              <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
-                                                  <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
-                                                  {splitCount >= 2 && <line x1="50" y1="2" x2="50" y2="98" stroke="#333" strokeWidth="2" />}
-                                                  {splitCount === 3 && (
-                                                      <>
-                                                          <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
-                                                          <line x1="50" y1="50" x2="50" y2="2" stroke="#333" strokeWidth="2" />
-                                                          <line x1="50" y1="50" x2="91.5" y2="74" stroke="#333" strokeWidth="2" />
-                                                          <line x1="50" y1="50" x2="8.5" y2="74" stroke="#333" strokeWidth="2" />
-                                                      </>
-                                                  )}
-                                                  {splitCount === 4 && <line x1="2" y1="50" x2="98" y2="50" stroke="#333" strokeWidth="2" />}
-                                                  <circle cx="50" cy="50" r="42" fill="none" stroke="#ddd" strokeWidth="1" strokeDasharray="4 2" />
-                                              </svg>
-                                         </div>
+                                     <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
+                                         {buildableSteps.map((step, idx) => (
+                                             <span
+                                                 key={`buildable-step-${idx}`}
+                                                 className={`px-3 py-1 rounded-full border ${idx === buildableStep ? 'border-emerald-500 text-emerald-700 bg-emerald-50' : 'border-slate-200 text-slate-400'}`}
+                                             >
+                                                 {step.type === 'GROUP' && step.group ? step.group.name : step.type === 'NOTES' ? 'Observações' : 'Revisão'}
+                                             </span>
+                                         ))}
                                      </div>
-                                     
-                                     {/* Selector Buttons (Only show up to maxFlavors) */}
-                                     {(selectedProduct.maxFlavors || 1) > 1 && (
-                                         <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-                                             {[1, 2, 3, 4].filter(n => n <= (selectedProduct.maxFlavors || 1)).map(n => (
-                                                 <button
-                                                     key={n}
-                                                     onClick={() => {
-                                                         setSplitCount(n);
-                                                         const newFlavorIds = [...selectedFlavorIds];
-                                                         for(let i=1; i<4; i++) newFlavorIds[i] = null;
-                                                         setSelectedFlavorIds(newFlavorIds);
-                                                     }}
-                                                     className={`flex-1 min-w-[80px] py-3 rounded-xl font-bold text-sm border transition-all ${
-                                                         splitCount === n 
-                                                         ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-500/20 transform scale-105' 
-                                                         : 'bg-white dark:bg-slate-800 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
-                                                     }`}
-                                                 >
-                                                     {n === 1 ? '1 Sabor' : `${n} Sabores`}
-                                                 </button>
-                                             ))}
+
+                                     {buildableCurrent?.type === 'GROUP' && buildableCurrent.group && (() => {
+                                         const group = buildableCurrent.group;
+                                         const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
+                                         const filteredOptions = isSizeGroup
+                                             ? group.options.filter((opt) => opt.isAvailable !== false)
+                                             : group.options;
+                                         const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
+                                         const minRequired = group.min > 0 ? group.min : 0;
+                                         const selectedCount = (selectedOptions[group.id] || []).length;
+                                         const remainingMin = Math.max(minRequired - selectedCount, 0);
+                                         const isMaxed = selectedCount >= maxAllowed;
+                                         const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
+                                         return (
+                                             <div className="space-y-4">
+                                                 <div className="flex flex-wrap items-center justify-between gap-2 bg-emerald-50 dark:bg-emerald-900/10 p-4 rounded-2xl border border-emerald-100 dark:border-emerald-900/30">
+                                                     <div>
+                                                         <h3 className="text-lg font-extrabold text-emerald-700 dark:text-emerald-400">{group.name}</h3>
+                                                         <p className="text-xs text-emerald-600/80">
+                                                             {maxAllowed === 1 ? 'Escolha 1 opção' : `Você escolheu ${selectedCount} de ${maxAllowed}`}
+                                                         </p>
+                                                         {remainingMin > 0 && (
+                                                             <p className="text-xs text-emerald-700 mt-1">Escolha mais {remainingMin} para continuar.</p>
+                                                         )}
+                                                         {maxAllowed === 1 && selectedCount > 0 && (
+                                                             <p className="text-xs text-emerald-700/90 mt-1">Toque novamente para desmarcar.</p>
+                                                         )}
+                                                     </div>
+                                                     {minRequired > 0 && (
+                                                         <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-1 rounded font-bold uppercase">
+                                                             Obrigatório
+                                                         </span>
+                                                     )}
+                                                 </div>
+
+                                                 {group.extraChargeAmount && group.extraChargeAfter !== undefined && group.extraChargeAfter > 0 && (
+                                                     <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-3 rounded-lg">
+                                                         <Info size={14} />
+                                                         <span>Acima de {group.extraChargeAfter} itens: +{formatCurrencyBRL(group.extraChargeAmount)} cada.</span>
+                                                     </div>
+                                                 )}
+
+                                                 <div className="space-y-3">
+                                                     {orderedOptions.map(opt => {
+                                                         const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
+                                                         const isDisabled = !isSelected && isMaxed && maxAllowed > 1;
+                                                         return (
+                                                             <div 
+                                                                key={opt.id} 
+                                                                onClick={() => opt.isAvailable && !isDisabled && handleOptionToggle(group.id, opt.id, maxAllowed)}
+                                                                className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 ring-1 ring-emerald-400' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable || isDisabled ? 'opacity-50 pointer-events-none grayscale' : ''}`}
+                                                             >
+                                                                 <div className="flex items-center gap-4">
+                                                                     <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-emerald-500' : 'border-gray-300 dark:border-slate-600'}`}>
+                                                                         {isSelected && <Check size={14} className="text-emerald-600" />}
+                                                                     </div>
+                                                                     <div className="flex flex-col">
+                                                                         <span className={`font-bold text-sm ${isSelected ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
+                                                                         {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
+                                                                     </div>
+                                                                 </div>
+                                                                 <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                                                                    {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
+                                                                 </span>
+                                                             </div>
+                                                         );
+                                                     })}
+                                                 </div>
+                                             </div>
+                                         );
+                                     })()}
+
+                                     {buildableCurrent?.type === 'NOTES' && (
+                                         <div className="space-y-4">
+                                             <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                                 <h3 className="font-bold text-slate-800 dark:text-white">Observações</h3>
+                                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Opcional. Ex: sem cebola, bem passado.</p>
+                                             </div>
+                                             <textarea 
+                                                value={notes}
+                                                onChange={(e) => setNotes(e.target.value)}
+                                                placeholder="Ex: Tirar a cebola, maionese à parte..."
+                                                className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm dark:text-white transition-all"
+                                                rows={4}
+                                             />
                                          </div>
                                      )}
 
-                                     {/* Flavor Slots */}
-                                     <div className="space-y-3">
-                                         {Array.from({ length: splitCount }).map((_, idx) => {
-                                             const flavorId = selectedFlavorIds[idx];
-                                             const flavor = flavorId ? storeFlavors.find(f => f.id === flavorId) : null;
-                                             
-                                             return (
-                                                 <div key={idx} className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
-                                                     <div className="w-8 h-8 bg-orange-100 dark:bg-orange-900/20 text-orange-600 rounded-full flex items-center justify-center font-bold text-sm">
-                                                         {idx + 1}
+                                     {buildableCurrent?.type === 'REVIEW' && (
+                                         <div className="space-y-4">
+                                             <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                                 <h3 className="font-bold text-slate-800 dark:text-white">Revisão rápida</h3>
+                                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Confirme itens, adicionais e prazo antes de continuar.</p>
+                                             </div>
+
+                                             <div className="space-y-3">
+                                                 {orderedOptionGroups.map(group => {
+                                                     const selectedIds = selectedOptions[group.id] || [];
+                                                     if (selectedIds.length === 0) return null;
+                                                     return (
+                                                         <div key={`review-${group.id}`} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+                                                             <p className="text-xs font-bold text-slate-500 uppercase">{group.name}</p>
+                                                             <div className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-200">
+                                                                 {selectedIds.map(optId => {
+                                                                     const opt = group.options.find(option => option.id === optId);
+                                                                     if (!opt) return null;
+                                                                     return (
+                                                                         <div key={optId} className="flex items-center justify-between">
+                                                                             <span>{opt.name}</span>
+                                                                             <span className="text-slate-500">{opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}</span>
+                                                                         </div>
+                                                                     );
+                                                                 })}
+                                                             </div>
+                                                         </div>
+                                                     );
+                                                 })}
+                                             </div>
+
+                                             {notes && (
+                                                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+                                                     <p className="text-xs font-bold text-slate-500 uppercase">Observações</p>
+                                                     <p className="text-sm text-slate-700 dark:text-slate-200 mt-2">{notes}</p>
+                                                 </div>
+                                             )}
+
+                                             <div className="bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-100 dark:border-emerald-900/30 rounded-2xl p-4 text-sm text-emerald-800 dark:text-emerald-200 space-y-2">
+                                                 <div className="flex items-center justify-between">
+                                                     <span>Previsão</span>
+                                                     <span className="font-bold">{store.deliveryTime || store.pickupTime || 'Consultar loja'}</span>
+                                                 </div>
+                                                 <div className="flex items-center justify-between">
+                                                     <span>Entrega</span>
+                                                     <span className="font-bold">{deliveryFee > 0 ? formatCurrencyBRL(deliveryFee) : 'Grátis'}</span>
+                                                 </div>
+                                                 {store.minOrderValue ? (
+                                                     <div className="flex items-center justify-between">
+                                                         <span>Pedido mínimo</span>
+                                                         <span className="font-bold">{formatCurrencyBRL(store.minOrderValue)}</span>
                                                      </div>
-                                                     <div className="flex-1">
-                                                         <p className="text-xs text-gray-400 uppercase font-bold mb-0.5">Sabor {idx + 1}</p>
-                                                         {flavor ? (
-                                                             <p className="font-bold text-slate-800 dark:text-white">{flavor.name}</p>
-                                                         ) : (
-                                                             <p className="text-slate-400 italic">Selecione um sabor...</p>
+                                                 ) : null}
+                                             </div>
+                                         </div>
+                                     )}
+
+                                     {buildableAlert && (
+                                         <div className="p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
+                                             {buildableAlert}
+                                         </div>
+                                     )}
+                                 </div>
+                             ) : (
+                                 <>
+                                     <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
+                                     <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 leading-relaxed">{selectedProduct.description}</p>
+                                     
+                                     <div className="flex items-center justify-between mb-8 p-4 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900/30">
+                                         <span className="text-sm font-bold text-green-800 dark:text-green-400">Preço do item</span>
+                                         <span className="text-2xl font-extrabold text-green-600">
+                                             {formatCurrencyBRL(calculateTotal())}
+                                         </span>
+                                     </div>
+
+                                     {/* PIZZA FLAVOR CONFIGURATION */}
+                                     {selectedProduct.isPizza && (
+                                         <div className="mb-8 animate-fade-in bg-orange-50 dark:bg-orange-900/10 p-5 rounded-2xl border border-orange-100 dark:border-orange-900/30">
+                                             <div className="flex justify-between items-center mb-4">
+                                                 <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2 text-lg">
+                                                     <Slice size={20} className="text-orange-500"/> Dividir Pizza
+                                                 </h3>
+                                             </div>
+
+                                             {/* PIZZA VISUALIZATION FOR CUSTOMER */}
+                                             <div className="flex justify-center mb-6">
+                                                 <div className="w-32 h-32">
+                                                      <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
+                                                          <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
+                                                          {splitCount >= 2 && <line x1="50" y1="2" x2="50" y2="98" stroke="#333" strokeWidth="2" />}
+                                                          {splitCount === 3 && (
+                                                              <>
+                                                                  <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
+                                                                  <line x1="50" y1="50" x2="50" y2="2" stroke="#333" strokeWidth="2" />
+                                                                  <line x1="50" y1="50" x2="91.5" y2="74" stroke="#333" strokeWidth="2" />
+                                                                  <line x1="50" y1="50" x2="8.5" y2="74" stroke="#333" strokeWidth="2" />
+                                                              </>
+                                                          )}
+                                                          {splitCount >= 4 && <line x1="2" y1="50" x2="98" y2="50" stroke="#333" strokeWidth="2" />}
+                                                          <circle cx="50" cy="50" r="42" fill="none" stroke="#ddd" strokeWidth="1" strokeDasharray="4 2" />
+                                                      </svg>
+                                                 </div>
+                                             </div>
+                                             
+                                             {/* Selector Buttons (Only show up to maxFlavors) */}
+                                             {maxFlavorsAllowed > 1 && (
+                                                 <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+                                                     {[1, 2, 3, 4, 5].filter(n => n <= maxFlavorsAllowed).map(n => (
+                                                         <button
+                                                             key={n}
+                                                             onClick={() => {
+                                                                 setSplitCount(n);
+                                                                 const newFlavorIds = [...selectedFlavorIds];
+                                                                 for(let i=n; i<5; i++) newFlavorIds[i] = null;
+                                                                 setSelectedFlavorIds(newFlavorIds);
+                                                             }}
+                                                             className={`flex-1 min-w-[80px] py-3 rounded-xl font-bold text-sm border transition-all ${
+                                                                 splitCount === n 
+                                                                 ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-500/20 transform scale-105' 
+                                                                 : 'bg-white dark:bg-slate-800 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
+                                                             }`}
+                                                         >
+                                                             {n === 1 ? '1 Sabor' : `${n} Sabores`}
+                                                         </button>
+                                                     ))}
+                                                 </div>
+                                             )}
+
+                                             {selectedProduct.customerCanChoosePricingStrategy !== false && (
+                                                 <div className="mb-6 bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+                                                     <p className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-3">Regra de preco</p>
+                                                     <div className="flex flex-wrap gap-2">
+                                                         {(selectedProduct.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX']).map((strategy) => (
+                                                             <button
+                                                                 key={strategy}
+                                                                 onClick={() => setPricingStrategy(strategy)}
+                                                                 className={`px-3 py-2 rounded-full text-xs font-bold border transition-all ${
+                                                                     effectivePricingStrategy === strategy
+                                                                         ? 'bg-orange-600 text-white border-orange-600'
+                                                                         : 'bg-white dark:bg-slate-900 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
+                                                                 }`}
+                                                             >
+                                                                 {PRICING_STRATEGIES.find((item) => item.id === strategy)?.label || strategy}
+                                                             </button>
+                                                         ))}
+                                                     </div>
+                                                 </div>
+                                             )}
+
+                                             {/* Flavor Slots */}
+                                             <div className="space-y-3">
+                                                 {Array.from({ length: splitCount }).map((_, idx) => {
+                                                     const flavorId = selectedFlavorIds[idx];
+                                                     const flavor = flavorId ? storeFlavors.find(f => f.id === flavorId) : null;
+                                                     const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                                     const resolvedPrice = flavor ? resolveFlavorPrice(flavor) : { value: 0, found: false };
+                                                     
+                                                     return (
+                                                         <div key={idx} className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
+                                                             <div className="w-8 h-8 bg-orange-100 dark:bg-orange-900/20 text-orange-600 rounded-full flex items-center justify-center font-bold text-sm">
+                                                                 {idx + 1}
+                                                             </div>
+                                                             <div className="flex-1">
+                                                                 <p className="text-xs text-gray-400 uppercase font-bold mb-0.5">Sabor {idx + 1}</p>
+                                                                 {flavor ? (
+                                                                     <p className="font-bold text-slate-800 dark:text-white">
+                                                                         {flavor.name}
+                                                                         {sizeSelected && (
+                                                                             <span className="text-sm font-semibold text-slate-500 dark:text-slate-300">
+                                                                                 {' — '}
+                                                                                 {resolvedPrice.found ? formatCurrencyBRL(resolvedPrice.value) : 'Indisponivel para este tamanho'}
+                                                                             </span>
+                                                                         )}
+                                                                     </p>
+                                                                 ) : (
+                                                                     <p className="text-slate-400 italic">Selecione um sabor...</p>
+                                                                 )}
+                                                             </div>
+                                                             <button 
+                                                                 onClick={() => setSelectingFlavorIndex(idx)}
+                                                                 className="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-orange-100 hover:text-orange-700 text-slate-600 dark:text-slate-300 text-xs font-bold rounded-lg transition-colors"
+                                                             >
+                                                                 {flavor ? 'Trocar' : 'Escolher'}
+                                                             </button>
+                                                         </div>
+                                                     );
+                                                 })}
+                                             </div>
+                                             
+                                             {splitCount > 1 && (
+                                                 <div className="mt-4 flex items-center gap-2 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 p-2 rounded-lg">
+                                                     <Info size={14} />
+                                                    <span>Divida os sabores sem custo adicional.</span>
+                                                 </div>
+                                             )}
+                                         </div>
+                                     )}
+
+                                     {/* Visual Separator */}
+                                     {orderedOptionGroups.length > 0 && (
+                                         <div className="flex items-center gap-4 mb-6">
+                                             <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
+                                             <h4 className="font-bold text-gray-400 uppercase text-xs flex items-center gap-2">
+                                                 <Layers size={14}/> Adicionais
+                                             </h4>
+                                             <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
+                                         </div>
+                                     )}
+
+                                     {/* Options Groups */}
+                                     <div className="space-y-8">
+                                         {orderedOptionGroups.map(group => {
+                                             const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
+                                             const filteredOptions = isSizeGroup
+                                                 ? group.options.filter((opt) => opt.isAvailable !== false)
+                                                 : group.options;
+                                             const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
+                                             const selectedCount = (selectedOptions[group.id] || []).length;
+                                             const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
+                                             return (
+                                                 <div key={group.id}>
+                                                     <div className="flex justify-between items-end mb-4 bg-gray-50 dark:bg-slate-800 p-3 rounded-lg">
+                                                         <div>
+                                                             <h3 className="font-bold text-slate-800 dark:text-white text-base uppercase tracking-wide">{group.name}</h3>
+                                                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                 {maxAllowed === 1 ? 'Selecione 1 opção' : `Selecione até ${maxAllowed} opções`}
+                                                             </p>
+                                                             {maxAllowed === 1 && selectedCount > 0 && (
+                                                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Toque novamente para desmarcar.</p>
+                                                             )}
+                                                         </div>
+                                                         {group.min > 0 && (
+                                                             <span className="text-[10px] bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-gray-300 px-2 py-1 rounded font-bold uppercase">
+                                                                 Obrigatório
+                                                             </span>
                                                          )}
                                                      </div>
-                                                     <button 
-                                                         onClick={() => setSelectingFlavorIndex(idx)}
-                                                         className="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-orange-100 hover:text-orange-700 text-slate-600 dark:text-slate-300 text-xs font-bold rounded-lg transition-colors"
-                                                     >
-                                                         {flavor ? 'Trocar' : 'Escolher'}
-                                                     </button>
+                                                     
+                                                     <div className="space-y-3">
+                                                         {orderedOptions.map(opt => {
+                                                             const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
+                                                             return (
+                                                                 <div 
+                                                                    key={opt.id} 
+                                                                    onClick={() => opt.isAvailable && handleOptionToggle(group.id, opt.id, maxAllowed)}
+                                                                    className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-red-500 bg-red-50 dark:bg-red-900/10 ring-1 ring-red-500' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable ? 'opacity-50 pointer-events-none grayscale' : ''}`}
+                                                                 >
+                                                                     <div className="flex items-center gap-4">
+                                                                         <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-red-500' : 'border-gray-300 dark:border-slate-600'}`}>
+                                                                             {isSelected && <div className="w-3 h-3 bg-red-500 rounded-full" />}
+                                                                         </div>
+                                                                         <div className="flex flex-col">
+                                                                             <span className={`font-bold text-sm ${isSelected ? 'text-red-700 dark:text-red-400' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
+                                                                             {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
+                                                                         </div>
+                                                                     </div>
+                                                                     <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                                                                        {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
+                                                                     </span>
+                                                                 </div>
+                                                             );
+                                                         })}
+                                                     </div>
                                                  </div>
                                              );
                                          })}
                                      </div>
-                                     
-                                     {splitCount > 1 && selectedProduct.splitSurcharge && (
-                                         <div className="mt-4 flex items-center gap-2 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 p-2 rounded-lg">
-                                             <Info size={14} />
-                                            <span>Acréscimo de {formatCurrencyBRL(selectedProduct.splitSurcharge)} por divisão</span>
+
+                                     {isBuildableFlow && buildableAlert && (
+                                         <div className="mt-6 p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
+                                             {buildableAlert}
                                          </div>
                                      )}
-                                 </div>
-                             )}
 
-                             {/* Visual Separator */}
-                             {selectedProduct.optionGroups && selectedProduct.optionGroups.length > 0 && (
-                                 <div className="flex items-center gap-4 mb-6">
-                                     <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
-                                     <h4 className="font-bold text-gray-400 uppercase text-xs flex items-center gap-2">
-                                         <Layers size={14}/> Adicionais
-                                     </h4>
-                                     <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
-                                 </div>
-                             )}
-
-                             {/* Options Groups */}
-                             <div className="space-y-8">
-                                 {selectedProduct.optionGroups?.map(group => (
-                                     <div key={group.id}>
-                                         <div className="flex justify-between items-end mb-4 bg-gray-50 dark:bg-slate-800 p-3 rounded-lg">
-                                             <div>
-                                                 <h3 className="font-bold text-slate-800 dark:text-white text-base uppercase tracking-wide">{group.name}</h3>
-                                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                                                     {group.max === 1 ? 'Selecione 1 opção' : `Selecione até ${group.max} opções`}
-                                                 </p>
-                                             </div>
-                                             {group.min > 0 && (
-                                                 <span className="text-[10px] bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-gray-300 px-2 py-1 rounded font-bold uppercase">
-                                                     Obrigatório
-                                                 </span>
-                                             )}
-                                         </div>
-                                         
-                                         <div className="space-y-3">
-                                             {group.options.map(opt => {
-                                                 const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
-                                                 return (
-                                                     <div 
-                                                        key={opt.id} 
-                                                        onClick={() => opt.isAvailable && handleOptionToggle(group.id, opt.id, group.max)}
-                                                        className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-red-500 bg-red-50 dark:bg-red-900/10 ring-1 ring-red-500' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable ? 'opacity-50 pointer-events-none grayscale' : ''}`}
-                                                     >
-                                                         <div className="flex items-center gap-4">
-                                                             <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-red-500' : 'border-gray-300 dark:border-slate-600'}`}>
-                                                                 {isSelected && <div className="w-3 h-3 bg-red-500 rounded-full" />}
-                                                             </div>
-                                                             <div className="flex flex-col">
-                                                                 <span className={`font-bold text-sm ${isSelected ? 'text-red-700 dark:text-red-400' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
-                                                                 {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
-                                                             </div>
-                                                         </div>
-                                                         <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                                                            {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
-                                                         </span>
-                                                     </div>
-                                                 );
-                                             })}
-                                         </div>
+                                     <div className="mt-8">
+                                         <label className="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-gray-300 mb-3">
+                                             <Info size={16} className="text-gray-400" /> Alguma observação?
+                                         </label>
+                                         <textarea 
+                                            value={notes}
+                                            onChange={(e) => setNotes(e.target.value)}
+                                            placeholder="Ex: Tirar a cebola, maionese à parte..."
+                                            className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 text-sm dark:text-white transition-all"
+                                            rows={3}
+                                         />
                                      </div>
-                                 ))}
-                             </div>
-
-                             <div className="mt-8">
-                                 <label className="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-gray-300 mb-3">
-                                     <Info size={16} className="text-gray-400" /> Alguma observação?
-                                 </label>
-                                 <textarea 
-                                    value={notes}
-                                    onChange={(e) => setNotes(e.target.value)}
-                                    placeholder="Ex: Tirar a cebola, maionese à parte..."
-                                    className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 text-sm dark:text-white transition-all"
-                                    rows={3}
-                                 />
-                             </div>
+                                 </>
+                             )}
                          </div>
                     </div>
 
@@ -751,8 +1446,17 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                 {validFlavorsForCurrentProduct.map(flavor => (
                                     <div 
                                         key={flavor.id}
-                                        onClick={() => handleSelectFlavor(flavor.id)}
-                                        className="flex items-center gap-4 p-3 rounded-xl border border-gray-100 dark:border-slate-800 hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-slate-800 cursor-pointer transition-all"
+                                        onClick={() => {
+                                            const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                            const resolvedPrice = resolveFlavorPrice(flavor);
+                                            if (sizeSelected && !resolvedPrice.found) return;
+                                            handleSelectFlavor(flavor.id);
+                                        }}
+                                        className={`flex items-center gap-4 p-3 rounded-xl border border-gray-100 dark:border-slate-800 cursor-pointer transition-all ${
+                                            Boolean(selectedSizeKey || selectedSizeOption?.id) && !resolveFlavorPrice(flavor).found
+                                                ? 'opacity-50 grayscale pointer-events-none'
+                                                : 'hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-slate-800'
+                                        }`}
                                     >
                                         <div className="w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900/20 flex items-center justify-center text-orange-600">
                                             <Slice size={18} />
@@ -762,8 +1466,16 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                             <p className="text-xs text-gray-500 line-clamp-1">{flavor.description}</p>
                                         </div>
                                         <div className="text-sm font-bold text-slate-700 dark:text-gray-300">
-                                            {/* If flavors had prices, show here. For now, just text or icon */}
-                                            <ChevronRight size={16} className="text-gray-300" />
+                                            {(() => {
+                                                const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                                const resolvedPrice = resolveFlavorPrice(flavor);
+                                                if (!sizeSelected) {
+                                                    return <span className="text-xs text-gray-400">Escolha tamanho</span>;
+                                                }
+                                                return resolvedPrice.found
+                                                    ? formatCurrencyBRL(resolvedPrice.value)
+                                                    : <span className="text-xs text-gray-400">Indisponivel para este tamanho</span>;
+                                            })()}
                                         </div>
                                     </div>
                                 ))}
@@ -792,12 +1504,30 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                         <Plus size={20} />
                                     </button>
                                 </div>
+                                {useBuildableWizard && buildableStep > 0 ? (
+                                    <button
+                                        onClick={handleBuildableBack}
+                                        className="w-full sm:w-auto h-14 px-6 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-bold"
+                                    >
+                                        Voltar
+                                    </button>
+                                ) : null}
                                 <button 
-                                    onClick={handleConfirmAdd}
-                                    className="flex-1 w-full bg-red-600 hover:bg-red-700 text-white h-14 rounded-xl font-bold flex justify-between items-center px-6 transition-all shadow-lg shadow-red-600/20 hover:scale-[1.02]"
+                                    onClick={useBuildableWizard ? handleBuildableNext : handleConfirmAdd}
+                                    className="flex-1 w-full h-16 sm:h-14 rounded-2xl font-bold flex items-center gap-4 px-6 transition-all shadow-lg bg-red-600 hover:bg-red-700 text-white shadow-red-600/20 moving-border"
+                                    style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
                                 >
-                                    <span>Adicionar</span>
-                                    <span className="bg-red-800/40 px-3 py-1 rounded-lg">{formatCurrencyBRL(calculateTotal())}</span>
+                                    {!useBuildableWizard && (
+                                        <span className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
+                                            <ShoppingBag size={20} />
+                                        </span>
+                                    )}
+                                    <span className="text-left leading-tight">
+                                        <span className="block text-base sm:text-sm">{useBuildableWizard ? (buildableCurrent?.type === 'REVIEW' ? 'Confirmar pedido' : 'Continuar') : 'Adicionar'}</span>
+                                    </span>
+                                    <span className="ml-auto bg-white/20 px-3 py-1.5 rounded-full text-sm sm:text-xs">
+                                        {formatCurrencyBRL(calculateTotal())}
+                                    </span>
                                 </button>
                              </>
                          ) : (

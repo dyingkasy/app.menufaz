@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { ArrowLeft, CheckCircle, TrendingUp, Users, Wallet, ShieldCheck, MessageCircle, User, Mail, Phone, Store, MapPin, Loader2, LogIn } from 'lucide-react';
 import { createStoreRequest, checkEmailExists } from '../services/db';
+import { fetchCepData } from '../utils/geo';
 import { ViewState } from '../types';
 
 interface RegisterBusinessProps {
@@ -41,6 +42,23 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       setFormData({ ...formData, [e.target.name]: e.target.value });
       if(existingEmailError) setExistingEmailError(false);
+  };
+
+  const handleCepBlur = async () => {
+      const cep = formData.cep.replace(/\D/g, '');
+      if (cep.length !== 8) return;
+      const data = await fetchCepData(cep);
+      if (data) {
+          setFormData(prev => ({
+              ...prev,
+              street: data.street,
+              district: data.district,
+              city: data.city,
+              state: data.state
+          }));
+      } else {
+          alert('CEP não encontrado.');
+      }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -209,7 +227,7 @@ const RegisterBusiness: React.FC<RegisterBusinessProps> = ({ onBack }) => {
                                                 <label className="text-sm font-bold text-gray-700 dark:text-gray-300">CEP</label>
                                                 <p className="text-xs text-gray-500 dark:text-gray-400">Usado para localizar sua loja no mapa.</p>
                                                 <div className="relative mt-1">
-                                                    <input name="cep" value={formData.cep} onChange={handleChange} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="00000-000" />
+                                                    <input name="cep" value={formData.cep} onChange={handleChange} onBlur={handleCepBlur} type="text" required className="w-full pl-10 pr-4 py-3 bg-gray-50 dark:bg-slate-900 border dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-red-500 outline-none dark:text-white" placeholder="00000-000" />
                                                     <MapPin className="absolute left-3 top-3 text-gray-400" size={18} />
                                                 </div>
                                             </div>

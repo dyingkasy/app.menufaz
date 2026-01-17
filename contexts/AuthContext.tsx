@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { getCurrentUser, logout as authLogout, onAuthStateChanged } from '../services/auth';
-import { getUserProfile, UserProfile } from '../services/db';
+import { getUserProfile, updateUserProfile, UserProfile } from '../services/db';
 
 interface AuthContextType {
   user: UserProfile | null;
@@ -22,11 +22,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchUserProfile = async (uid: string) => {
+  const fetchUserProfile = async (uid: string, fallback?: { email?: string; role?: string }) => {
     try {
       const profile = await getUserProfile(uid);
       if (profile) {
-        setUser(profile);
+        const merged: UserProfile = {
+          uid,
+          email: profile.email || fallback?.email || '',
+          role: (profile.role as UserProfile['role']) || (fallback?.role as UserProfile['role']) || 'CLIENT',
+          ...profile
+        };
+        setUser(merged);
+        if (!profile.role || !profile.email) {
+          await updateUserProfile(uid, { role: merged.role, email: merged.email });
+        }
       } else {
         console.warn('Usuário autenticado mas sem perfil local. Realizando logout.');
         await authLogout();
@@ -41,7 +50,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(async (authUser) => {
       if (authUser) {
-        await fetchUserProfile(authUser.uid);
+        await fetchUserProfile(authUser.uid, { email: authUser.email, role: authUser.role });
       } else {
         setUser(null);
       }

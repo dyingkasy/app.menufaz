@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { ArrowLeft, Package, Clock, CheckCircle, AlertTriangle, MessageCircle, Send, ChevronRight, ShoppingBag, Utensils, MapPin, Bike, XCircle, Circle } from 'lucide-react';
 import { Order, ChatMessage, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
-import { subscribeToClientOrders, updateOrderRefundStatus, updateOrderChat, subscribeToCourier } from '../services/db';
+import { subscribeToClientOrders, subscribeToCustomerOrders, subscribeToCustomerPhoneOrders, updateOrderRefundStatus, updateOrderChat, subscribeToCourier, updateOrderStatus } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
 
 interface ClientOrdersProps {
@@ -103,9 +103,12 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
     // MUDANÇA: Armazenamos apenas o ID, e derivamos o objeto 'selectedOrder' da lista 'myOrders'
     // Isso garante que quando 'myOrders' atualizar via Firebase, o detalhe atualize automaticamente.
     const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+    const [isListView, setIsListView] = useState(false);
     
     const [showRefundModal, setShowRefundModal] = useState(false);
     const [refundReason, setRefundReason] = useState('');
+    const [showCancelModal, setShowCancelModal] = useState(false);
+    const [cancelReason, setCancelReason] = useState('');
     const [chatMessage, setChatMessage] = useState('');
 
     useEffect(() => {
@@ -115,7 +118,33 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
             });
             return () => unsubscribe();
         }
+        const storedCustomerPhone = localStorage.getItem('customerPhone');
+        if (storedCustomerPhone) {
+            const unsubscribe = subscribeToCustomerPhoneOrders(storedCustomerPhone, (orders) => {
+                setMyOrders(orders);
+            });
+            return () => unsubscribe();
+        }
+        const storedCustomerId = localStorage.getItem('customerId');
+        if (storedCustomerId) {
+            const unsubscribe = subscribeToCustomerOrders(storedCustomerId, (orders) => {
+                setMyOrders(orders);
+            });
+            return () => unsubscribe();
+        }
     }, [user?.uid]);
+
+    useEffect(() => {
+        if (isListView || selectedOrderId || myOrders.length === 0) return;
+        const lastOrderId = localStorage.getItem('lastOrderId');
+        const preferred = lastOrderId ? myOrders.find((order) => order.id === lastOrderId) : null;
+        if (preferred) {
+            setSelectedOrderId(preferred.id);
+            return;
+        }
+        const active = myOrders.find((o) => ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING'].includes(o.status));
+        setSelectedOrderId((active || myOrders[0]).id);
+    }, [myOrders, selectedOrderId]);
 
     // Deriva o pedido selecionado em tempo real da lista atualizada
     const selectedOrder = useMemo(() => 
@@ -155,9 +184,90 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
         }
     };
 
+    const handleCancelOrder = async () => {
+        if (!selectedOrder || !cancelReason.trim()) return;
+        try {
+            await updateOrderStatus(selectedOrder.id, 'CANCELLED', cancelReason.trim());
+            setShowCancelModal(false);
+            setCancelReason('');
+        } catch (e) {
+            alert("Erro ao cancelar pedido.");
+        }
+    };
+
+    const getOrderType = (order: Order) => {
+        if (order.type) return order.type;
+        if (order.pickup || order.isPickup) return 'PICKUP';
+        if (order.tableNumber || order.tableSessionId) return 'TABLE';
+        if (order.deliveryAddress) return 'DELIVERY';
+        const notesText = (order.notes || '').toUpperCase();
+        if (notesText.includes('RETIRADA')) return 'PICKUP';
+        return 'DELIVERY';
+    };
+
+    const getEffectiveStatus = (order: Order) => {
+        const orderType = getOrderType(order);
+        if (orderType === 'PICKUP') {
+            if (order.status === 'WAITING_COURIER') {
+                return 'DELIVERING';
+            }
+            return order.status;
+        }
+        if (order.status === 'DELIVERING' && order.courierStage !== 'TO_CUSTOMER') {
+            return 'WAITING_COURIER';
+        }
+        return order.status;
+    };
+
+    const getOrderSteps = (order: Order) => {
+        if (getOrderType(order) === 'PICKUP') {
+            return [
+                { id: 'PENDING', label: 'Confirmado', icon: ShoppingBag },
+                { id: 'PREPARING', label: 'Preparo', icon: Utensils },
+                { id: 'DELIVERING', label: 'Pronto p/ Retirada', icon: ShoppingBag },
+                { id: 'COMPLETED', label: 'Retirado', icon: CheckCircle },
+            ];
+        }
+        return [
+            { id: 'PENDING', label: 'Confirmado', icon: ShoppingBag },
+            { id: 'PREPARING', label: 'Preparo', icon: Utensils },
+            { id: 'WAITING_COURIER', label: 'Aguardando Motoboy', icon: Clock },
+            { id: 'DELIVERING', label: 'Saiu p/ Entrega', icon: Bike },
+            { id: 'COMPLETED', label: 'Entregue', icon: CheckCircle },
+        ];
+    };
+
+    const getProgressLabel = (order: Order, status: string) => {
+        if (getOrderType(order) === 'PICKUP') {
+            if (status === 'PENDING') return 'Aguardando Confirmação';
+            if (status === 'PREPARING') return 'Em Preparo';
+            if (status === 'DELIVERING') return 'Pronto p/ Retirada';
+            return 'Retirado';
+        }
+        if (status === 'PENDING') return 'Aguardando Confirmação';
+        if (status === 'PREPARING') return 'Em Preparo';
+        if (status === 'WAITING_COURIER') return 'Aguardando Motoboy';
+        if (status === 'DELIVERING') return 'Em Rota de Entrega';
+        return 'Entregue';
+    };
+
+    const getProgressWidth = (order: Order, status: string) => {
+        if (getOrderType(order) === 'PICKUP') {
+            if (status === 'PENDING') return '25%';
+            if (status === 'PREPARING') return '50%';
+            if (status === 'DELIVERING') return '75%';
+            return '100%';
+        }
+        if (status === 'PENDING') return '20%';
+        if (status === 'PREPARING') return '40%';
+        if (status === 'WAITING_COURIER') return '60%';
+        if (status === 'DELIVERING') return '80%';
+        return '100%';
+    };
+
     // Status Steps Helper
-    const getStepStatus = (status: string) => {
-        const steps = ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING', 'COMPLETED'];
+    const getStepStatus = (order: Order, status: string) => {
+        const steps = getOrderSteps(order).map((step) => step.id);
         const currentIndex = steps.indexOf(status);
         return (stepName: string) => {
             const stepIndex = steps.indexOf(stepName);
@@ -199,14 +309,17 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                     // --- ORDER DETAILS VIEW ---
                     <div className="animate-slide-in-right">
                         <button 
-                            onClick={() => setSelectedOrderId(null)} 
+                            onClick={() => {
+                                setSelectedOrderId(null);
+                                setIsListView(true);
+                            }}
                             className="mb-4 text-sm font-bold text-gray-500 hover:text-red-600 flex items-center gap-1"
                         >
                             <ArrowLeft size={16}/> Voltar para lista
                         </button>
 
                         {/* Live Tracking Map */}
-                        {selectedOrder.status === 'DELIVERING' && (
+                        {selectedOrder.courierStage === 'TO_CUSTOMER' && (
                             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-lg p-4 mb-6 border border-gray-200 dark:border-slate-800 animate-fade-in">
                                 <div className="flex items-center justify-between mb-3">
                                     <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2">
@@ -217,6 +330,9 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                     ) : (
                                         <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded font-bold">Aguardando motoboy</span>
                                     )}
+                                </div>
+                                <div className="mb-3 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+                                    Pedido pego e a caminho.
                                 </div>
                                 {selectedOrder.courierId ? (
                                     <TrackingMap order={selectedOrder} />
@@ -243,6 +359,16 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                         <p className="text-xl font-extrabold text-red-600">{formatCurrencyBRL(selectedOrder.total)}</p>
                                     </div>
                                 </div>
+                                {selectedOrder.status !== 'CANCELLED' && selectedOrder.status !== 'COMPLETED' && (
+                                    <div className="flex justify-end mb-4">
+                                        <button
+                                            onClick={() => setShowCancelModal(true)}
+                                            className="px-4 py-2 rounded-lg border border-red-200 text-red-600 font-bold text-xs hover:bg-red-50"
+                                        >
+                                            Cancelar pedido
+                                        </button>
+                                    </div>
+                                )}
 
                                 {/* STEPPER PROGRESS BAR */}
                                 {selectedOrder.status !== 'CANCELLED' && (
@@ -251,14 +377,8 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                         <div className="absolute top-3 left-0 w-full h-1 bg-gray-200 dark:bg-slate-700 -z-0 rounded-full"></div>
                                         
                                         {/* Steps */}
-                                        {[
-                                            { id: 'PENDING', label: 'Confirmado', icon: ShoppingBag },
-                                            { id: 'PREPARING', label: 'Preparo', icon: Utensils },
-                                            { id: 'WAITING_COURIER', label: 'Aguardando Motoboy', icon: Clock },
-                                            { id: 'DELIVERING', label: 'Saiu p/ Entrega', icon: Bike },
-                                            { id: 'COMPLETED', label: 'Entregue', icon: CheckCircle },
-                                        ].map((step, idx) => {
-                                            const status = getStepStatus(selectedOrder.status)(step.id);
+                                        {getOrderSteps(selectedOrder).map((step) => {
+                                            const status = getStepStatus(selectedOrder, getEffectiveStatus(selectedOrder))(step.id);
                                             const isActive = status === 'current' || status === 'completed';
                                             return (
                                                 <div key={step.id} className="flex flex-col items-center gap-2 z-10">
@@ -277,15 +397,20 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                         <XCircle size={24} /> Pedido Cancelado
                                     </div>
                                 )}
+                                {selectedOrder.status === 'CANCELLED' && selectedOrder.cancelReason && (
+                                    <div className="mt-3 bg-white dark:bg-slate-900 border border-red-100 dark:border-red-900/50 rounded-xl p-3 text-sm text-slate-700 dark:text-slate-200">
+                                        Motivo: {selectedOrder.cancelReason}
+                                    </div>
+                                )}
                             </div>
 
                             {/* Order Type Info */}
                             <div className="px-6 py-3 bg-slate-50 dark:bg-slate-900 border-b border-gray-100 dark:border-slate-800 flex items-center justify-between text-sm">
                                 <span className="font-bold text-slate-700 dark:text-gray-300 flex items-center gap-2">
-                                    {selectedOrder.type === 'PICKUP' ? <ShoppingBag size={16} /> : selectedOrder.type === 'TABLE' ? <Utensils size={16} /> : <Bike size={16} />}
-                                    {selectedOrder.type === 'PICKUP'
+                                    {getOrderType(selectedOrder) === 'PICKUP' ? <ShoppingBag size={16} /> : getOrderType(selectedOrder) === 'TABLE' ? <Utensils size={16} /> : <Bike size={16} />}
+                                    {getOrderType(selectedOrder) === 'PICKUP'
                                         ? 'Retirada no Balcão'
-                                        : selectedOrder.type === 'TABLE'
+                                        : getOrderType(selectedOrder) === 'TABLE'
                                         ? `Mesa${selectedOrder.tableNumber ? ` ${selectedOrder.tableNumber}` : ''}`
                                         : 'Entrega Delivery'}
                                 </span>
@@ -414,10 +539,15 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                 </p>
                             </div>
                         ) : (
-                            (activeTab === 'ACTIVE' ? activeOrders : historyOrders).map(order => (
+                            (activeTab === 'ACTIVE' ? activeOrders : historyOrders).map(order => {
+                                const effectiveStatus = getEffectiveStatus(order);
+                                return (
                                 <div 
                                     key={order.id}
-                                    onClick={() => setSelectedOrderId(order.id)}
+                                    onClick={() => {
+                                        setSelectedOrderId(order.id);
+                                        setIsListView(false);
+                                    }}
                                     className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-gray-100 dark:border-slate-800 shadow-sm cursor-pointer hover:shadow-lg hover:border-red-100 dark:hover:border-red-900/30 transition-all group relative overflow-hidden"
                                 >
                                     <div className="absolute top-0 left-0 w-1 h-full bg-red-600 opacity-0 group-hover:opacity-100 transition-opacity"></div>
@@ -425,7 +555,13 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                     <div className="flex justify-between items-start mb-4">
                                         <div className="flex items-center gap-4">
                                             <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl shadow-sm ${order.status === 'COMPLETED' ? 'bg-green-100 text-green-600' : 'bg-red-50 text-red-600 dark:bg-slate-800'}`}>
-                                                {order.status === 'DELIVERING' ? <Bike size={20} className="animate-pulse" /> : <ShoppingBag size={20} />}
+                                                {effectiveStatus === 'DELIVERING'
+                                                    ? getOrderType(order) === 'PICKUP'
+                                                        ? <ShoppingBag size={20} />
+                                                        : <Bike size={20} className="animate-pulse" />
+                                                    : effectiveStatus === 'WAITING_COURIER'
+                                                        ? <Clock size={20} />
+                                                        : <ShoppingBag size={20} />}
                                             </div>
                                             <div>
                                                 <h3 className="font-bold text-slate-900 dark:text-white text-base">
@@ -446,19 +582,11 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                             <div className="w-full bg-gray-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
                                                 <div 
                                                     className="h-full bg-red-500 rounded-full transition-all duration-1000"
-                                                    style={{ 
-                                                        width: order.status === 'PENDING' ? '20%' : 
-                                                               order.status === 'PREPARING' ? '40%' : 
-                                                               order.status === 'WAITING_COURIER' ? '60%' :
-                                                               order.status === 'DELIVERING' ? '80%' : '100%' 
-                                                    }}
+                                                    style={{ width: getProgressWidth(order, effectiveStatus) }}
                                                 ></div>
                                             </div>
                                             <p className="text-xs font-bold text-red-600 mt-2 text-right uppercase tracking-wider">
-                                                {order.status === 'PENDING' ? 'Aguardando Confirmação' :
-                                                 order.status === 'PREPARING' ? 'Em Preparo' :
-                                                 order.status === 'WAITING_COURIER' ? 'Aguardando Motoboy' :
-                                                 order.status === 'DELIVERING' ? 'Em Rota de Entrega' : 'Entregue'}
+                                                {getProgressLabel(order, effectiveStatus)}
                                             </p>
                                         </div>
                                     )}
@@ -472,7 +600,8 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                         </div>
                                     )}
                                 </div>
-                            ))
+                            );
+                            })
                         )}
                     </div>
                 )}
@@ -494,6 +623,37 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                         <div className="flex gap-3">
                             <button onClick={() => setShowRefundModal(false)} className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 dark:hover:bg-slate-800 rounded-xl">Cancelar</button>
                             <button onClick={handleRequestRefund} className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-lg">Enviar Solicitação</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {showCancelModal && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-bold mb-2 text-slate-900 dark:text-white">Cancelar pedido</h3>
+                        <p className="text-sm text-gray-500 mb-4">Informe o motivo do cancelamento.</p>
+                        <textarea
+                            value={cancelReason}
+                            onChange={(e) => setCancelReason(e.target.value)}
+                            className="w-full p-3 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 dark:bg-slate-800 dark:text-white"
+                            rows={4}
+                            placeholder="Ex: item indisponível"
+                        />
+                        <div className="mt-4 flex gap-2">
+                            <button
+                                onClick={() => { setShowCancelModal(false); setCancelReason(''); }}
+                                className="flex-1 py-2 rounded-lg border border-gray-200 dark:border-slate-700 text-gray-500 font-bold"
+                            >
+                                Voltar
+                            </button>
+                            <button
+                                onClick={handleCancelOrder}
+                                className="flex-1 py-2 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700"
+                                disabled={!cancelReason.trim()}
+                            >
+                                Confirmar cancelamento
+                            </button>
                         </div>
                     </div>
                 </div>

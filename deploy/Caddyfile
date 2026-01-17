@@ -6,6 +6,35 @@ app.menufaz.com {
     reverse_proxy api:3001
   }
 
+  handle_path /downloads/* {
+    root * /srv/downloads
+    header Content-Type application/octet-stream
+    header Content-Disposition "attachment; filename=\"menufaz-print.exe\""
+    header X-Menufaz-Download "1"
+    file_server
+  }
+
+  handle {
+    reverse_proxy frontend:8080
+  }
+}
+
+http://localhost, http://127.0.0.1 {
+  encode gzip
+
+  @api path /api/*
+  handle @api {
+    reverse_proxy api:3001
+  }
+
+  handle_path /downloads/* {
+    root * /srv/downloads
+    header Content-Type application/octet-stream
+    header Content-Disposition "attachment; filename=\"menufaz-print.exe\""
+    header X-Menufaz-Download "1"
+    file_server
+  }
+
   handle {
     reverse_proxy frontend:8080
   }

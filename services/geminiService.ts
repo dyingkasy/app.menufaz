@@ -1,24 +1,22 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
-const fallbackRecommendation = (prompt: string) => {
-  const lower = String(prompt || '').toLowerCase();
-  if (lower.includes('doce') || lower.includes('sobremesa')) {
-    return { suggestion: 'Vai de um doce hoje?', recommendedCategory: 'Doces' };
-  }
-  if (lower.includes('leve') || lower.includes('saudavel') || lower.includes('salada')) {
-    return { suggestion: 'Que tal algo leve e equilibrado?', recommendedCategory: 'Saudavel' };
-  }
-  if (lower.includes('pizza')) {
-    return { suggestion: 'Uma pizza caprichada sempre cai bem.', recommendedCategory: 'Pizza' };
-  }
-  return { suggestion: 'Que tal um lanche bem feito hoje?', recommendedCategory: 'Lanches' };
-};
-
 export const getFoodRecommendation = async (
   userPrompt: string
-): Promise<{ suggestion: string; recommendedCategory: string }> => {
+): Promise<{
+  suggestion: string;
+  recommendedCategory?: string;
+  recommendedProducts?: Array<{
+    productId: string;
+    productName: string;
+    storeId: string;
+    storeName?: string;
+  }>;
+}> => {
   if (!API_BASE_URL) {
-    return fallbackRecommendation(userPrompt);
+    return {
+      suggestion: 'As lojas ainda estão trabalhando para atender a esse pedido.',
+      recommendedCategory: ''
+    };
   }
 
   try {
@@ -34,11 +32,15 @@ export const getFoodRecommendation = async (
 
     const data = await response.json();
     return {
-      suggestion: data.suggestion || 'Que tal experimentar algo novo hoje?',
-      recommendedCategory: data.recommendedCategory || ''
+      suggestion: data.suggestion || 'As lojas ainda estão trabalhando para atender a esse pedido.',
+      recommendedCategory: data.recommendedCategory || '',
+      recommendedProducts: Array.isArray(data.recommendedProducts) ? data.recommendedProducts : []
     };
   } catch (error) {
     console.error('Error fetching recommendation:', error);
-    return fallbackRecommendation(userPrompt);
+    return {
+      suggestion: 'As lojas ainda estão trabalhando para atender a esse pedido.',
+      recommendedCategory: ''
+    };
   }
 };

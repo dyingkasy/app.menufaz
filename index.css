@@ -1,2 +1,17 @@
 @import "tailwindcss";
 @config "./tailwind.config.js";
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  height: auto;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+}

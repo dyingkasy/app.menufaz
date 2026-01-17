@@ -3,6 +3,7 @@ import React, { useState, useRef } from 'react';
 import { User, Building2, ArrowLeft, ShoppingBag, Mail, Lock, Phone, CheckCircle, MapPin, Hash, Globe, Home, Send, KeyRound, Loader2, LogIn, Bike } from 'lucide-react';
 import { ViewState, UserRole, Address } from '../types';
 import { createUserProfile } from '../services/db';
+import { fetchCepData, searchAddress } from '../utils/geo';
 import { AuthUser, login, register, sendPasswordResetEmail, setAuthUser } from '../services/auth';
 
 interface LoginProps {
@@ -17,6 +18,7 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
   const [viewMode, setViewMode] = useState<LoginViewMode>('LOGIN');
   const [loading, setLoading] = useState(false);
   const [loadingCep, setLoadingCep] = useState(false);
+  const movingBorderStyle = { '--moving-border-bg': '#dc2626' } as React.CSSProperties;
   
   // Login State
   const [email, setEmail] = useState('');
@@ -43,6 +45,8 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
 
   const [error, setError] = useState<string | null>(null);
   const numberInputRef = useRef<HTMLInputElement>(null);
+
+  const showSkeleton = loading || loadingCep;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,7 +121,28 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
               role: (userType === 'COURIER' ? 'COURIER' : 'CLIENT') as UserRole
           };
 
-          await register(newUser);
+          let resolvedCoordinates: { lat: number; lng: number } | null = null;
+          if (userType === 'CLIENT' && regData.street) {
+              const addressQuery = [
+                  regData.street,
+                  regData.number,
+                  regData.district,
+                  regData.city,
+                  regData.state
+              ].map((value) => String(value || '').trim()).filter(Boolean).join(', ');
+              if (!addressQuery) {
+                  setError('Por favor, preencha o endereço completo.');
+                  return;
+              }
+              const results = await searchAddress(addressQuery);
+              if (!results.length) {
+                  setError('Não foi possível localizar o endereço informado.');
+                  return;
+              }
+              resolvedCoordinates = results[0].coordinates;
+          }
+
+          const createdUser = await register(newUser);
 
           let initialAddresses: Address[] = [];
           if (userType === 'CLIENT' && regData.street) {
@@ -126,7 +151,11 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
                   label: 'Minha Casa',
                   street: regData.street,
                   number: regData.number,
-                  coordinates: { lat: -23.561684, lng: -46.655981 } 
+                  district: regData.district,
+                  city: regData.city,
+                  state: regData.state,
+                  complement: regData.complement,
+                  coordinates: resolvedCoordinates!
               });
           }
 
@@ -140,7 +169,8 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
               ...(userType === 'COURIER' && { city: regData.city })
           };
 
-          await createUserProfile(newUser.uid, profileData);
+          await createUserProfile(createdUser.uid, profileData);
+          setAuthUser(createdUser);
 
           // Auto-login acontece pelo AuthContext
       } catch (err: any) {
@@ -160,16 +190,14 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
       if (cep.length === 8) {
           setLoadingCep(true);
           try {
-              const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-              const data = await response.json();
-              
-              if (!data.erro) {
+              const data = await fetchCepData(cep);
+              if (data) {
                   setRegData(prev => ({
                       ...prev,
-                      street: data.logradouro,
-                      district: data.bairro,
-                      city: data.localidade,
-                      state: data.uf
+                      street: data.street,
+                      district: data.district,
+                      city: data.city,
+                      state: data.state
                   }));
                   setTimeout(() => numberInputRef.current?.focus(), 100);
               } else {
@@ -209,11 +237,11 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
       // ... (rest of the component remains the same)
       if (viewMode === 'RESET_SUCCESS') {
           return (
-              <div className="w-full max-w-md mx-auto text-center py-10 animate-fade-in">
+              <div className="w-full max-w-md mx-auto text-center py-10 animate-fade-in font-body">
                   <div className="w-24 h-24 bg-green-100 dark:bg-green-900/30 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
                       <CheckCircle size={50} className="text-green-600 dark:text-green-400" />
                   </div>
-                  <h2 className="text-3xl font-bold text-slate-900 dark:text-white mb-4">E-mail Enviado!</h2>
+                  <h2 className="text-3xl font-bold text-slate-900 dark:text-white mb-4 font-display">E-mail Enviado!</h2>
                   <p className="text-gray-500 dark:text-gray-400 mb-8 leading-relaxed">
                       Enviamos um link de recuperação para <strong>{forgotEmail}</strong>.<br/> Verifique sua caixa de entrada e também a pasta de spam.
                   </p>
@@ -232,7 +260,7 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
 
       if (viewMode === 'FORGOT_PASSWORD') {
           return (
-              <div className="w-full max-w-md mx-auto py-10 animate-fade-in">
+              <div className="w-full max-w-md mx-auto py-10 animate-fade-in font-body">
                   <button 
                       onClick={() => setViewMode('LOGIN')}
                       className="flex items-center gap-2 text-gray-500 hover:text-slate-900 dark:text-gray-400 dark:hover:text-white transition-colors mb-8 font-bold"
@@ -244,7 +272,7 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
                       <div className="w-20 h-20 bg-red-50 dark:bg-red-900/20 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-600 dark:text-red-400 shadow-md">
                           <KeyRound size={40} />
                       </div>
-                      <h2 className="text-3xl font-bold text-slate-900 dark:text-white mb-2">Recuperar Senha</h2>
+                      <h2 className="text-3xl font-bold text-slate-900 dark:text-white mb-2 font-display">Recuperar Senha</h2>
                       <p className="text-gray-500 dark:text-gray-400">
                           Informe seu e-mail cadastrado para receber o link de redefinição.
                       </p>
@@ -285,7 +313,7 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
       }
 
       return (
-        <div className="relative w-full max-w-md mx-auto py-10">
+        <div className="relative w-full max-w-md mx-auto py-10 font-body">
             <button 
                 onClick={() => viewMode === 'REGISTER' ? setViewMode('LOGIN') : onNavigate(ViewState.HOME)}
                 className="absolute top-0 left-0 flex items-center gap-2 text-gray-500 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white transition-colors"
@@ -294,13 +322,21 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
             </button>
 
             <div className="mb-8 mt-10">
-                <h2 className="text-3xl font-bold text-slate-900 dark:text-white">
+                <h2 className="text-3xl font-bold text-slate-900 dark:text-white font-display">
                     {viewMode === 'REGISTER' ? 'Crie sua conta' : 'Bem-vindo de volta'}
                 </h2>
                 <p className="text-gray-500 dark:text-gray-400 mt-2">
                     {viewMode === 'REGISTER' ? 'Preencha os dados abaixo para começar.' : 'Preencha seus dados para acessar a conta.'}
                 </p>
             </div>
+
+            {showSkeleton && (
+                <div className="mb-6 space-y-3">
+                    <div className="h-4 w-40 rounded-full skeleton-shimmer" />
+                    <div className="h-10 w-full rounded-xl skeleton-shimmer" />
+                    <div className="h-10 w-5/6 rounded-xl skeleton-shimmer" />
+                </div>
+            )}
 
             <div className="bg-gray-100 dark:bg-slate-800 p-1 rounded-xl flex mb-8">
                 <button 
@@ -547,7 +583,8 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
                 <button 
                     type="submit" 
                     disabled={loading}
-                    className="w-full bg-red-600 text-white font-bold py-3 rounded-lg hover:bg-red-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
+                    className="w-full bg-red-600 text-white font-bold py-3 rounded-lg hover:bg-red-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20 moving-border"
+                    style={movingBorderStyle}
                 >
                     {loading ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
@@ -592,20 +629,19 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
   return (
     <div className="min-h-screen flex bg-white dark:bg-slate-900">
         {/* Left Side - Visuals */}
-        <div className="hidden lg:flex lg:w-1/2 bg-slate-900 relative overflow-hidden items-center justify-center p-12">
-            <div className="absolute inset-0 opacity-20">
-                 <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-red-600 rounded-full filter blur-[120px] transform translate-x-1/2 -translate-y-1/2"></div>
-                 <div className="absolute bottom-0 left-0 w-[600px] h-[600px] bg-blue-600 rounded-full filter blur-[120px] transform -translate-x-1/2 translate-y-1/2"></div>
-            </div>
+        <div className="hidden lg:flex lg:w-1/2 bg-slate-950 relative overflow-hidden items-center justify-center p-12">
+            <div className="absolute inset-0 opacity-80 login-pattern" />
+            <div className="absolute -top-40 -right-20 h-96 w-96 bg-red-600/30 blur-[120px] rounded-full" />
+            <div className="absolute -bottom-48 -left-10 h-96 w-96 bg-blue-600/30 blur-[140px] rounded-full" />
             
-            <div className="relative z-10 max-w-md text-white">
+            <div className="relative z-10 w-full max-w-xl text-white font-body">
                 <div className="flex items-center gap-3 mb-8">
                     <div className="w-12 h-12 bg-red-600 rounded-xl flex items-center justify-center shadow-lg shadow-red-600/30">
                          <ShoppingBag size={24} strokeWidth={2.5} />
                     </div>
-                    <span className="text-3xl font-bold tracking-tight">Menu<span className="text-red-500">Faz</span></span>
+                    <span className="text-3xl font-bold tracking-tight font-display">Menu<span className="text-red-500">Faz</span></span>
                 </div>
-                <h1 className="text-5xl font-bold mb-6 leading-tight">
+                <h1 className="text-5xl font-bold mb-6 leading-tight font-display">
                     {viewMode === 'REGISTER' ? 'Crie sua conta grátis.' : viewMode === 'FORGOT_PASSWORD' ? 'Recupere seu acesso.' : 'O delivery que conecta você ao melhor da cidade.'}
                 </h1>
                 <p className="text-xl text-gray-300 leading-relaxed">
@@ -617,36 +653,62 @@ const Login: React.FC<LoginProps> = ({ onNavigate, onLoginSuccess }) => {
                     }
                 </p>
                 
-                {viewMode === 'LOGIN' && (
-                    <div className="mt-12 flex gap-4">
-                        <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/10 flex-1">
-                            <p className="text-2xl font-bold">140k+</p>
-                            <p className="text-sm text-gray-400">Usuários Ativos</p>
+                <div className="mt-10 grid grid-cols-6 gap-4">
+                    <div className="col-span-4 row-span-2 rounded-3xl border border-white/10 bg-white/10 backdrop-blur-md p-5 relative overflow-hidden">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-xs uppercase tracking-[0.2em] text-white/60">Entrega em</p>
+                                <p className="text-3xl font-bold font-display">28-42 min</p>
+                                <p className="text-sm text-white/70">Tempo medio na sua regiao</p>
+                            </div>
+                            <div className="h-16 w-16 rounded-2xl bg-white/20 flex items-center justify-center">
+                                <Bike size={28} />
+                            </div>
                         </div>
-                        <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/10 flex-1">
-                            <p className="text-2xl font-bold">5.2k+</p>
-                            <p className="text-sm text-gray-400">Parceiros</p>
+                        <div className="mt-6 rounded-2xl bg-gradient-to-br from-orange-300/80 via-rose-300/70 to-red-500/70 p-4 login-blur-image">
+                            <div className="h-24 rounded-xl bg-white/30" />
                         </div>
                     </div>
-                )}
-                {viewMode === 'REGISTER' && (
-                    <div className="mt-12 space-y-4">
-                         <div className="flex items-center gap-3">
-                             <CheckCircle className="text-green-500" /> <span className="text-gray-300">Sem taxas de adesão</span>
-                         </div>
-                         <div className="flex items-center gap-3">
-                             <CheckCircle className="text-green-500" /> <span className="text-gray-300">Cupons exclusivos</span>
-                         </div>
-                         <div className="flex items-center gap-3">
-                             <CheckCircle className="text-green-500" /> <span className="text-gray-300">Rastreio em tempo real</span>
-                         </div>
+                    <div className="col-span-2 rounded-3xl border border-white/10 bg-white/10 backdrop-blur-md p-4 flex flex-col justify-between">
+                        <p className="text-xs uppercase tracking-[0.2em] text-white/60">Pedidos</p>
+                        <p className="text-2xl font-bold font-display">+4.2k</p>
+                        <p className="text-xs text-white/60">Hoje</p>
                     </div>
-                )}
+                    <div className="col-span-3 rounded-3xl border border-white/10 bg-white/10 backdrop-blur-md p-4">
+                        <p className="text-xs uppercase tracking-[0.2em] text-white/60">Favoritos</p>
+                        <p className="text-lg font-semibold">Japonesa · Mexicana · Gourmet</p>
+                        <p className="text-xs text-white/60 mt-2">Listas personalizadas</p>
+                    </div>
+                    <div className="col-span-3 rounded-3xl border border-white/10 bg-white/10 backdrop-blur-md p-4">
+                        <p className="text-xs uppercase tracking-[0.2em] text-white/60">Mapa vivo</p>
+                        <div className="mt-2 h-14 rounded-2xl bg-gradient-to-r from-blue-400/40 via-sky-300/40 to-emerald-300/40 login-blur-image" />
+                        <p className="text-xs text-white/60 mt-2">Rastreio em tempo real</p>
+                    </div>
+                </div>
             </div>
         </div>
 
         {/* Right Side - Form */}
-        <div className="w-full lg:w-1/2 flex flex-col justify-center px-8 sm:px-12 lg:px-24 overflow-y-auto">
+        <div className="w-full lg:w-1/2 flex flex-col justify-center px-8 sm:px-12 lg:px-24 overflow-y-auto lux-scroll">
+            <div className="lg:hidden pt-12 pb-6">
+                <div className="flex items-center gap-3 mb-6">
+                    <div className="w-11 h-11 bg-red-600 rounded-xl flex items-center justify-center shadow-lg shadow-red-600/30 text-white">
+                        <ShoppingBag size={22} strokeWidth={2.5} />
+                    </div>
+                    <span className="text-2xl font-bold tracking-tight font-display text-slate-900 dark:text-white">Menu<span className="text-red-500">Faz</span></span>
+                </div>
+                <div className="grid grid-cols-6 gap-3">
+                    <div className="col-span-4 rounded-2xl bg-slate-900 text-white p-4 shadow-xl">
+                        <p className="text-xs uppercase tracking-[0.2em] text-white/60">Entrega premium</p>
+                        <p className="text-2xl font-bold font-display">Ultra rapida</p>
+                        <div className="mt-3 h-10 rounded-xl bg-gradient-to-r from-red-400/70 via-rose-400/60 to-orange-400/70 login-blur-image" />
+                    </div>
+                    <div className="col-span-2 rounded-2xl bg-white border border-slate-200 p-4">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Ativos</p>
+                        <p className="text-xl font-bold font-display text-slate-900">140k+</p>
+                    </div>
+                </div>
+            </div>
             {renderRightSideContent()}
         </div>
     </div>

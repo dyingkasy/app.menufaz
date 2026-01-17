@@ -1,10 +1,12 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
+import Lenis from 'lenis';
 import Header from './components/Header';
 import StoreCard from './components/StoreCard';
 import AIRecommendation from './components/AIRecommendation';
 import AdminDashboard from './components/AdminDashboard';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
+import ApiDocs from './components/ApiDocs';
 import CourierDashboard from './components/CourierDashboard';
 import RegisterBusiness from './components/RegisterBusiness';
 import Login from './components/Login';
@@ -21,7 +23,7 @@ import { CATEGORIES } from './constants';
 import { calculateDistance } from './utils/geo';
 import { ArrowRight, ChevronRight, ShoppingBag, MapPinOff, Loader2, ShieldCheck, ClipboardList } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { getStores } from './services/db';
+import { getStores, getStoreById, searchCatalog, getFavoriteStores, addFavoriteStore, removeFavoriteStore } from './services/db';
 import { logClientError } from './services/logging';
 
 // Inner App Component to access AuthContext
@@ -30,6 +32,50 @@ const MenuFazApp: React.FC = () => {
   const [currentView, setCurrentView] = useState<ViewState>(ViewState.HOME);
   const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   const [globalSearchTerm, setGlobalSearchTerm] = useState<string>('');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResults, setSearchResults] = useState<{
+    stores: Array<{
+      id: string;
+      name?: string;
+      category?: string;
+      imageUrl?: string;
+      logoUrl?: string;
+    }>;
+    products: Array<{
+      id: string;
+      name?: string;
+      description?: string;
+      storeId?: string;
+      storeName?: string;
+      storeCategory?: string;
+      storeImageUrl?: string;
+      storeLogoUrl?: string;
+    }>;
+  }>({ stores: [], products: [] });
+  const [isOrderLookupOpen, setIsOrderLookupOpen] = useState(false);
+  const [orderLookupPhone, setOrderLookupPhone] = useState('');
+  const [orderLookupError, setOrderLookupError] = useState('');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const lenis = new Lenis({
+      duration: 1.15,
+      smoothWheel: true,
+      smoothTouch: false
+    });
+    let rafId: number;
+    const raf = (time: number) => {
+      lenis.raf(time);
+      rafId = requestAnimationFrame(raf);
+    };
+    rafId = requestAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(rafId);
+      lenis.destroy();
+    };
+  }, []);
+
+  const [favoriteStoreIds, setFavoriteStoreIds] = useState<string[]>([]);
   
   // Store Selection State
   const [selectedStore, setSelectedStore] = useState<Store | null>(null);
@@ -42,6 +88,7 @@ const MenuFazApp: React.FC = () => {
 
   // Admin Impersonation State
   const [adminTargetStoreId, setAdminTargetStoreId] = useState<string | null>(null);
+  const [pendingProductId, setPendingProductId] = useState<string | null>(null);
 
   // Cart State
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
@@ -116,6 +163,7 @@ const MenuFazApp: React.FC = () => {
     const viewMap: Record<string, ViewState> = {
       login: ViewState.LOGIN,
       admin: ViewState.ADMIN,
+      'api-menufaz': ViewState.API_DOCS,
       'cadastro-loja': ViewState.REGISTER_BUSINESS,
       pedidos: ViewState.CLIENT_ORDERS,
       perfil: ViewState.CLIENT_PROFILE,
@@ -206,6 +254,22 @@ const MenuFazApp: React.FC = () => {
   }, []);
 
   useEffect(() => {
+      const loadFavorites = async () => {
+          if (!user) {
+              setFavoriteStoreIds([]);
+              return;
+          }
+          try {
+              const favorites = await getFavoriteStores();
+              setFavoriteStoreIds(favorites);
+          } catch (error) {
+              console.error('Erro ao carregar favoritos', error);
+          }
+      };
+      loadFavorites();
+  }, [user]);
+
+  useEffect(() => {
       if (!pendingStoreSlug || stores.length === 0) return;
 
       const slug = normalizeSlug(decodeURIComponent(pendingStoreSlug));
@@ -253,6 +317,8 @@ const MenuFazApp: React.FC = () => {
           nextPath = 'login';
       } else if (currentView === ViewState.ADMIN) {
           nextPath = 'admin';
+      } else if (currentView === ViewState.API_DOCS) {
+          nextPath = 'api-menufaz';
       } else if (currentView === ViewState.REGISTER_BUSINESS) {
           nextPath = 'cadastro-loja';
       } else if (currentView === ViewState.CLIENT_ORDERS) {
@@ -310,7 +376,7 @@ const MenuFazApp: React.FC = () => {
                        }
                    }
               }
-          } else if (currentView === ViewState.ADMIN || currentView === ViewState.CLIENT_ORDERS || currentView === ViewState.CLIENT_PROFILE || currentView === ViewState.COURIER_DASHBOARD) {
+          } else if (currentView === ViewState.ADMIN || currentView === ViewState.CLIENT_PROFILE || currentView === ViewState.COURIER_DASHBOARD) {
               // Protected routes redirect to login if no user
               setCurrentView(ViewState.LOGIN);
           }
@@ -330,9 +396,7 @@ const MenuFazApp: React.FC = () => {
   };
 
   const handleCloseLocationModal = () => {
-    if (currentAddressObj) {
-      setIsLocationModalOpen(false);
-    }
+    setIsLocationModalOpen(false);
   };
 
   const handleSaveAddress = (newAddress: Address) => {
@@ -349,6 +413,63 @@ const MenuFazApp: React.FC = () => {
       setCurrentView(ViewState.STORE_DETAILS);
   };
 
+  const toggleFavorite = async (storeId: string) => {
+      if (!user) {
+          setCurrentView(ViewState.LOGIN);
+          return;
+      }
+      const isFavorited = favoriteStoreIds.includes(storeId);
+      setFavoriteStoreIds((prev) =>
+          isFavorited ? prev.filter((id) => id !== storeId) : [...prev, storeId]
+      );
+      try {
+          if (isFavorited) {
+              await removeFavoriteStore(storeId);
+          } else {
+              await addFavoriteStore(storeId);
+          }
+      } catch (error) {
+          console.error('Erro ao atualizar favorito', error);
+          setFavoriteStoreIds((prev) =>
+              isFavorited ? [...prev, storeId] : prev.filter((id) => id !== storeId)
+          );
+      }
+  };
+
+  const openStoreById = async (storeId?: string) => {
+      if (!storeId) return;
+      let store = stores.find((item) => item.id === storeId) || null;
+      if (!store) {
+          try {
+              store = await getStoreById(storeId);
+          } catch (error) {
+              console.error('Erro ao carregar loja', error);
+          }
+      }
+      if (store) {
+          setSelectedStore(store);
+          setCurrentView(ViewState.STORE_DETAILS);
+      }
+  };
+
+  const handleSearchSelectStore = async (storeId: string) => {
+      setPendingProductId(null);
+      await openStoreById(storeId);
+      setGlobalSearchTerm('');
+      setSearchResults({ stores: [], products: [] });
+  };
+
+  const handleSearchSelectProduct = async (storeId?: string, productId?: string) => {
+      if (productId) setPendingProductId(productId);
+      await openStoreById(storeId);
+      setGlobalSearchTerm('');
+      setSearchResults({ stores: [], products: [] });
+  };
+  const handleAiProductSelect = async (storeId: string, productId: string) => {
+      setPendingProductId(productId);
+      await openStoreById(storeId);
+  };
+
   const handleAddToCart = (item: CartItem) => {
       setCartItems(prev => [...prev, item]);
   };
@@ -362,16 +483,27 @@ const MenuFazApp: React.FC = () => {
   };
 
   const handleCheckout = () => {
-      if (!user && !tableContext) {
-          setCurrentView(ViewState.LOGIN);
-      } else {
-          setCurrentView(ViewState.CHECKOUT);
-      }
+      setCurrentView(ViewState.CHECKOUT);
   };
 
   const handleOrderPlaced = () => {
       setCartItems([]);
       setCurrentView(tableContext ? ViewState.TABLE_TRACKING : ViewState.CLIENT_ORDERS);
+  };
+  const handleOpenOrderLookup = () => {
+      setOrderLookupError('');
+      setIsOrderLookupOpen(true);
+  };
+
+  const handleConfirmOrderLookup = () => {
+      const digits = orderLookupPhone.replace(/\D/g, '');
+      if (digits.length < 10 || digits.length > 11) {
+          setOrderLookupError('Informe DDD + número.');
+          return;
+      }
+      localStorage.setItem('customerPhone', digits);
+      setIsOrderLookupOpen(false);
+      setCurrentView(ViewState.CLIENT_ORDERS);
   };
 
   const handleLogout = async () => {
@@ -392,6 +524,32 @@ const MenuFazApp: React.FC = () => {
 
   const cartTotal = cartItems.reduce((sum, item) => sum + item.totalPrice, 0);
   const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+
+  useEffect(() => {
+    const term = globalSearchTerm.trim();
+    if (term.length < 2) {
+      setSearchResults({ stores: [], products: [] });
+      setSearchLoading(false);
+      return;
+    }
+    let active = true;
+    setSearchLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const data = await searchCatalog(term);
+        if (active) setSearchResults(data);
+      } catch (error) {
+        console.error('Erro ao buscar catálogo', error);
+        if (active) setSearchResults({ stores: [], products: [] });
+      } finally {
+        if (active) setSearchLoading(false);
+      }
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [globalSearchTerm]);
 
   const filteredStores = useMemo(() => {
     let filtered = stores;
@@ -425,19 +583,20 @@ const MenuFazApp: React.FC = () => {
     }
 
     if (selectedCategory !== 'Todos') {
-        filtered = filtered.filter(store => store.category === selectedCategory);
-    }
-
-    if (globalSearchTerm.trim()) {
-        const lowerTerm = globalSearchTerm.toLowerCase();
+        const selectedNorm = normalize(selectedCategory);
         filtered = filtered.filter(store => {
-            const nameMatch = (store.name || '').toLowerCase().includes(lowerTerm);
-            return nameMatch;
+            const rawCategory = store.category || '';
+            const normalized = normalize(rawCategory);
+            if (!normalized) return false;
+            if (normalized === selectedNorm) return true;
+            if (normalized.includes(selectedNorm)) return true;
+            const parts = normalized.split(/[,/|]+/).map(part => part.trim()).filter(Boolean);
+            return parts.some(part => part === selectedNorm);
         });
     }
-    
+
     return filtered;
-  }, [selectedCategory, currentAddressObj, globalSearchTerm, stores]);
+  }, [selectedCategory, currentAddressObj, stores]);
 
   const handleCategorySelect = (catName: string) => {
     setSelectedCategory(catName);
@@ -459,10 +618,20 @@ const MenuFazApp: React.FC = () => {
       return <CourierDashboard onLogout={handleLogout} />;
   }
 
+  if (currentView === ViewState.API_DOCS) {
+      return <ApiDocs onBack={() => setCurrentView(ViewState.ADMIN)} />;
+  }
+
   if (currentView === ViewState.ADMIN) {
     // If Super Admin AND NOT managing a specific store -> Show Super Dashboard
     if (user?.role === 'ADMIN' && !adminTargetStoreId) {
-        return <SuperAdminDashboard onLogout={handleLogout} onManageStore={handleSuperAdminManageStore} />;
+        return (
+          <SuperAdminDashboard
+            onLogout={handleLogout}
+            onManageStore={handleSuperAdminManageStore}
+            onAccessApi={() => setCurrentView(ViewState.API_DOCS)}
+          />
+        );
     }
     // If Business User OR Super Admin managing a store -> Show Store Dashboard
     return (
@@ -499,15 +668,25 @@ const MenuFazApp: React.FC = () => {
   if (currentView === ViewState.CHECKOUT && selectedStore) {
       const activeTableContext = tableContext && tableContext.storeId === selectedStore.id ? tableContext : undefined;
       return (
-          <Checkout 
-            store={selectedStore}
-            cartItems={cartItems}
-            address={currentAddressObj}
-            onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
-            onOrderPlaced={handleOrderPlaced}
-            onChangeAddress={() => setIsLocationModalOpen(true)}
-            tableContext={activeTableContext}
-          />
+          <>
+              <Checkout 
+                store={selectedStore}
+                cartItems={cartItems}
+                address={currentAddressObj}
+                onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
+                onOrderPlaced={handleOrderPlaced}
+                onChangeAddress={() => setIsLocationModalOpen(true)}
+                tableContext={activeTableContext}
+              />
+              <LocationModal 
+                isOpen={isLocationModalOpen} 
+                onClose={handleCloseLocationModal}
+                onSelectAddress={setCurrentAddressObj}
+                onSaveAddress={handleSaveAddress}
+                savedAddresses={savedAddresses}
+                canClose={!!currentAddressObj} 
+              />
+          </>
       );
   }
 
@@ -527,7 +706,9 @@ const MenuFazApp: React.FC = () => {
       <Header 
         currentView={currentView} 
         onNavigate={setCurrentView} 
+        storeName={currentView === ViewState.STORE_DETAILS ? selectedStore?.name : undefined}
         onOpenLocation={() => setIsLocationModalOpen(true)}
+        onOpenOrderHistory={handleOpenOrderLookup}
         currentAddress={currentAddressString}
         userRole={user?.role || 'GUEST'}
         userName={user?.name}
@@ -537,6 +718,11 @@ const MenuFazApp: React.FC = () => {
         cartTotal={cartTotal}
         onOpenCart={() => setIsCartOpen(true)}
         onSearch={setGlobalSearchTerm}
+        searchValue={globalSearchTerm}
+        searchLoading={searchLoading}
+        searchResults={searchResults}
+        onSearchSelectStore={handleSearchSelectStore}
+        onSearchSelectProduct={handleSearchSelectProduct}
       />
 
       <div className="fixed bottom-6 right-6 z-40 flex flex-col gap-3">
@@ -576,6 +762,45 @@ const MenuFazApp: React.FC = () => {
         canClose={!!currentAddressObj} 
       />
 
+      {isOrderLookupOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Acompanhar pedido</h3>
+                <p className="text-xs text-slate-500">Informe o telefone usado no pedido.</p>
+              </div>
+              <button
+                onClick={() => setIsOrderLookupOpen(false)}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <input
+                type="tel"
+                placeholder="(11) 99999-9999"
+                value={orderLookupPhone}
+                onChange={(e) => {
+                  setOrderLookupPhone(e.target.value);
+                  setOrderLookupError('');
+                }}
+                className={`w-full p-4 rounded-2xl border bg-slate-50 dark:bg-slate-800 dark:text-white outline-none focus:ring-2 ${orderLookupError ? 'border-red-500 focus:ring-red-200' : 'border-slate-200 dark:border-slate-700 focus:ring-red-500'}`}
+              />
+              {orderLookupError && <p className="text-xs text-red-600 font-bold">{orderLookupError}</p>}
+              <button
+                onClick={handleConfirmOrderLookup}
+                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-2xl shadow-lg shadow-red-600/20 moving-border"
+                style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
+              >
+                Ver pedidos
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="flex-grow">
          {currentView === ViewState.STORE_DETAILS && selectedStore ? (
             <StoreDetails 
@@ -588,46 +813,113 @@ const MenuFazApp: React.FC = () => {
                 onOpenCart={() => setIsCartOpen(true)}
                 tableNumber={tableContext?.storeId === selectedStore.id ? tableContext.tableNumber : undefined}
                 onTrackTable={() => setCurrentView(ViewState.TABLE_TRACKING)}
+                isFavorited={favoriteStoreIds.includes(selectedStore.id)}
+                onToggleFavorite={() => toggleFavorite(selectedStore.id)}
+                initialProductId={pendingProductId || undefined}
+                onProductOpened={() => setPendingProductId(null)}
             />
          ) : (
-             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-10">
-              <AIRecommendation onCategorySelect={handleCategorySelect} />
+             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-12">
+              <section className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-rose-50/80 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-10 shadow-sm mb-10">
+                <div className="pointer-events-none absolute -top-16 -right-16 h-56 w-56 rounded-full bg-red-200/40 blur-3xl dark:bg-red-900/20" />
+                <div className="pointer-events-none absolute -bottom-20 -left-12 h-52 w-52 rounded-full bg-orange-200/40 blur-3xl dark:bg-orange-900/20" />
+                <div className="relative grid lg:grid-cols-[1.1fr,0.9fr] gap-8 items-center">
+                  <div>
+                    <span className="text-xs font-bold tracking-[0.2em] text-red-500 uppercase">MenuFaz</span>
+                    <h1 className="text-3xl md:text-5xl font-extrabold text-slate-900 dark:text-white mt-3 leading-tight font-display">
+                      O que voce quer pedir hoje?
+                    </h1>
+                    <p className="text-sm md:text-base text-slate-500 dark:text-slate-400 mt-3 max-w-xl">
+                      Descubra lojas perto de voce e finalize em poucos toques. Sem friccao, com foco no sabor.
+                    </p>
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                        {currentAddressObj ? `Entregando em ${currentAddressObj.city || 'sua cidade'}` : 'Escolha sua localizacao'}
+                      </div>
+                      <div className="px-4 py-2 rounded-full bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 text-xs font-bold text-slate-600 dark:text-slate-300">
+                        {stores.length} lojas ativas
+                      </div>
+                    </div>
+                    <div className="mt-6 flex flex-wrap gap-3">
+                      <a
+                        href="#stores-section"
+                        className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-xl font-bold transition-colors inline-flex items-center gap-2 shadow-lg shadow-red-600/30"
+                      >
+                        Explorar lojas <ArrowRight size={18} />
+                      </a>
+                      <button
+                        onClick={() => setIsLocationModalOpen(true)}
+                        className="bg-white dark:bg-slate-800 text-slate-700 dark:text-white border border-slate-200 dark:border-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                      >
+                        Ajustar local
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid gap-4">
+                    <div className="bg-white/90 dark:bg-slate-900/80 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-5 shadow-sm">
+                      <p className="text-xs font-bold text-slate-400 uppercase tracking-[0.2em]">Destaques de agora</p>
+                      <p className="text-2xl font-extrabold text-slate-900 dark:text-white mt-2 font-display">
+                        {filteredStores.length > 0 ? `${filteredStores.length} opcoes para voce` : 'Nenhuma loja para esta categoria'}
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                        Escolha uma categoria e aproveite a melhor selecao perto de voce.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-4">
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-[0.2em]">Entrega</p>
+                        <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-2 font-display">Ultra rapida</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">Tempo medio reduzido</p>
+                      </div>
+                      <div className="rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-4">
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-[0.2em]">Retirada</p>
+                        <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-2 font-display">Sem fila</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">Agilidade na retirada</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <AIRecommendation onCategorySelect={handleCategorySelect} onProductSelect={handleAiProductSelect} />
               
-              {/* Categories */}
-              <div className="mb-12">
-                <div className="flex justify-between items-end mb-4">
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-white">Categorias</h2>
+              <section className="mb-12">
+                <div className="flex items-end justify-between mb-4">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900 dark:text-white font-display">Categorias</h2>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Explore por tipo de comida.</p>
+                  </div>
                 </div>
                 <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-hide px-1">
                    <button 
                       onClick={() => setSelectedCategory('Todos')}
-                      className={`flex flex-col items-center min-w-[80px] gap-2 p-3 rounded-xl transition-all border ${selectedCategory === 'Todos' ? 'bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-800 transform scale-105 shadow-sm' : 'bg-white dark:bg-slate-800 border-gray-100 dark:border-slate-700 hover:border-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700'}`}
+                      className={`flex flex-col items-center min-w-[90px] gap-2 p-3 rounded-2xl transition-all border ${selectedCategory === 'Todos' ? 'bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-800 transform scale-105 shadow-sm' : 'bg-white dark:bg-slate-800 border-gray-100 dark:border-slate-700 hover:border-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700'}`}
                     >
                       <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-700 flex items-center justify-center text-2xl shadow-sm">
                         🏠
                       </div>
-                      <span className={`text-sm font-medium ${selectedCategory === 'Todos' ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}`}>Todos</span>
+                      <span className={`text-sm font-semibold ${selectedCategory === 'Todos' ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}`}>Todos</span>
                     </button>
                   {CATEGORIES.map((cat) => (
                     <button 
                       key={cat.id} 
                       onClick={() => setSelectedCategory(cat.name)}
-                      className={`flex flex-col items-center min-w-[80px] gap-2 p-3 rounded-xl transition-all border ${selectedCategory === cat.name ? 'bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-800 transform scale-105 shadow-sm' : 'bg-white dark:bg-slate-800 border-gray-100 dark:border-slate-700 hover:border-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700'}`}
+                      className={`flex flex-col items-center min-w-[90px] gap-2 p-3 rounded-2xl transition-all border ${selectedCategory === cat.name ? 'bg-red-50 border-red-200 dark:bg-red-900/30 dark:border-red-800 transform scale-105 shadow-sm' : 'bg-white dark:bg-slate-800 border-gray-100 dark:border-slate-700 hover:border-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700'}`}
                     >
                       <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-700 flex items-center justify-center text-2xl shadow-sm">
                         {cat.icon}
                       </div>
-                      <span className={`text-sm font-medium ${selectedCategory === cat.name ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}`}>{cat.name}</span>
+                      <span className={`text-sm font-semibold ${selectedCategory === cat.name ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400'}`}>{cat.name}</span>
                     </button>
                   ))}
                 </div>
-              </div>
+              </section>
 
               {/* Stores Grid */}
               <section id="stores-section" className="mb-12">
-                <div className="flex justify-between items-center mb-6">
+                <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
                   <div className="flex flex-col">
-                      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+                      <h2 className="text-2xl font-bold text-gray-900 dark:text-white font-display">
                         {globalSearchTerm ? `Resultados para "${globalSearchTerm}"` : (selectedCategory === 'Todos' ? 'Lojas Próximas' : `Melhores em ${selectedCategory}`)}
                       </h2>
                       <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -635,6 +927,22 @@ const MenuFazApp: React.FC = () => {
                                 ? `Mostrando lojas em ${currentAddressObj.city || 'sua cidade'}.`
                                 : `Mostrando todas as lojas cadastradas.`}
                       </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-bold text-slate-600">
+                      {filteredStores.length} resultados
+                    </div>
+                    {(globalSearchTerm || selectedCategory !== 'Todos') && (
+                      <button
+                        onClick={() => {
+                          setGlobalSearchTerm('');
+                          setSelectedCategory('Todos');
+                        }}
+                        className="px-3 py-1.5 rounded-full border border-red-200 bg-red-50 text-xs font-bold text-red-600 hover:bg-red-100 transition-colors"
+                      >
+                        Limpar filtros
+                      </button>
+                    )}
                   </div>
                 </div>
                 
@@ -645,15 +953,17 @@ const MenuFazApp: React.FC = () => {
                         key={store.id} 
                         store={store} 
                         onClick={handleStoreClick}
+                        isFavorited={favoriteStoreIds.includes(store.id)}
+                        onToggleFavorite={() => toggleFavorite(store.id)}
                       />
                     ))}
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center py-20 bg-white dark:bg-slate-800 rounded-2xl border border-dashed border-gray-200 dark:border-slate-700 shadow-sm text-center p-8">
+                  <div className="flex flex-col items-center justify-center py-20 bg-white dark:bg-slate-800 rounded-3xl border border-dashed border-gray-200 dark:border-slate-700 shadow-sm text-center p-8">
                       <div className="w-20 h-20 bg-gray-50 dark:bg-slate-700 rounded-full flex items-center justify-center mb-4 text-gray-300 dark:text-gray-500">
                         <MapPinOff size={40} />
                       </div>
-                      <h3 className="text-lg font-bold text-gray-800 dark:text-white mb-2">
+                      <h3 className="text-lg font-bold text-gray-800 dark:text-white mb-2 font-display">
                           Nenhuma loja encontrada
                       </h3>
                       <p className="text-gray-500 dark:text-gray-400 max-w-md mx-auto mb-6">

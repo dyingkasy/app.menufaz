@@ -1,28 +1,34 @@
 
 import React from 'react';
-import { Star, Clock, Lock } from 'lucide-react';
+import { Star, Clock, Lock, Heart } from 'lucide-react';
 import { Store } from '../types';
 import { formatCurrencyBRL } from '../utils/format';
+import { imageKitUrl } from '../utils/imagekit';
 
 interface StoreCardProps {
   store: Store;
   onClick: (store: Store) => void;
+  isFavorited?: boolean;
+  onToggleFavorite?: () => void;
 }
 
-const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
+const StoreCard: React.FC<StoreCardProps> = ({ store, onClick, isFavorited = false, onToggleFavorite }) => {
   const ratingCount = Number(store.ratingCount ?? 0);
   const ratingValue = Number(store.rating) || 0;
   const ratingLabel = ratingCount > 0 ? ratingValue.toFixed(1) : 'Novo';
+  const hasFreeDelivery = (Number(store.deliveryFee) || 0) === 0;
 
   return (
     <div 
       onClick={() => onClick(store)}
-      className={`group bg-white dark:bg-slate-800 rounded-xl shadow-sm hover:shadow-xl border border-gray-100 dark:border-slate-700 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col h-full ${!store.isActive ? 'grayscale opacity-90 hover:scale-100' : 'hover:scale-[1.02]'}`}
+      className={`group bg-white/95 dark:bg-slate-800 rounded-2xl shadow-sm hover:shadow-xl border border-slate-200/70 dark:border-slate-700 transition-all duration-300 cursor-pointer overflow-hidden flex flex-col h-full ${!store.isActive ? 'grayscale opacity-90 hover:scale-100' : 'hover:scale-[1.02]'}`}
     >
-      <div className="relative h-40 overflow-hidden">
+      <div className="relative h-44 overflow-hidden">
         <img 
-          src={store.imageUrl} 
+          src={imageKitUrl(store.imageUrl, { width: 640, quality: 70 })} 
           alt={store.name} 
+          loading="lazy"
+          decoding="async"
           className="w-full h-full object-cover transform group-hover:scale-110 transition-transform duration-700 ease-out"
         />
         {store.isPopular && store.isActive && (
@@ -30,6 +36,33 @@ const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
             Popular
           </span>
         )}
+        {store.isActive && (
+          <div className="absolute bottom-3 left-3 flex flex-wrap gap-2 z-10">
+            <span className="bg-white/90 text-slate-700 text-[11px] font-bold px-2.5 py-1 rounded-full border border-white/60 shadow-sm">
+              {store.deliveryTime}
+            </span>
+            {hasFreeDelivery && (
+              <span className="bg-emerald-500/90 text-white text-[11px] font-bold px-2.5 py-1 rounded-full shadow-sm">
+                Entrega gratis
+              </span>
+            )}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (onToggleFavorite) onToggleFavorite();
+          }}
+          className={`absolute top-2 right-2 w-9 h-9 rounded-full border flex items-center justify-center transition-colors z-10 ${
+            isFavorited
+              ? 'bg-red-600 border-red-600 text-white'
+              : 'bg-white/90 border-white text-gray-400 hover:text-red-500'
+          }`}
+          aria-label={isFavorited ? 'Remover favorito' : 'Favoritar loja'}
+        >
+          <Heart size={16} fill={isFavorited ? 'currentColor' : 'none'} />
+        </button>
         {!store.isActive && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-20">
              <span className="bg-slate-800 text-white px-4 py-1.5 rounded-lg font-bold text-sm flex items-center gap-2 border border-slate-600 shadow-lg">
@@ -37,12 +70,12 @@ const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
              </span>
           </div>
         )}
-        <div className={`absolute inset-0 bg-gradient-to-t from-black/20 to-transparent opacity-0 ${store.isActive ? 'group-hover:opacity-100' : ''} transition-opacity duration-300`} />
+        <div className={`absolute inset-0 bg-gradient-to-t from-black/30 via-black/0 to-transparent opacity-0 ${store.isActive ? 'group-hover:opacity-100' : ''} transition-opacity duration-300`} />
       </div>
       
       <div className="p-4 flex flex-col flex-grow relative">
         <div className="flex justify-between items-start mb-1">
-          <h3 className="font-bold text-gray-800 dark:text-white text-lg line-clamp-1 group-hover:text-red-600 dark:group-hover:text-red-400 transition-colors">
+          <h3 className="font-bold text-gray-800 dark:text-white text-lg line-clamp-1 group-hover:text-red-600 dark:group-hover:text-red-400 transition-colors font-display">
             {store.name}
           </h3>
           <div className={`flex items-center gap-1 font-semibold text-sm ${ratingCount > 0 ? 'text-yellow-500' : 'text-gray-400'}`}>
@@ -58,8 +91,8 @@ const StoreCard: React.FC<StoreCardProps> = ({ store, onClick }) => {
             <Clock size={14} />
             {store.deliveryTime}{store.acceptsPickup && store.pickupTime ? ` • Retirada ${store.pickupTime}` : ''}
           </div>
-          <div className={(Number(store.deliveryFee) || 0) === 0 ? 'text-green-600 dark:text-green-400 font-bold' : ''}>
-            {(Number(store.deliveryFee) || 0) === 0 ? 'Entrega Grátis' : formatCurrencyBRL(Number(store.deliveryFee) || 0)}
+          <div className={hasFreeDelivery ? 'text-emerald-600 dark:text-emerald-400 font-bold' : ''}>
+            {hasFreeDelivery ? 'Entrega Gratis' : formatCurrencyBRL(Number(store.deliveryFee) || 0)}
           </div>
         </div>
       </div>
