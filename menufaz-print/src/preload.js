@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('menufazPrint', {
   getState: () => ipcRenderer.invoke('get-state'),
   setMerchant: (payload) => ipcRenderer.invoke('set-merchant', payload),
+  resetConfig: () => ipcRenderer.invoke('reset-config'),
   refreshPrinters: () => ipcRenderer.invoke('refresh-printers'),
   setPrinter: (printerName) => ipcRenderer.invoke('set-printer', { printerName }),
   testPrint: () => ipcRenderer.invoke('test-print'),

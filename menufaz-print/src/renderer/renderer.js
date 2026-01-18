@@ -14,6 +14,7 @@ const elements = {
   apiUrlRow: document.getElementById('apiUrlRow'),
   apiUrlReadOnly: document.getElementById('apiUrlReadOnly'),
   saveMerchant: document.getElementById('saveMerchant'),
+  resetConfig: document.getElementById('resetConfig'),
   printerSelect: document.getElementById('printerSelect'),
   refreshPrinters: document.getElementById('refreshPrinters'),
   testPrint: document.getElementById('testPrint'),
@@ -97,6 +98,11 @@ elements.saveMerchant.addEventListener('click', async () => {
     ? state.config.apiUrl || 'https://app.menufaz.com'
     : elements.apiUrlInput.value.trim();
   await window.menufazPrint.setMerchant({ merchantId, apiUrl });
+  await loadState();
+});
+
+elements.resetConfig.addEventListener('click', async () => {
+  await window.menufazPrint.resetConfig();
   await loadState();
 });
 

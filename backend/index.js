@@ -17,8 +17,42 @@ const geminiApiKey = process.env.GEMINI_API_KEY || '';
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 
+const ensurePrintTables = async () => {
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS print_devices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      merchant_id TEXT NOT NULL,
+      machine_id TEXT NOT NULL,
+      token TEXT NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      UNIQUE (merchant_id, machine_id)
+    )
+    `
+  );
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS print_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      merchant_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      printed_at TIMESTAMP WITH TIME ZONE
+    )
+    `
+  );
+  await query('CREATE INDEX IF NOT EXISTS idx_print_devices_merchant_id ON print_devices(merchant_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_merchant_status ON print_jobs(merchant_id, status)');
+};
+
 initErrorLogTable().catch((error) => {
   console.error('Failed to initialize error log table', error);
+});
+
+ensurePrintTables().catch((error) => {
+  console.error('Failed to initialize print tables', error);
 });
 
 app.use((req, res, next) => {
@@ -142,6 +176,10 @@ const stripSplitSurcharge = (payload) => {
 };
 
 const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'];
+const PRINT_JOB_STATUS = {
+  pending: 'pending',
+  printed: 'printed'
+};
 
 const normalizeFlavorPricesBySize = (value) => {
   if (!value || typeof value !== 'object') return {};
@@ -394,6 +432,11 @@ const getMerchantIdFromRequest = (req) => {
   return raw ? String(raw) : '';
 };
 
+const getPrintTokenFromRequest = (req) => {
+  const auth = req.headers.authorization || '';
+  return auth.replace('Bearer ', '').trim();
+};
+
 const getStoreByMerchantId = async (merchantId) => {
   const { rows } = await query('SELECT id, data FROM stores WHERE data->>\'merchantId\' = $1', [merchantId]);
   if (rows.length === 0) return null;
@@ -518,6 +561,139 @@ const ensureUserExists = async (userId) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
+});
+
+// --- Print ---
+app.post('/api/print/register', async (req, res) => {
+  try {
+    const merchantId = getMerchantIdFromRequest(req);
+    const machineId = (req.body?.machineId || '').toString().trim();
+    if (!merchantId || !machineId) {
+      return res.status(400).json({ error: 'merchantId and machineId required' });
+    }
+
+    const store = await getStoreByMerchantId(merchantId);
+    if (!store) {
+      return res.status(404).json({ error: 'store not found' });
+    }
+
+    const token = crypto.randomBytes(24).toString('hex');
+    await query(
+      `
+      INSERT INTO print_devices (merchant_id, machine_id, token)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (merchant_id, machine_id)
+      DO UPDATE SET token = EXCLUDED.token, updated_at = NOW()
+      `,
+      [merchantId, machineId, token]
+    );
+
+    const storeName =
+      store.data?.name ||
+      store.data?.storeName ||
+      store.data?.tradeName ||
+      store.data?.companyName ||
+      '';
+
+    return res.json({ storeName, printToken: token });
+  } catch (error) {
+    await logError({
+      source: 'server',
+      message: 'failed to register print device',
+      stack: error?.stack,
+      context: { route: 'POST /api/print/register' }
+    });
+    return res.status(500).json({ error: 'failed to register print device' });
+  }
+});
+
+app.get('/api/print/jobs', async (req, res) => {
+  try {
+    const merchantId = getMerchantIdFromRequest(req);
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId required' });
+    }
+    const token = getPrintTokenFromRequest(req);
+    if (!token) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const { rows: deviceRows } = await query(
+      'SELECT 1 FROM print_devices WHERE merchant_id = $1 AND token = $2',
+      [merchantId, token]
+    );
+    if (deviceRows.length === 0) {
+      return res.status(403).json({ error: 'invalid token' });
+    }
+
+    const { rows } = await query(
+      `
+      SELECT id, payload, created_at
+      FROM print_jobs
+      WHERE merchant_id = $1 AND status = $2
+      ORDER BY created_at ASC
+      `,
+      [merchantId, PRINT_JOB_STATUS.pending]
+    );
+    const jobs = rows.map((row) => ({ id: row.id, ...(row.payload || {}) }));
+    return res.json(jobs);
+  } catch (error) {
+    await logError({
+      source: 'server',
+      message: 'failed to fetch print jobs',
+      stack: error?.stack,
+      context: { route: 'GET /api/print/jobs' }
+    });
+    return res.status(500).json({ error: 'failed to fetch print jobs' });
+  }
+});
+
+app.post('/api/print/jobs/:id/printed', async (req, res) => {
+  try {
+    const token = getPrintTokenFromRequest(req);
+    if (!token) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    let merchantId = getMerchantIdFromRequest(req);
+    if (merchantId) {
+      const { rows: deviceRows } = await query(
+        'SELECT 1 FROM print_devices WHERE merchant_id = $1 AND token = $2',
+        [merchantId, token]
+      );
+      if (deviceRows.length === 0) {
+        return res.status(403).json({ error: 'invalid token' });
+      }
+    } else {
+      const { rows } = await query('SELECT merchant_id FROM print_devices WHERE token = $1', [token]);
+      if (rows.length === 0) {
+        return res.status(403).json({ error: 'invalid token' });
+      }
+      merchantId = rows[0].merchant_id;
+    }
+
+    const { rowCount } = await query(
+      `
+      UPDATE print_jobs
+      SET status = $1, printed_at = NOW()
+      WHERE id = $2 AND merchant_id = $3 AND status = $4
+      `,
+      [PRINT_JOB_STATUS.printed, req.params.id, merchantId, PRINT_JOB_STATUS.pending]
+    );
+
+    if (!rowCount) {
+      return res.status(404).json({ error: 'job not found' });
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    await logError({
+      source: 'server',
+      message: 'failed to mark print job',
+      stack: error?.stack,
+      context: { route: 'POST /api/print/jobs/:id/printed', jobId: req.params.id }
+    });
+    return res.status(500).json({ error: 'failed to mark print job' });
+  }
 });
 
 // --- Auth ---

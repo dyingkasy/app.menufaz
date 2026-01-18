@@ -10,8 +10,9 @@ try {
   printer = null;
 }
 
-const getDefaultApiUrl = () =>
-  app && app.isPackaged ? 'https://app.menufaz.com' : 'http://localhost:3001';
+const DEFAULT_API_URL_PROD = 'https://app.menufaz.com';
+const DEFAULT_API_URL_DEV = 'http://localhost:3001';
+const getDefaultApiUrl = () => (app && app.isPackaged ? DEFAULT_API_URL_PROD : DEFAULT_API_URL_DEV);
 const CONFIG_FILENAME = 'config.json';
 const POLL_INTERVAL_MS = 5000;
 
@@ -66,6 +67,18 @@ const normalizeArgs = () => {
   return output;
 };
 
+const isLocalhostUrl = (value) => {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    const host = (parsed.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
+  } catch (error) {
+    const normalized = String(value).toLowerCase();
+    return normalized.includes('localhost') || normalized.includes('127.0.0.1');
+  }
+};
+
 const getConfigPaths = () => {
   const cwdPath = path.join(process.cwd(), CONFIG_FILENAME);
   const userDataPath = path.join(app.getPath('userData'), CONFIG_FILENAME);
@@ -90,20 +103,25 @@ const saveConfig = (config) => {
   fs.writeFileSync(userDataPath, JSON.stringify(config, null, 2));
 };
 
-const mergeConfigWithArgs = (config) => {
+const resolveConfig = (rawConfig = {}) => {
   const args = normalizeArgs();
   const envApiUrl = process.env.MENUFAZ_API_URL || process.env.MEN_UFAZ_API_URL || '';
-  const merchantId = args.merchantId || args['merchant-id'] || config.merchantId || '';
-  const apiUrl =
-    args.apiUrl ||
-    args['api-url'] ||
-    envApiUrl ||
-    config.apiUrl ||
-    getDefaultApiUrl();
+  const cliApiUrl = args.apiUrl || args['api-url'] || '';
+  const merchantId = args.merchantId || args['merchant-id'] || rawConfig.merchantId || '';
+  const apiUrlCandidate = cliApiUrl || envApiUrl || rawConfig.apiUrl || getDefaultApiUrl();
+  let apiUrlSource = cliApiUrl ? 'cli' : envApiUrl ? 'env' : rawConfig.apiUrl ? 'config' : 'default';
+  let apiUrl = apiUrlCandidate;
+  if (app.isPackaged && apiUrlSource === 'config' && isLocalhostUrl(apiUrl)) {
+    apiUrl = getDefaultApiUrl();
+    apiUrlSource = 'default';
+  }
   return {
-    ...config,
-    merchantId,
-    apiUrl
+    config: {
+      ...rawConfig,
+      merchantId,
+      apiUrl
+    },
+    apiUrlSource
   };
 };
 
@@ -153,7 +171,11 @@ const registerMachine = async (config) => {
     merchantId: config.merchantId,
     machineId: config.machineId
   };
-  logInfo('registering machine', { merchantId: config.merchantId, machineId: config.machineId });
+  logInfo('registering machine', {
+    merchantId: config.merchantId,
+    machineId: config.machineId,
+    url: `${config.apiUrl}/api/print/register`
+  });
   const data = await apiRequest(config, '/api/print/register', {
     method: 'POST',
     body: payload
@@ -213,6 +235,7 @@ const printJob = (config, job) => new Promise((resolve, reject) => {
 });
 
 const markPrinted = async (config, jobId) => {
+  logInfo('marking printed', { jobId, url: `${config.apiUrl}/api/print/jobs/${jobId}/printed` });
   await apiRequest(config, `/api/print/jobs/${jobId}/printed`, {
     method: 'POST',
     headers: {
@@ -224,12 +247,14 @@ const markPrinted = async (config, jobId) => {
 const pollJobs = async () => {
   if (pollingInFlight) return;
   if (!mainWindow) return;
-  const config = mainWindow.webContents.getURL() ? loadConfig() : loadConfig();
+  const config = ensureConfig();
   if (!config.printToken || !config.merchantId) return;
   pollingInFlight = true;
   try {
     validatePrinter(config);
-    logInfo('polling jobs');
+    logInfo('polling jobs', {
+      url: `${config.apiUrl}/api/print/jobs?merchantId=${encodeURIComponent(config.merchantId)}`
+    });
     const jobs = await apiRequest(
       config,
       `/api/print/jobs?merchantId=${encodeURIComponent(config.merchantId)}`,
@@ -282,13 +307,20 @@ const stopPolling = () => {
 
 const ensureConfig = () => {
   const rawConfig = loadConfig();
-  const merged = mergeConfigWithArgs(rawConfig);
-  if (!merged.machineId) {
-    merged.machineId = randomUUID();
+  const { config: merged, apiUrlSource } = resolveConfig(rawConfig);
+  const nextConfig = { ...merged };
+  if (!nextConfig.machineId) {
+    nextConfig.machineId = randomUUID();
   }
-  if (!merged.apiUrl) merged.apiUrl = getDefaultApiUrl();
-  saveConfig(merged);
-  return merged;
+  if (!nextConfig.apiUrl) nextConfig.apiUrl = getDefaultApiUrl();
+  if (app.isPackaged && apiUrlSource === 'default' && isLocalhostUrl(rawConfig?.apiUrl || '')) {
+    logInfo('overrode localhost apiUrl with production default', {
+      previousApiUrl: rawConfig.apiUrl,
+      apiUrl: nextConfig.apiUrl
+    });
+  }
+  saveConfig(nextConfig);
+  return nextConfig;
 };
 
 const setupTray = () => {
@@ -367,13 +399,33 @@ ipcMain.handle('get-state', () => {
 
 ipcMain.handle('set-merchant', async (_event, payload) => {
   const config = ensureConfig();
+  const incomingApiUrl = payload.apiUrl || config.apiUrl;
+  const nextApiUrl =
+    app.isPackaged && isLocalhostUrl(incomingApiUrl) ? getDefaultApiUrl() : incomingApiUrl;
   const nextConfig = {
     ...config,
     merchantId: payload.merchantId || config.merchantId,
-    apiUrl: payload.apiUrl || config.apiUrl
+    apiUrl: nextApiUrl
   };
   saveConfig(nextConfig);
-  logInfo('merchant updated', { merchantId: nextConfig.merchantId });
+  logInfo('merchant updated', { merchantId: nextConfig.merchantId, apiUrl: nextConfig.apiUrl });
+  await initialize();
+  return { success: true, config: nextConfig };
+});
+
+ipcMain.handle('reset-config', async () => {
+  const { userDataPath } = getConfigPaths();
+  const current = loadConfig();
+  try {
+    if (fs.existsSync(userDataPath)) fs.unlinkSync(userDataPath);
+  } catch {}
+  const nextConfig = {
+    merchantId: current.merchantId || '',
+    machineId: current.machineId || randomUUID(),
+    apiUrl: getDefaultApiUrl()
+  };
+  saveConfig(nextConfig);
+  logInfo('config reset', { merchantId: nextConfig.merchantId, apiUrl: nextConfig.apiUrl });
   await initialize();
   return { success: true, config: nextConfig };
 });

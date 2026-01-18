@@ -113,7 +113,28 @@ CREATE TABLE IF NOT EXISTS error_logs (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS print_devices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_id TEXT NOT NULL,
+  machine_id TEXT NOT NULL,
+  token TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE (merchant_id, machine_id)
+);
+
+CREATE TABLE IF NOT EXISTS print_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  printed_at TIMESTAMP WITH TIME ZONE
+);
+
 CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_print_devices_merchant_id ON print_devices(merchant_id);
+CREATE INDEX IF NOT EXISTS idx_print_jobs_merchant_status ON print_jobs(merchant_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_orders_store_id ON orders(store_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);

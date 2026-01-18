@@ -1,6 +1,6 @@
 {
   "name": "menufaz-print",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Menufaz Print - local Windows app for automatic order printing",
   "main": "src/main.js",
   "private": true,
