@@ -443,6 +443,25 @@ const getStoreByMerchantId = async (merchantId) => {
   return { id: rows[0].id, data: rows[0].data || {} };
 };
 
+const getStoreByOwnerId = async (ownerId) => {
+  if (!ownerId) return null;
+  const { rows } = await query('SELECT id, data FROM stores WHERE owner_id = $1 ORDER BY created_at ASC LIMIT 1', [
+    ownerId
+  ]);
+  if (rows.length === 0) return null;
+  return { id: rows[0].id, data: rows[0].data || {} };
+};
+
+const ensureProfileStoreId = async (userId, profileData) => {
+  if (!userId) return profileData;
+  if (profileData?.storeId) return profileData;
+  const store = await getStoreByOwnerId(userId);
+  if (!store) return profileData;
+  const nextProfile = { ...(profileData || {}), storeId: store.id };
+  await upsertProfile(userId, nextProfile);
+  return nextProfile;
+};
+
 const generateUniqueMerchantId = async () => {
   let candidate = crypto.randomUUID();
   let attempts = 0;
@@ -755,7 +774,8 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'invalid credentials' });
     }
 
-    const profileData = await getProfile(user.id);
+    let profileData = await getProfile(user.id);
+    profileData = await ensureProfileStoreId(user.id, profileData);
     const token = signToken({ sub: user.id, role: user.role });
     res.json({ token, user: createUserResponse(user.id, user.role, profileData) });
   } catch (error) {
@@ -778,7 +798,8 @@ app.get('/api/auth/me', async (req, res) => {
   }
   try {
     const payload = jwt.verify(token, jwtSecret);
-    const profileData = await getProfile(payload.sub);
+    let profileData = await getProfile(payload.sub);
+    profileData = await ensureProfileStoreId(payload.sub, profileData);
     res.json({ user: createUserResponse(payload.sub, payload.role, profileData) });
   } catch (error) {
     await logError({
@@ -894,10 +915,17 @@ app.post('/api/stores/with-user', async (req, res) => {
       email
     });
 
-    await client.query(
-      'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3)',
+    const storeResult = await client.query(
+      'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3) RETURNING id',
       [userId, fullStoreData.city || null, fullStoreData]
     );
+    const storeId = storeResult.rows[0]?.id;
+    if (storeId) {
+      await client.query(
+        'UPDATE profiles SET data = data || $1 WHERE user_id = $2',
+        [{ storeId }, userId]
+      );
+    }
   });
 
   res.json({ ok: true });
@@ -1258,10 +1286,17 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
       ownerId: userId
     };
 
-    await client.query(
-      'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3)',
+    const storeResult = await client.query(
+      'INSERT INTO stores (owner_id, city, data) VALUES ($1, $2, $3) RETURNING id',
       [userId, payload.city || null, storeData]
     );
+    const storeId = storeResult.rows[0]?.id;
+    if (storeId) {
+      await client.query(
+        'UPDATE profiles SET data = data || $1 WHERE user_id = $2',
+        [{ storeId }, userId]
+      );
+    }
   });
 
   res.json({ ok: true });
