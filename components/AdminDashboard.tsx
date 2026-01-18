@@ -107,6 +107,15 @@ const PRICING_STRATEGIES = [
     { id: 'MAX', label: 'Maior sabor' }
 ];
 
+const ORDER_STATUS_SEQUENCE: Order['status'][] = [
+    'PENDING',
+    'PREPARING',
+    'WAITING_COURIER',
+    'DELIVERING',
+    'COMPLETED',
+    'CANCELLED'
+];
+
 const normalizeSizeKey = (value: string) =>
     (value || '')
         .toString()
@@ -219,6 +228,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
   
   // Refs for File Uploads
   const storeLogoInputRef = useRef<HTMLInputElement>(null);
@@ -1398,11 +1408,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const handleDeleteCoupon = async (id: string) => {
       if(confirm("Excluir cupom?")) { try { await deleteCoupon(id); setCoupons(prev => prev.filter(c => c.id !== id)); } catch(e) { alert("Erro ao excluir"); } }
   };
+  const showToast = (message: string, tone: 'error' | 'success' = 'error') => {
+      setToast({ message, tone });
+      setTimeout(() => setToast(null), 4000);
+  };
   const handleUpdateStatus = async (orderId: string, status: string, reason?: string) => {
       try {
           await updateOrderStatus(orderId, status as Order['status'], reason);
       } catch (e) {
-          alert("Erro ao atualizar status.");
+          const message = e instanceof Error ? e.message : 'Erro ao atualizar status.';
+          showToast(message);
       }
   };
 
@@ -1880,6 +1895,19 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
 
   const renderOrders = () => {
+      const getStatusIndex = (status?: string) => {
+          if (!status) return -1;
+          return ORDER_STATUS_SEQUENCE.indexOf(status as Order['status']);
+      };
+      const isBackwardStatus = (current: Order['status'], next: Order['status']) => {
+          if (!current || !next || current === next) return false;
+          if (current === 'COMPLETED' || current === 'CANCELLED') return true;
+          if (next === 'CANCELLED') return false;
+          const currentIndex = getStatusIndex(current);
+          const nextIndex = getStatusIndex(next);
+          if (currentIndex === -1 || nextIndex === -1) return false;
+          return nextIndex < currentIndex;
+      };
       const columns = [
           { id: 'PENDING', label: 'Novos', color: 'bg-yellow-500' },
           { id: 'PREPARING', label: 'Em Preparo', color: 'bg-blue-500' },
@@ -1930,6 +1958,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           if (!id) return;
           const current = orders.find((order) => order.id === id);
           if (!current || current.status === columnId) return;
+          if (isBackwardStatus(current.status, columnId as Order['status'])) {
+              showToast('Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.');
+              return;
+          }
           if (columnId === 'CANCELLED') {
               const reason = prompt('Motivo do cancelamento?');
               if (!reason?.trim()) return;
@@ -4076,6 +4108,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-950 flex font-sans transition-colors duration-300">
+      {toast && (
+        <div className="fixed top-4 right-4 z-[120] animate-fade-in">
+          <div
+            className={`flex items-start gap-3 rounded-2xl px-4 py-3 shadow-xl border ${
+              toast.tone === 'success'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-rose-50 text-rose-700 border-rose-200'
+            }`}
+          >
+            <AlertCircle size={18} className="mt-0.5" />
+            <span className="text-sm font-semibold leading-snug">{toast.message}</span>
+          </div>
+        </div>
+      )}
       {/* Sidebar */}
       <aside className={`fixed md:sticky top-0 left-0 h-screen ${isSidebarCollapsed ? 'w-16' : 'w-56'} bg-white dark:bg-slate-900 border-r border-gray-200 dark:border-slate-800 z-50 flex flex-col transition-all duration-300 overflow-hidden ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
             <div className={`p-6 border-b border-gray-100 dark:border-slate-800 flex items-center gap-3 ${isSidebarCollapsed ? 'justify-center' : ''}`}>

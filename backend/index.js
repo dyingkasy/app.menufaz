@@ -191,6 +191,25 @@ const PRINT_JOB_KIND = {
   reprint: 'REPRINT'
 };
 
+const ORDER_STATUS_SEQUENCE = [
+  'PENDING',
+  'PREPARING',
+  'WAITING_COURIER',
+  'DELIVERING',
+  'COMPLETED',
+  'CANCELLED'
+];
+
+const canAdvanceOrderStatus = (currentStatus, nextStatus) => {
+  if (!currentStatus || !nextStatus || currentStatus === nextStatus) return true;
+  if (currentStatus === 'COMPLETED' || currentStatus === 'CANCELLED') return false;
+  if (nextStatus === 'CANCELLED') return true;
+  const currentIndex = ORDER_STATUS_SEQUENCE.indexOf(currentStatus);
+  const nextIndex = ORDER_STATUS_SEQUENCE.indexOf(nextStatus);
+  if (currentIndex === -1 || nextIndex === -1) return true;
+  return nextIndex >= currentIndex;
+};
+
 const normalizeFlavorPricesBySize = (value) => {
   if (!value || typeof value !== 'object') return {};
   const output = {};
@@ -2935,11 +2954,18 @@ app.put('/api/orders/:id/assign', async (req, res) => {
 app.put('/api/orders/:id/status', async (req, res) => {
   const { status, reason } = req.body || {};
   if (!status) return res.status(400).json({ error: 'status required' });
+  const { rows: currentRows } = await query('SELECT status, data FROM orders WHERE id = $1', [req.params.id]);
+  if (currentRows.length === 0) return res.status(404).json({ error: 'not found' });
+  const currentStatus = currentRows[0].status;
   const resolvedStatus = await resolvePickupStatus(req.params.id, null, status);
+  if (!canAdvanceOrderStatus(currentStatus, resolvedStatus)) {
+    return res.status(400).json({
+      error:
+        'Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.'
+    });
+  }
   if (reason && status === 'CANCELLED') {
-    const { rows } = await query('SELECT data FROM orders WHERE id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'not found' });
-    const data = { ...(rows[0].data || {}), cancelReason: String(reason) };
+    const data = { ...(currentRows[0].data || {}), cancelReason: String(reason) };
     await query('UPDATE orders SET status = $1, data = $2 WHERE id = $3', [resolvedStatus, data, req.params.id]);
     return res.json({ ok: true });
   }
@@ -3151,20 +3177,36 @@ app.put('/api/qualifaz/orders/:id/status', async (req, res) => {
         orderId: req.params.id
       });
     }
+    const { rows: currentRows } = await query(
+      'SELECT status, data FROM orders WHERE id = $1 AND store_id = $2',
+      [req.params.id, store.id]
+    );
+    if (currentRows.length === 0) {
+      return respondQualifazError(res, 404, 'QUALIFAZ_ORDER_NOT_FOUND', 'order not found', {
+        route: 'PUT /qualifaz/orders/:id/status',
+        merchantId,
+        orderId: req.params.id
+      });
+    }
+    const currentStatus = currentRows[0].status;
     const resolvedStatus = await resolvePickupStatus(req.params.id, store.id, status);
-    if (reason && status === 'CANCELLED') {
-      const { rows } = await query('SELECT data FROM orders WHERE id = $1 AND store_id = $2', [
-        req.params.id,
-        store.id
-      ]);
-      if (rows.length === 0) {
-        return respondQualifazError(res, 404, 'QUALIFAZ_ORDER_NOT_FOUND', 'order not found', {
+    if (!canAdvanceOrderStatus(currentStatus, resolvedStatus)) {
+      return respondQualifazError(
+        res,
+        400,
+        'QUALIFAZ_STATUS_BACKWARD',
+        'Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.',
+        {
           route: 'PUT /qualifaz/orders/:id/status',
           merchantId,
-          orderId: req.params.id
-        });
-      }
-      const data = { ...(rows[0].data || {}), cancelReason: String(reason) };
+          orderId: req.params.id,
+          currentStatus,
+          nextStatus: resolvedStatus
+        }
+      );
+    }
+    if (reason && status === 'CANCELLED') {
+      const data = { ...(currentRows[0].data || {}), cancelReason: String(reason) };
       await query('UPDATE orders SET status = $1, data = $2 WHERE id = $3 AND store_id = $4', [
         resolvedStatus,
         data,

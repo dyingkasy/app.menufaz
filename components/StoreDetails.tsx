@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, MapPin, Heart, Share2, Sparkles, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
+import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, ChevronDown, Heart, Share2, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
 import { Store, Product, CartItem, Review, PizzaFlavor } from '../types';
 import { getProductsByStore, getPizzaFlavorsByStore, getReviewsByStore, addReview } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
@@ -60,6 +60,11 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const [storeFlavors, setStoreFlavors] = useState<PizzaFlavor[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [loadingReviews, setLoadingReviews] = useState(true);
+  const [showAddress, setShowAddress] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [nowInSaoPaulo, setNowInSaoPaulo] = useState<Date>(
+      () => new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+  );
   
   // Scroll logic
   const [scrolled, setScrolled] = useState(false);
@@ -68,6 +73,14 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       const handleScroll = () => setScrolled(window.scrollY > 200);
       window.addEventListener('scroll', handleScroll);
       return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+      const tick = () => {
+          setNowInSaoPaulo(new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })));
+      };
+      const interval = setInterval(tick, 60000);
+      return () => clearInterval(interval);
   }, []);
 
   // Load Products & Flavors from DB
@@ -147,7 +160,70 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const averageRating = reviews.length > 0
       ? reviews.reduce((acc, review) => acc + review.rating, 0) / reviews.length
       : Number(store.rating) || 0;
-  const displayRating = ratingCount > 0 ? averageRating.toFixed(1) : 'Novo';
+  const hasRating = Number.isFinite(averageRating) && averageRating > 0;
+  const ratingLabel = hasRating
+      ? `${averageRating.toFixed(1)}${ratingCount ? ` (${ratingCount} avaliações)` : ''}`
+      : '';
+
+  const normalizeDay = (value: string) =>
+      (value || '')
+          .toString()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim();
+
+  const parseTimeToMinutes = (value: string) => {
+      const [hours, minutes] = (value || '').split(':').map(Number);
+      if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+      return hours * 60 + minutes;
+  };
+
+  const isWithinRange = (minutes: number, start: number, end: number) => {
+      if (start <= end) return minutes >= start && minutes <= end;
+      return minutes >= start || minutes <= end;
+  };
+
+  const scheduleEntries = store.schedule || [];
+  const todayName = nowInSaoPaulo.toLocaleDateString('pt-BR', { weekday: 'long', timeZone: 'America/Sao_Paulo' });
+  const todayEntry = scheduleEntries.find((entry) => normalizeDay(entry.day) === normalizeDay(todayName)) || scheduleEntries[nowInSaoPaulo.getDay()];
+
+  const getScheduleOpen = () => {
+      if (!todayEntry) return false;
+      const nowMinutes = nowInSaoPaulo.getHours() * 60 + nowInSaoPaulo.getMinutes();
+      const morningOpen = parseTimeToMinutes(todayEntry.morningOpenTime);
+      const morningClose = parseTimeToMinutes(todayEntry.morningCloseTime);
+      const afternoonOpen = parseTimeToMinutes(todayEntry.afternoonOpenTime);
+      const afternoonClose = parseTimeToMinutes(todayEntry.afternoonCloseTime);
+      const openMorning =
+          todayEntry.isMorningOpen &&
+          morningOpen !== null &&
+          morningClose !== null &&
+          isWithinRange(nowMinutes, morningOpen, morningClose);
+      const openAfternoon =
+          todayEntry.isAfternoonOpen &&
+          afternoonOpen !== null &&
+          afternoonClose !== null &&
+          isWithinRange(nowMinutes, afternoonOpen, afternoonClose);
+      return openMorning || openAfternoon;
+  };
+
+  const scheduleOpen = scheduleEntries.length > 0 ? getScheduleOpen() : false;
+  const isOpenNow = scheduleEntries.length > 0 ? scheduleOpen : store.isActive !== false;
+  const showOpenBadge = scheduleEntries.length > 0 || store.isActive !== undefined;
+
+  const formatScheduleLine = (entry: Store['schedule'][number]) => {
+      const morning =
+          entry.isMorningOpen ? `${entry.morningOpenTime} - ${entry.morningCloseTime}` : '';
+      const afternoon =
+          entry.isAfternoonOpen ? `${entry.afternoonOpenTime} - ${entry.afternoonCloseTime}` : '';
+      const parts = [morning, afternoon].filter(Boolean);
+      return parts.length > 0 ? parts.join(' / ') : 'Fechado';
+  };
+
+  const storeAddressLine = [store.street, store.number, store.complement, store.district, store.city, store.state]
+      .filter(Boolean)
+      .join(', ');
 
   // Group products
   const categories = useMemo(() => {
@@ -761,15 +837,63 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-sm text-gray-600 dark:text-gray-300 mb-4">
-                         <span className={`flex items-center gap-1 font-bold px-2 py-0.5 rounded-lg ${ratingCount > 0 ? 'text-yellow-500 bg-yellow-50 dark:bg-yellow-900/20' : 'text-gray-400 bg-gray-100 dark:bg-slate-800'}`}>
-                             <Star size={14} fill={ratingCount > 0 ? 'currentColor' : 'none'} /> {displayRating}
-                         </span>
-                         <span className="flex items-center gap-1">
-                             <MapPin size={14} /> 2.4km
-                         </span>
-                         <span className="flex items-center gap-1">
-                             <Sparkles size={14} className="text-red-500" /> {store.isPopular ? 'Popular' : 'Alta avaliacao'}
-                         </span>
+                         {hasRating && (
+                             <span className="flex items-center gap-1 font-bold px-2 py-0.5 rounded-lg text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20">
+                                 <Star size={14} fill="currentColor" /> {ratingLabel}
+                             </span>
+                         )}
+                    </div>
+
+                    <div className="flex flex-col gap-2 mb-4">
+                        {showOpenBadge && (
+                            <span
+                                className={`inline-flex w-fit items-center gap-2 px-3 py-1 rounded-full text-xs font-bold ${
+                                    isOpenNow ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                                }`}
+                            >
+                                {isOpenNow ? 'Aberto agora' : 'Fechado'}
+                            </span>
+                        )}
+                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70">
+                            <button
+                                type="button"
+                                onClick={() => setShowAddress((prev) => !prev)}
+                                className="w-full px-4 py-3 flex items-center justify-between text-sm font-bold text-slate-700 dark:text-slate-200"
+                            >
+                                Ver endereço
+                                <ChevronDown size={16} className={`transition-transform ${showAddress ? 'rotate-180' : ''}`} />
+                            </button>
+                            {showAddress && (
+                                <div className="px-4 pb-4 text-sm text-slate-600 dark:text-slate-300">
+                                    {storeAddressLine || 'Endereço não informado'}
+                                </div>
+                            )}
+                        </div>
+                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70">
+                            <button
+                                type="button"
+                                onClick={() => setShowSchedule((prev) => !prev)}
+                                className="w-full px-4 py-3 flex items-center justify-between text-sm font-bold text-slate-700 dark:text-slate-200"
+                            >
+                                Ver horários
+                                <ChevronDown size={16} className={`transition-transform ${showSchedule ? 'rotate-180' : ''}`} />
+                            </button>
+                            {showSchedule && (
+                                <div className="px-4 pb-4 text-sm text-slate-600 dark:text-slate-300 space-y-1">
+                                    {scheduleEntries.length === 0 && (
+                                        <span>Horários não informados</span>
+                                    )}
+                                    {scheduleEntries.length > 0 && (
+                                        scheduleEntries.map((entry, idx) => (
+                                            <div key={`${entry.day}-${idx}`} className="flex items-center justify-between gap-4">
+                                                <span className="font-semibold text-slate-700 dark:text-slate-200">{entry.day}</span>
+                                                <span>{formatScheduleLine(entry)}</span>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            )}
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-4 border-t border-gray-100 dark:border-slate-800">
@@ -851,7 +975,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                 </div>
             )}
 
-            <div className="grid lg:grid-cols-[1.2fr,0.8fr] gap-4">
+            <div className="grid lg:grid-cols-[1.2fr] gap-4">
                 <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
                     <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Buscar no cardápio</p>
                     <div className="relative mt-4">
@@ -871,27 +995,6 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                         <span className="px-3 py-1.5 rounded-full text-xs font-bold border border-slate-200 bg-white text-slate-600">
                             {categories.length} categorias
                         </span>
-                    </div>
-                </div>
-                <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
-                    <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Resumo rápido</p>
-                    <div className="mt-4 space-y-3">
-                        <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
-                            <span>Entrega</span>
-                            <span className="font-bold text-slate-900 dark:text-white">{store.deliveryTime}</span>
-                        </div>
-                        {store.acceptsPickup && pickupTime && (
-                            <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
-                                <span>Retirada</span>
-                                <span className="font-bold text-slate-900 dark:text-white">{pickupTime}</span>
-                            </div>
-                        )}
-                        <div className="flex items-center justify-between text-sm text-slate-600 dark:text-slate-300">
-                            <span>Taxa</span>
-                            <span className="font-bold text-emerald-600">
-                                {deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}
-                            </span>
-                        </div>
                     </div>
                 </div>
             </div>

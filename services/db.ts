@@ -488,10 +488,25 @@ export const subscribeToTableOrders = (
 
 export const updateOrderStatus = async (orderId: string, status: Order['status'], reason?: string) => {
   ensureApi();
-  await apiFetch(`/orders/${orderId}/status`, {
+  const token = getAuthToken();
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${API_BASE_URL}/orders/${orderId}/status`, {
     method: 'PUT',
+    headers,
     body: JSON.stringify(reason ? { status, reason } : { status })
   });
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`;
+    try {
+      const data = await response.json();
+      if (data?.error) message = data.error;
+    } catch {}
+    const error: any = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
 };
 
 export const updateOrderRefundStatus = async (
