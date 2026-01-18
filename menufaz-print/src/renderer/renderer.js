@@ -1,7 +1,8 @@
 const state = {
   config: {},
   printers: [],
-  status: {}
+  status: {},
+  isPackaged: false
 };
 
 const elements = {
@@ -10,6 +11,8 @@ const elements = {
   apiUrlLabel: document.getElementById('apiUrlLabel'),
   merchantIdInput: document.getElementById('merchantIdInput'),
   apiUrlInput: document.getElementById('apiUrlInput'),
+  apiUrlRow: document.getElementById('apiUrlRow'),
+  apiUrlReadOnly: document.getElementById('apiUrlReadOnly'),
   saveMerchant: document.getElementById('saveMerchant'),
   printerSelect: document.getElementById('printerSelect'),
   refreshPrinters: document.getElementById('refreshPrinters'),
@@ -33,7 +36,14 @@ const renderConfig = () => {
   elements.merchantIdLabel.textContent = state.config.merchantId || '-';
   elements.apiUrlLabel.textContent = state.config.apiUrl || '-';
   elements.merchantIdInput.value = state.config.merchantId || '';
-  elements.apiUrlInput.value = state.config.apiUrl || '';
+  if (state.isPackaged) {
+    elements.apiUrlRow.style.display = 'none';
+    elements.apiUrlReadOnly.textContent = `API: ${state.config.apiUrl || 'https://app.menufaz.com'}`;
+  } else {
+    elements.apiUrlRow.style.display = 'flex';
+    elements.apiUrlReadOnly.textContent = '';
+    elements.apiUrlInput.value = state.config.apiUrl || '';
+  }
 };
 
 const renderStatus = () => {
@@ -75,6 +85,7 @@ const loadState = async () => {
   state.config = data.config || {};
   state.printers = data.printers || [];
   state.status = data.status || {};
+  state.isPackaged = Boolean(data.isPackaged);
   renderConfig();
   renderPrinters();
   renderStatus();
@@ -82,7 +93,9 @@ const loadState = async () => {
 
 elements.saveMerchant.addEventListener('click', async () => {
   const merchantId = elements.merchantIdInput.value.trim();
-  const apiUrl = elements.apiUrlInput.value.trim();
+  const apiUrl = state.isPackaged
+    ? state.config.apiUrl || 'https://app.menufaz.com'
+    : elements.apiUrlInput.value.trim();
   await window.menufazPrint.setMerchant({ merchantId, apiUrl });
   await loadState();
 });

@@ -10,7 +10,8 @@ try {
   printer = null;
 }
 
-const DEFAULT_API_URL = 'http://localhost:3001';
+const getDefaultApiUrl = () =>
+  app && app.isPackaged ? 'https://app.menufaz.com' : 'http://localhost:3001';
 const CONFIG_FILENAME = 'config.json';
 const POLL_INTERVAL_MS = 5000;
 
@@ -91,8 +92,14 @@ const saveConfig = (config) => {
 
 const mergeConfigWithArgs = (config) => {
   const args = normalizeArgs();
+  const envApiUrl = process.env.MENUFAZ_API_URL || process.env.MEN_UFAZ_API_URL || '';
   const merchantId = args.merchantId || args['merchant-id'] || config.merchantId || '';
-  const apiUrl = args.apiUrl || args['api-url'] || config.apiUrl || DEFAULT_API_URL;
+  const apiUrl =
+    args.apiUrl ||
+    args['api-url'] ||
+    envApiUrl ||
+    config.apiUrl ||
+    getDefaultApiUrl();
   return {
     ...config,
     merchantId,
@@ -279,7 +286,7 @@ const ensureConfig = () => {
   if (!merged.machineId) {
     merged.machineId = randomUUID();
   }
-  if (!merged.apiUrl) merged.apiUrl = DEFAULT_API_URL;
+  if (!merged.apiUrl) merged.apiUrl = getDefaultApiUrl();
   saveConfig(merged);
   return merged;
 };
@@ -353,7 +360,8 @@ ipcMain.handle('get-state', () => {
   return {
     config,
     printers: getPrinters(),
-    status: state
+    status: state,
+    isPackaged: app.isPackaged
   };
 });
 
