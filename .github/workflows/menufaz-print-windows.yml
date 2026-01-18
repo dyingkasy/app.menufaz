@@ -12,6 +12,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+      NPM_CONFIG_FORCE: "true"
+      DEBUG: "electron-builder"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,3 +40,4 @@ jobs:
         with:
           name: menufaz-print-installer
           path: menufaz-print/dist/**/*.exe
+        if: always()
