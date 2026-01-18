@@ -522,6 +522,11 @@ export const updateOrderPayment = async (orderId: string, paymentMethod: string)
   });
 };
 
+export const printOrder = async (orderId: string) => {
+  ensureApi();
+  return apiFetch(`/orders/${orderId}/print`, { method: 'POST' });
+};
+
 export const deleteOrder = async (orderId: string) => {
   ensureApi();
   await apiFetch(`/orders/${orderId}`, { method: 'DELETE' });

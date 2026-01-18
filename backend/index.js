@@ -36,6 +36,8 @@ const ensurePrintTables = async () => {
     CREATE TABLE IF NOT EXISTS print_jobs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       merchant_id TEXT NOT NULL,
+      order_id UUID,
+      kind TEXT NOT NULL DEFAULT 'NEW_ORDER',
       status TEXT NOT NULL DEFAULT 'pending',
       payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -43,8 +45,11 @@ const ensurePrintTables = async () => {
     )
     `
   );
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS order_id UUID');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'NEW_ORDER\'');
   await query('CREATE INDEX IF NOT EXISTS idx_print_devices_merchant_id ON print_devices(merchant_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_merchant_status ON print_jobs(merchant_id, status)');
+  await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_order_kind ON print_jobs(order_id, kind)');
 };
 
 initErrorLogTable().catch((error) => {
@@ -179,6 +184,11 @@ const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'];
 const PRINT_JOB_STATUS = {
   pending: 'pending',
   printed: 'printed'
+};
+
+const PRINT_JOB_KIND = {
+  newOrder: 'NEW_ORDER',
+  reprint: 'REPRINT'
 };
 
 const normalizeFlavorPricesBySize = (value) => {
@@ -460,6 +470,160 @@ const ensureProfileStoreId = async (userId, profileData) => {
   const nextProfile = { ...(profileData || {}), storeId: store.id };
   await upsertProfile(userId, nextProfile);
   return nextProfile;
+};
+
+const formatCurrencyBRL = (value) => {
+  const amount = Number(value);
+  const safeAmount = Number.isFinite(amount) ? amount : 0;
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(safeAmount);
+};
+
+const formatPhone = (value) => {
+  const digits = (value || '').toString().replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length <= 10) {
+    return digits.replace(/(\d{2})(\d{4})(\d{4})/, '($1) $2-$3');
+  }
+  return digits.replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3');
+};
+
+const formatAddressLine = (address) => {
+  if (!address) return '';
+  const parts = [
+    address.street,
+    address.number,
+    address.complement,
+    address.district,
+    address.city,
+    address.state
+  ]
+    .map((part) => (part || '').toString().trim())
+    .filter(Boolean);
+  return parts.join(', ');
+};
+
+const buildOrderPrintText = ({ order, store, flavorMap }) => {
+  const lineWidth = 48;
+  const divider = '-'.repeat(lineWidth);
+  const storeName = store?.name || order.storeName || 'Loja';
+  const storePhone = store?.phone || store?.whatsapp || '';
+  const storeAddress = formatAddressLine(store);
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const orderIdShort = order.id ? order.id.slice(0, 6) : '';
+  const orderType = order.type === 'TABLE' ? 'Mesa' : order.type === 'PICKUP' ? 'Retirada' : 'Delivery';
+
+  const lines = [];
+  lines.push(String(storeName).toUpperCase());
+  if (storePhone) lines.push(formatPhone(storePhone));
+  if (storeAddress) lines.push(storeAddress);
+  lines.push(divider);
+  lines.push('PEDIDO');
+  if (orderIdShort) lines.push(`Pedido: #${orderIdShort}`);
+  lines.push(`Data: ${createdAt.toLocaleString('pt-BR')}`);
+  lines.push(`Tipo: ${orderType}`);
+  if (order.type === 'TABLE' && order.tableNumber) {
+    lines.push(`Mesa: ${order.tableNumber}`);
+  }
+  lines.push(divider);
+  lines.push('CLIENTE');
+  lines.push(`Nome: ${order.customerName || 'Cliente'}`);
+  if (order.customerPhone) lines.push(`Telefone: ${formatPhone(order.customerPhone)}`);
+  if (order.type === 'DELIVERY') {
+    const address = formatAddressLine(order.deliveryAddress);
+    if (address) lines.push(`Endereco: ${address}`);
+  }
+  lines.push(divider);
+  lines.push('ITENS');
+
+  const lineItems = Array.isArray(order.lineItems) && order.lineItems.length > 0
+    ? order.lineItems
+    : [];
+
+  if (lineItems.length === 0 && Array.isArray(order.items)) {
+    order.items.forEach((item) => {
+      lines.push(item);
+    });
+  } else {
+    lineItems.forEach((item) => {
+      const quantity = Number(item.quantity || 1);
+      const sizeKey = item.pizza?.sizeKey;
+      const sizeLabel = sizeKey
+        ? sizeKey.charAt(0).toUpperCase() + sizeKey.slice(1)
+        : '';
+      const splitCount = Number(item.pizza?.splitCount || 1);
+      const pizzaSuffix = item.pizza ? ` (${splitCount} sabores)` : '';
+      const sizeSuffix =
+        sizeLabel && !String(item.name || '').toLowerCase().includes(sizeLabel.toLowerCase())
+          ? ` (${sizeLabel})`
+          : '';
+      lines.push(`${quantity}x ${item.name || 'Item'}${sizeSuffix}${pizzaSuffix}`);
+
+      if (item.pizza && Array.isArray(item.pizza.flavors)) {
+        item.pizza.flavors.forEach((flavor) => {
+          const flavorName = flavorMap.get(flavor.flavorId) || flavor.flavorId || 'Sabor';
+          lines.push(`  - ${flavorName}`);
+        });
+      }
+
+      if (Array.isArray(item.options) && item.options.length > 0) {
+        lines.push('  Adicionais:');
+        item.options.forEach((option) => {
+          const optionLabel = option?.optionName || option?.groupName || 'Opcao';
+          const priceLabel =
+            typeof option?.price === 'number' && option.price > 0
+              ? ` (+${formatCurrencyBRL(option.price)})`
+              : '';
+          lines.push(`   * ${optionLabel}${priceLabel}`);
+        });
+      }
+      if (item.notes) {
+        lines.push(`  Obs: ${item.notes}`);
+      }
+    });
+  }
+
+  lines.push(divider);
+  const notes = (order.notes || '').toString().trim();
+  if (notes) {
+    lines.push('OBSERVACOES:');
+    lines.push(notes);
+    lines.push(divider);
+  }
+  lines.push('PAGAMENTO');
+  const deliveryFee = Number(order.deliveryFee || 0);
+  const subtotalFromItems = Array.isArray(order.lineItems)
+    ? order.lineItems.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0)
+    : 0;
+  const subtotal = subtotalFromItems > 0 ? subtotalFromItems : Math.max(0, Number(order.total || 0) - deliveryFee);
+  lines.push(`Subtotal: ${formatCurrencyBRL(subtotal)}`);
+  if (deliveryFee > 0) {
+    lines.push(`Entrega: ${formatCurrencyBRL(deliveryFee)}`);
+  }
+  lines.push(`Total: ${formatCurrencyBRL(order.total)}`);
+  if (order.paymentMethod) {
+    lines.push(`Pagamento: ${order.paymentMethod}`);
+    const changeMatch = order.paymentMethod.match(/Troco p\/\s*([0-9.,]+)/i);
+    if (changeMatch && changeMatch[1]) {
+      lines.push(`Troco para: ${changeMatch[1]}`);
+    }
+  }
+  lines.push(divider);
+  lines.push('Obrigado pela preferencia!');
+
+  return `${lines.join('\n')}\n`;
+};
+
+const createPrintJob = async ({ merchantId, orderId, kind, printText }) => {
+  if (!merchantId) return null;
+  const { rows } = await query(
+    `
+    INSERT INTO print_jobs (merchant_id, order_id, kind, status, payload)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id
+    `,
+    [merchantId, orderId || null, kind, PRINT_JOB_STATUS.pending, { printText }]
+  );
+  return rows[0]?.id || null;
 };
 
 const generateUniqueMerchantId = async () => {
@@ -2380,6 +2544,7 @@ app.post('/api/orders', async (req, res) => {
   const deliveryAddress = payload.deliveryAddress || null;
   const customerPhone = payload.customerPhone ? String(payload.customerPhone) : '';
   const customerName = payload.customerName ? String(payload.customerName) : '';
+  let storeData = null;
 
   if (deliveryAddress) {
     const currentCoords = payload.deliveryCoordinates || deliveryAddress.coordinates;
@@ -2614,7 +2779,7 @@ app.post('/api/orders', async (req, res) => {
 
   if (payload.storeId) {
     const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [payload.storeId]);
-    const storeData = storeRows[0]?.data || {};
+    storeData = storeRows[0]?.data || {};
     if (storeData.autoAcceptOrders && status === 'PENDING') {
       status = 'PREPARING';
       payload.autoAccepted = true;
@@ -2636,7 +2801,120 @@ app.post('/api/orders', async (req, res) => {
       payload
     ]
   );
-  res.json({ id: rows[0].id, status, createdAt: rows[0].created_at, ...payload });
+  const orderId = rows[0].id;
+  const createdAt = rows[0].created_at;
+  const responsePayload = { id: orderId, status, createdAt, ...payload };
+
+  if (storeData?.merchantId && orderId) {
+    try {
+      const { rows: existingPrint } = await query(
+        'SELECT 1 FROM print_jobs WHERE order_id = $1 AND kind = $2 LIMIT 1',
+        [orderId, PRINT_JOB_KIND.newOrder]
+      );
+      if (existingPrint.length === 0) {
+        const flavorIds = Array.from(
+          new Set(
+            (payload.lineItems || [])
+              .flatMap((item) => item?.pizza?.flavors || [])
+              .map((entry) => entry?.flavorId)
+              .filter(Boolean)
+          )
+        );
+        const flavorMap = new Map();
+        if (flavorIds.length > 0) {
+          const { rows: flavorRows } = await query(
+            'SELECT id, data FROM pizza_flavors WHERE id = ANY($1::uuid[])',
+            [flavorIds]
+          );
+          flavorRows.forEach((row) => flavorMap.set(row.id, row.data?.name || row.data?.title || row.id));
+        }
+
+        const printText = buildOrderPrintText({
+          order: responsePayload,
+          store: storeData,
+          flavorMap
+        });
+        await createPrintJob({
+          merchantId: storeData.merchantId,
+          orderId,
+          kind: PRINT_JOB_KIND.newOrder,
+          printText
+        });
+      }
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to create print job',
+        stack: error?.stack,
+        context: { route: 'POST /api/orders', orderId }
+      });
+    }
+  }
+
+  res.json(responsePayload);
+});
+
+app.post('/api/orders/:id/print', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+
+  const { rows } = await query(
+    'SELECT id, status, store_id, created_at, data FROM orders WHERE id = $1',
+    [req.params.id]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const orderRow = rows[0];
+
+  if (authPayload.role !== 'ADMIN') {
+    const store = await getStoreByOwnerId(authPayload.sub);
+    if (!store || store.id !== orderRow.store_id) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+  }
+
+  const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
+  const storeData = storeRows[0]?.data || null;
+  if (!storeData?.merchantId) {
+    return res.status(400).json({ error: 'merchantId not configured for store' });
+  }
+
+  const orderPayload = {
+    id: orderRow.id,
+    status: orderRow.status,
+    createdAt: orderRow.created_at,
+    ...(orderRow.data || {})
+  };
+
+  const flavorIds = Array.from(
+    new Set(
+      (orderPayload.lineItems || [])
+        .flatMap((item) => item?.pizza?.flavors || [])
+        .map((entry) => entry?.flavorId)
+        .filter(Boolean)
+    )
+  );
+  const flavorMap = new Map();
+  if (flavorIds.length > 0) {
+    const { rows: flavorRows } = await query(
+      'SELECT id, data FROM pizza_flavors WHERE id = ANY($1::uuid[])',
+      [flavorIds]
+    );
+    flavorRows.forEach((row) => flavorMap.set(row.id, row.data?.name || row.data?.title || row.id));
+  }
+
+  const printText = buildOrderPrintText({
+    order: orderPayload,
+    store: storeData,
+    flavorMap
+  });
+  await createPrintJob({
+    merchantId: storeData.merchantId,
+    orderId: orderRow.id,
+    kind: PRINT_JOB_KIND.reprint,
+    printText
+  });
+
+  res.json({ ok: true });
 });
 
 app.put('/api/orders/:id/assign', async (req, res) => {

@@ -45,6 +45,7 @@ import {
     subscribeToOrders,
     updateOrderStatus,
     updateOrderPayment,
+    printOrder,
     getCouponsByStore,
     saveCoupon,
     deleteCoupon,
@@ -1405,6 +1406,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       }
   };
 
+  const handlePrintOrder = async (orderId: string) => {
+      try {
+          await printOrder(orderId);
+          alert('Pedido enviado para impressao.');
+      } catch (e) {
+          alert('Erro ao enviar para impressao.');
+      }
+  };
+
   // --- SALES & DELETION LOGIC ---
   const handleDeleteSale = async () => {
       if (!deleteSaleId) return;
@@ -2303,6 +2313,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               </div>
                           </div>
                           <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex items-center justify-end gap-3">
+                              <button
+                                  onClick={() => handlePrintOrder(selectedOrderDetails.id)}
+                                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-bold hover:bg-slate-50"
+                              >
+                                  Imprimir
+                              </button>
                               {selectedOrderDetails.status !== 'COMPLETED' && selectedOrderDetails.status !== 'CANCELLED' && (
                                   <button
                                       onClick={() => {
