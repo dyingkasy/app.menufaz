@@ -24,6 +24,7 @@ const CONFIG_FILENAME = 'config.json';
 const POLL_INTERVAL_MS = 5000;
 const ESC_POS_CHARSET_CP860 = Buffer.from([0x1b, 0x74, 0x03]);
 const ESC_POS_CUT = Buffer.from([0x1d, 0x56, 0x00]);
+const PRINT_WRAP_COLUMNS = 48;
 
 let mainWindow = null;
 let tray = null;
@@ -200,6 +201,50 @@ const sanitizePrintText = (value) => {
   return String(value).replace(/\r\n/g, '\n');
 };
 
+const wrapLine = (line, columns) => {
+  if (!line) return [''];
+  if (line.length <= columns) return [line];
+  const words = line.split(' ');
+  const wrapped = [];
+  let current = '';
+  words.forEach((word) => {
+    if (!word) return;
+    if (!current.length) {
+      current = word;
+      return;
+    }
+    if (current.length + 1 + word.length <= columns) {
+      current = `${current} ${word}`;
+      return;
+    }
+    wrapped.push(current);
+    if (word.length <= columns) {
+      current = word;
+      return;
+    }
+    let remaining = word;
+    while (remaining.length > columns) {
+      wrapped.push(remaining.slice(0, columns));
+      remaining = remaining.slice(columns);
+    }
+    current = remaining;
+  });
+  if (current.length) wrapped.push(current);
+  return wrapped.length ? wrapped : [''];
+};
+
+const countWrappedLines = (text, columns) => {
+  const normalized = sanitizePrintText(text);
+  const baseLines = normalized.split('\n');
+  return baseLines.reduce((total, line) => total + wrapLine(line, columns).length, 0);
+};
+
+const computeFeedLines = (totalLines) => {
+  const base = 4;
+  const computed = Math.ceil(totalLines / 12);
+  return Math.min(10, Math.max(base, computed));
+};
+
 const encodePrintText = (value) => {
   const text = sanitizePrintText(value);
   if (iconv && typeof iconv.encodingExists === 'function' && iconv.encodingExists('cp860')) {
@@ -210,9 +255,11 @@ const encodePrintText = (value) => {
 
 const formatPrintPayload = (job) => {
   const text = job.printText || job.text || job.content || job.body || JSON.stringify(job, null, 2);
-  const textWithFeed = `${text}\n\n\n`;
+  const totalLines = countWrappedLines(text, PRINT_WRAP_COLUMNS);
+  const feedLines = computeFeedLines(totalLines);
+  const textWithFeed = `${text}${'\n'.repeat(feedLines)}`;
   const encoded = encodePrintText(textWithFeed);
-  return Buffer.concat([ESC_POS_CHARSET_CP860, encoded, ESC_POS_CUT]);
+  return { data: Buffer.concat([ESC_POS_CHARSET_CP860, encoded, ESC_POS_CUT]), totalLines, feedLines };
 };
 
 const validatePrinter = (config) => {
@@ -248,8 +295,15 @@ const printJob = (config, job) => new Promise((resolve, reject) => {
     reject(new Error('printer not found'));
     return;
   }
+  const payload = formatPrintPayload(job);
+  logInfo('printing job', {
+    jobId: job.id,
+    printerName: config.printerName,
+    totalLines: payload.totalLines,
+    feedLines: payload.feedLines
+  });
   printer.printDirect({
-    data: formatPrintPayload(job),
+    data: payload.data,
     printer: config.printerName,
     type: 'RAW',
     success: (jobId) => resolve(jobId),
@@ -473,6 +527,9 @@ ipcMain.handle('test-print', async () => {
     throw new Error('printer not found');
   }
   const storeName = config.storeName || state.storeName || 'Menufaz';
+  const longLines = Array.from({ length: 60 }, (_, index) =>
+    `Item ${index + 1} - Observacao longa com acentuacao: Acucar, Feijao, Pao de queijo.`
+  );
   const testJob = {
     id: `test-${Date.now()}`,
     printText: [
@@ -486,6 +543,7 @@ ipcMain.handle('test-print', async () => {
       'Informação',
       'Pão de queijo',
       'Coração',
+      ...longLines,
       ''
     ].join('\n')
   };
