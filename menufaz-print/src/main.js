@@ -10,11 +10,20 @@ try {
   printer = null;
 }
 
+let iconv = null;
+try {
+  iconv = require('iconv-lite');
+} catch (error) {
+  iconv = null;
+}
+
 const DEFAULT_API_URL_PROD = 'https://app.menufaz.com';
 const DEFAULT_API_URL_DEV = 'http://localhost:3001';
 const getDefaultApiUrl = () => (app && app.isPackaged ? DEFAULT_API_URL_PROD : DEFAULT_API_URL_DEV);
 const CONFIG_FILENAME = 'config.json';
 const POLL_INTERVAL_MS = 5000;
+const ESC_POS_CHARSET_CP860 = Buffer.from([0x1b, 0x74, 0x03]);
+const ESC_POS_CUT = Buffer.from([0x1d, 0x56, 0x00]);
 
 let mainWindow = null;
 let tray = null;
@@ -186,10 +195,24 @@ const registerMachine = async (config) => {
   };
 };
 
-const formatPrintText = (job) => {
+const sanitizePrintText = (value) => {
+  if (!value) return '';
+  return String(value).replace(/\r\n/g, '\n');
+};
+
+const encodePrintText = (value) => {
+  const text = sanitizePrintText(value);
+  if (iconv && typeof iconv.encodingExists === 'function' && iconv.encodingExists('cp860')) {
+    return iconv.encode(text, 'cp860');
+  }
+  return Buffer.from(text, 'latin1');
+};
+
+const formatPrintPayload = (job) => {
   const text = job.printText || job.text || job.content || job.body || JSON.stringify(job, null, 2);
-  const cut = '\n\n\n\x1D\x56\x00';
-  return `${text}${cut}`;
+  const textWithFeed = `${text}\n\n\n`;
+  const encoded = encodePrintText(textWithFeed);
+  return Buffer.concat([ESC_POS_CHARSET_CP860, encoded, ESC_POS_CUT]);
 };
 
 const validatePrinter = (config) => {
@@ -226,7 +249,7 @@ const printJob = (config, job) => new Promise((resolve, reject) => {
     return;
   }
   printer.printDirect({
-    data: formatPrintText(job),
+    data: formatPrintPayload(job),
     printer: config.printerName,
     type: 'RAW',
     success: (jobId) => resolve(jobId),
@@ -452,7 +475,19 @@ ipcMain.handle('test-print', async () => {
   const storeName = config.storeName || state.storeName || 'Menufaz';
   const testJob = {
     id: `test-${Date.now()}`,
-    printText: `*** TESTE DE IMPRESSAO MENUFAZ ***\n${storeName}\n${config.merchantId || ''}\n${new Date().toLocaleString()}\n\n`
+    printText: [
+      '*** TESTE DE IMPRESSAO MENUFAZ ***',
+      storeName,
+      config.merchantId || '',
+      new Date().toLocaleString(),
+      '',
+      'Feijão',
+      'Açúcar',
+      'Informação',
+      'Pão de queijo',
+      'Coração',
+      ''
+    ].join('\n')
   };
   try {
     await printJob(config, testJob);
