@@ -20,8 +20,10 @@ const elements = {
   testPrint: document.getElementById('testPrint'),
   printerHint: document.getElementById('printerHint'),
   connectedStatus: document.getElementById('connectedStatus'),
+  currentStatus: document.getElementById('currentStatus'),
   lastPrinted: document.getElementById('lastPrinted'),
-  lastError: document.getElementById('lastError')
+  lastError: document.getElementById('lastError'),
+  logFilePath: document.getElementById('logFilePath')
 };
 
 const formatDate = (value) => {
@@ -50,10 +52,12 @@ const renderConfig = () => {
 const renderStatus = () => {
   elements.storeName.textContent = state.status.storeName || 'Not connected';
   elements.connectedStatus.textContent = state.status.connected ? 'Yes' : 'No';
+  elements.currentStatus.textContent = state.status.currentStatus || 'Idle';
   elements.lastPrinted.textContent = state.status.lastPrintedAt
     ? `${formatDate(state.status.lastPrintedAt)} (${state.status.lastPrintedId || ''})`
     : '-';
   elements.lastError.textContent = state.status.lastError || '-';
+  elements.logFilePath.textContent = state.status.logFilePath || '-';
 };
 
 const renderPrinters = () => {

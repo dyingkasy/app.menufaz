@@ -41,12 +41,22 @@ const ensurePrintTables = async () => {
       status TEXT NOT NULL DEFAULT 'pending',
       payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-      printed_at TIMESTAMP WITH TIME ZONE
+      printed_at TIMESTAMP WITH TIME ZONE,
+      processing_at TIMESTAMP WITH TIME ZONE,
+      processing_by_machine_id TEXT,
+      failed_at TIMESTAMP WITH TIME ZONE,
+      failed_reason TEXT,
+      retry_count INTEGER DEFAULT 0
     )
     `
   );
   await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS order_id UUID');
   await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT \'NEW_ORDER\'');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS processing_at TIMESTAMP WITH TIME ZONE');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS processing_by_machine_id TEXT');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS failed_at TIMESTAMP WITH TIME ZONE');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS failed_reason TEXT');
+  await query('ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0');
   await query('CREATE INDEX IF NOT EXISTS idx_print_devices_merchant_id ON print_devices(merchant_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_merchant_status ON print_jobs(merchant_id, status)');
   await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_order_kind ON print_jobs(order_id, kind)');
@@ -164,6 +174,19 @@ const mapRow = (row) => {
 
 const mapRows = (rows) => rows.map(mapRow);
 
+const mapStoreRowWithStatus = (row, now = getZonedNow()) => {
+  if (!row) return null;
+  const payload = row.data || {};
+  const availability = resolveStoreOpenStatus(payload, now);
+  return {
+    id: row.id,
+    ...payload,
+    isOpenNow: availability.isOpenNow,
+    nextOpenAt: availability.nextOpenAt,
+    nextCloseAt: availability.nextCloseAt
+  };
+};
+
 const normalizeStoreRatings = (storeData = {}) => {
   const rating = Number(storeData.rating);
   const ratingCount = Number(storeData.ratingCount);
@@ -183,7 +206,9 @@ const stripSplitSurcharge = (payload) => {
 const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'];
 const PRINT_JOB_STATUS = {
   pending: 'pending',
-  printed: 'printed'
+  processing: 'processing',
+  printed: 'printed',
+  failed: 'failed'
 };
 
 const PRINT_JOB_KIND = {
@@ -191,22 +216,35 @@ const PRINT_JOB_KIND = {
   reprint: 'REPRINT'
 };
 
-const ORDER_STATUS_SEQUENCE = [
-  'PENDING',
-  'PREPARING',
-  'WAITING_COURIER',
-  'DELIVERING',
-  'COMPLETED',
-  'CANCELLED'
-];
+const ORDER_STATUS_FLOW_BY_TYPE = {
+  DELIVERY: ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING', 'COMPLETED', 'CANCELLED'],
+  PICKUP: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'COMPLETED', 'CANCELLED'],
+  TABLE: ['PENDING', 'PREPARING', 'READY', 'SERVED', 'COMPLETED', 'CANCELLED']
+};
 
-const canAdvanceOrderStatus = (currentStatus, nextStatus) => {
+const getOrderStatusFlow = (orderType = 'DELIVERY') =>
+  ORDER_STATUS_FLOW_BY_TYPE[orderType] || ORDER_STATUS_FLOW_BY_TYPE.DELIVERY;
+
+const normalizeStoredStatusForType = (status, orderType) => {
+  if (!status) return status;
+  if (orderType === 'PICKUP') {
+    if (status === 'WAITING_COURIER' || status === 'DELIVERING') return 'READY_FOR_PICKUP';
+  }
+  if (orderType === 'TABLE') {
+    if (status === 'WAITING_COURIER') return 'READY';
+    if (status === 'DELIVERING') return 'SERVED';
+  }
+  return status;
+};
+
+const canAdvanceOrderStatus = (currentStatus, nextStatus, orderType = 'DELIVERY') => {
   if (!currentStatus || !nextStatus || currentStatus === nextStatus) return true;
   if (currentStatus === 'COMPLETED' || currentStatus === 'CANCELLED') return false;
   if (nextStatus === 'CANCELLED') return true;
-  const currentIndex = ORDER_STATUS_SEQUENCE.indexOf(currentStatus);
-  const nextIndex = ORDER_STATUS_SEQUENCE.indexOf(nextStatus);
-  if (currentIndex === -1 || nextIndex === -1) return true;
+  const flow = getOrderStatusFlow(orderType);
+  const currentIndex = flow.indexOf(currentStatus);
+  const nextIndex = flow.indexOf(nextStatus);
+  if (currentIndex === -1 || nextIndex === -1) return false;
   return nextIndex >= currentIndex;
 };
 
@@ -243,6 +281,35 @@ const resolveSizeKey = (value) => {
   if (normalized.includes('grande')) return 'grande';
   if (normalized.includes('familia')) return 'familia';
   return '';
+};
+
+const normalizeNeighborhoodName = (value) =>
+  (value || '')
+    .toString()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const buildNeighborhoodCandidates = (district, city) => {
+  const candidates = [];
+  const raw = (district || '').toString().trim();
+  if (!raw) return candidates;
+  candidates.push(raw);
+  const dashSplit = raw.split(' - ');
+  if (dashSplit[0] && dashSplit[0] !== raw) candidates.push(dashSplit[0].trim());
+  const commaSplit = raw.split(',');
+  if (commaSplit[0] && commaSplit[0] !== raw) candidates.push(commaSplit[0].trim());
+  if (city) {
+    const cityNormalized = normalizeNeighborhoodName(city);
+    const normalized = normalizeNeighborhoodName(raw);
+    if (cityNormalized && normalized.includes(cityNormalized)) {
+      const cleaned = normalized.replace(cityNormalized, '').trim();
+      if (cleaned) candidates.push(cleaned);
+    }
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
 };
 
 const findSizeGroup = (product) => {
@@ -348,11 +415,12 @@ const resolveScheduleDayIndex = (entry, fallbackIndex) => {
 };
 
 const getScheduleEntryForDate = (schedule, date) => {
+  if (!Array.isArray(schedule) || schedule.length === 0) return null;
   const normalized = normalizeSchedule(schedule);
   const dayIndex = date.getDay();
   if (normalized.length === 7) return normalized[dayIndex];
   const match = normalized.find((entry, idx) => resolveScheduleDayIndex(entry, idx) === dayIndex);
-  return match || normalized[dayIndex] || normalized[0];
+  return match || normalized[dayIndex] || normalized[0] || null;
 };
 
 const isTimeWithinRange = (timeMinutes, startMinutes, endMinutes) => {
@@ -384,6 +452,7 @@ const buildNextChange = (schedule, now) => {
     const dayDate = new Date(base);
     dayDate.setDate(base.getDate() + dayOffset);
     const entry = getScheduleEntryForDate(schedule, dayDate);
+    if (!entry) continue;
     const segments = getScheduleSegments(entry);
     for (const [start, end] of segments) {
       const startMinutes = parseTimeToMinutes(start);
@@ -419,37 +488,104 @@ const buildNextChange = (schedule, now) => {
   return soonest ? soonest.toISOString() : null;
 };
 
-const resolveStoreAvailability = (storeData, now = new Date()) => {
+const getZonedNow = (timezone = 'America/Sao_Paulo') =>
+  new Date(new Date().toLocaleString('en-US', { timeZone: timezone }));
+
+const buildScheduleIntervals = (schedule, now) => {
+  const intervals = [];
+  if (!Array.isArray(schedule) || schedule.length === 0) {
+    return intervals;
+  }
+  const base = new Date(now);
+  for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
+    const dayDate = new Date(base);
+    dayDate.setDate(base.getDate() + dayOffset);
+    const entry = getScheduleEntryForDate(schedule, dayDate);
+    if (!entry) continue;
+    const segments = getScheduleSegments(entry);
+    for (const [start, end] of segments) {
+      const startMinutes = parseTimeToMinutes(start);
+      const endMinutes = parseTimeToMinutes(end);
+      if (startMinutes === null || endMinutes === null) continue;
+      const startDate = new Date(dayDate);
+      startDate.setHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+      const endDate = new Date(dayDate);
+      if (endMinutes < startMinutes) {
+        endDate.setDate(endDate.getDate() + 1);
+      }
+      endDate.setHours(Math.floor(endMinutes / 60), endMinutes % 60, 0, 0);
+      intervals.push({ start: startDate, end: endDate });
+    }
+  }
+  return intervals.sort((a, b) => a.start.getTime() - b.start.getTime());
+};
+
+const resolveStoreOpenStatus = (storeData, now = null, timezone = 'America/Sao_Paulo') => {
+  const resolvedNow = now || getZonedNow(timezone);
   const pause = storeData.pause || null;
   const pauseEndsAt = pause?.endsAt ? new Date(pause.endsAt) : null;
-  const pauseActive = Boolean(pause?.active && pauseEndsAt && pauseEndsAt.getTime() > now.getTime());
-  const pauseExpired = Boolean(pause?.active && pauseEndsAt && pauseEndsAt.getTime() <= now.getTime());
+  const pauseActive = Boolean(pause?.active && pauseEndsAt && pauseEndsAt.getTime() > resolvedNow.getTime());
+  const pauseExpired = Boolean(pause?.active && pauseEndsAt && pauseEndsAt.getTime() <= resolvedNow.getTime());
 
-  const autoOpenClose = Boolean(storeData.autoOpenClose);
-  const schedule = normalizeSchedule(storeData.schedule);
-  const entry = getScheduleEntryForDate(schedule, now);
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const scheduleSegments = getScheduleSegments(entry);
+  const hasSchedule = Array.isArray(storeData.schedule) && storeData.schedule.length > 0;
+  const schedule = hasSchedule ? normalizeSchedule(storeData.schedule) : [];
+  const entry = hasSchedule ? getScheduleEntryForDate(schedule, resolvedNow) : null;
+  const nowMinutes = resolvedNow.getHours() * 60 + resolvedNow.getMinutes();
+  const scheduleSegments = entry ? getScheduleSegments(entry) : [];
   const scheduleOpen = scheduleSegments.some(([start, end]) => {
     return isTimeWithinRange(nowMinutes, parseTimeToMinutes(start), parseTimeToMinutes(end));
   });
 
-  let isOpen = autoOpenClose ? scheduleOpen : storeData.isActive !== false;
-  let reason = isOpen ? (autoOpenClose ? 'OPEN_SCHEDULE' : 'OPEN_MANUAL') : (autoOpenClose ? 'CLOSED_SCHEDULE' : 'CLOSED_MANUAL');
+  let isOpenNow = hasSchedule ? scheduleOpen : false;
+  let reason = hasSchedule ? (scheduleOpen ? 'OPEN_SCHEDULE' : 'CLOSED_SCHEDULE') : 'NO_SCHEDULE';
 
   if (pauseActive) {
-    isOpen = false;
+    isOpenNow = false;
     reason = 'PAUSED';
   }
 
+  const intervals = buildScheduleIntervals(schedule, resolvedNow);
+  let nextOpenAt = null;
+  let nextCloseAt = null;
+
+  const activeInterval = intervals.find((interval) => resolvedNow >= interval.start && resolvedNow < interval.end);
+  if (activeInterval) {
+    nextCloseAt = activeInterval.end.toISOString();
+    const nextInterval = intervals.find((interval) => interval.start > resolvedNow);
+    nextOpenAt = nextInterval ? nextInterval.start.toISOString() : null;
+  } else {
+    const nextInterval = intervals.find((interval) => interval.start > resolvedNow);
+    if (nextInterval) {
+      nextOpenAt = nextInterval.start.toISOString();
+      nextCloseAt = nextInterval.end.toISOString();
+    }
+  }
+
   return {
-    isOpen,
+    isOpenNow,
     reason,
-    autoOpenClose,
     scheduleOpen,
     pause: pauseActive ? pause : null,
     pauseExpired,
-    nextChangeAt: buildNextChange(schedule, now)
+    nextOpenAt,
+    nextCloseAt,
+    hasSchedule
+  };
+};
+
+const resolveStoreAvailability = (storeData, now = getZonedNow()) => {
+  const availability = resolveStoreOpenStatus(storeData, now);
+  return {
+    isOpen: availability.isOpenNow,
+    reason: availability.reason,
+    autoOpenClose: Boolean(storeData.autoOpenClose),
+    scheduleOpen: availability.scheduleOpen,
+    pause: availability.pause,
+    pauseExpired: availability.pauseExpired,
+    nextChangeAt: availability.nextOpenAt || availability.nextCloseAt || null,
+    nextOpenAt: availability.nextOpenAt,
+    nextCloseAt: availability.nextCloseAt,
+    hasSchedule: availability.hasSchedule
   };
 };
 
@@ -474,7 +610,7 @@ const getStoreByMerchantId = async (merchantId) => {
 
 const getStoreByOwnerId = async (ownerId) => {
   if (!ownerId) return null;
-  const { rows } = await query('SELECT id, data FROM stores WHERE owner_id = $1 ORDER BY created_at ASC LIMIT 1', [
+  const { rows } = await query('SELECT id, data FROM stores WHERE owner_id = $1 ORDER BY id ASC LIMIT 1', [
     ownerId
   ]);
   if (rows.length === 0) return null;
@@ -632,15 +768,19 @@ const buildOrderPrintText = ({ order, store, flavorMap }) => {
   return `${lines.join('\n')}\n`;
 };
 
-const createPrintJob = async ({ merchantId, orderId, kind, printText }) => {
+const createPrintJob = async ({ merchantId, orderId, kind, printText, payload }) => {
   if (!merchantId) return null;
+  const fullPayload = {
+    printText,
+    ...(payload || {})
+  };
   const { rows } = await query(
     `
     INSERT INTO print_jobs (merchant_id, order_id, kind, status, payload)
     VALUES ($1, $2, $3, $4, $5)
     RETURNING id
     `,
-    [merchantId, orderId || null, kind, PRINT_JOB_STATUS.pending, { printText }]
+    [merchantId, orderId || null, kind, PRINT_JOB_STATUS.pending, fullPayload]
   );
   return rows[0]?.id || null;
 };
@@ -682,19 +822,11 @@ const QUALIFAZ_CANCEL_REASONS = [
   { code: 'OTHER', label: 'Outro motivo' }
 ];
 
-const resolvePickupStatus = async (orderId, storeId, status) => {
-  if (status !== 'WAITING_COURIER') return status;
-  const params = [orderId];
-  let sql = 'SELECT data FROM orders WHERE id = $1';
-  if (storeId) {
-    sql += ' AND store_id = $2';
-    params.push(storeId);
-  }
-  const { rows } = await query(sql, params);
-  const data = normalizeOrderPayload(rows[0]?.data || {});
-  if (data.type === 'PICKUP') return 'DELIVERING';
-  return status;
+const resolveOrderTypeFromData = (data = {}) => {
+  const normalized = normalizeOrderPayload(data || {});
+  return normalized.type || 'DELIVERY';
 };
+
 
 const refreshStoreRating = async (client, storeId) => {
   const { rows: reviewRows } = await client.query('SELECT data FROM reviews WHERE store_id = $1', [storeId]);
@@ -740,13 +872,114 @@ const normalizeOrderPayload = (payload = {}) => {
   return next;
 };
 
+const resolveDeliveryNeighborhood = (storeData = {}, deliveryAddress = null, selectedNeighborhood = '') => {
+  const neighborhoods = Array.isArray(storeData.neighborhoodFees)
+    ? storeData.neighborhoodFees
+    : Array.isArray(storeData.deliveryNeighborhoods)
+    ? storeData.deliveryNeighborhoods
+    : [];
+  const activeNeighborhoods = neighborhoods.filter((item) => item && item.name);
+  if (activeNeighborhoods.length === 0) {
+    return { error: 'Nenhum bairro de entrega configurado.' };
+  }
+
+  const candidates = buildNeighborhoodCandidates(
+    selectedNeighborhood || deliveryAddress?.district,
+    deliveryAddress?.city || storeData.city
+  );
+  if (candidates.length === 0) {
+    return { error: 'Selecione um bairro para calcular a entrega.' };
+  }
+
+  const normalizedCandidates = candidates.map((value) => normalizeNeighborhoodName(value));
+  const match = activeNeighborhoods.find((item) =>
+    normalizedCandidates.includes(normalizeNeighborhoodName(item.name))
+  );
+
+  if (!match) {
+    return { error: 'Selecione um bairro válido para a entrega.' };
+  }
+  if (!match.active) {
+    return { error: 'Esta loja não realiza entregas para o seu bairro.' };
+  }
+  const fee = Number(match.fee || 0);
+  return { fee: Number.isFinite(fee) ? fee : 0, neighborhood: match.name };
+};
+
+const resolveDeliveryZone = (storeData = {}, deliveryCoordinates = null) => {
+  const zones = Array.isArray(storeData.deliveryZones) ? storeData.deliveryZones : [];
+  const activeZones = zones.filter(
+    (zone) =>
+      zone &&
+      zone.enabled !== false &&
+      Number(zone.radiusMeters || 0) > 0 &&
+      Number.isFinite(Number(zone.centerLat)) &&
+      Number.isFinite(Number(zone.centerLng))
+  );
+
+  if (activeZones.length === 0) {
+    return { error: 'Nenhuma área de entrega configurada.' };
+  }
+
+  if (!isValidCoords(deliveryCoordinates)) {
+    return { error: 'Endereço sem coordenadas válidas para calcular o frete.' };
+  }
+
+  const matches = activeZones
+    .map((zone) => {
+      const distance = haversineDistanceMeters(
+        { lat: Number(zone.centerLat), lng: Number(zone.centerLng) },
+        deliveryCoordinates
+      );
+      return { zone, distance };
+    })
+    .filter((item) => item.distance <= Number(item.zone.radiusMeters || 0));
+
+  if (matches.length === 0) {
+    return { error: 'Esta loja não entrega no seu endereço.' };
+  }
+
+  matches.sort((a, b) => {
+    const priorityA = Number(a.zone.priority || 0);
+    const priorityB = Number(b.zone.priority || 0);
+    if (priorityA !== priorityB) return priorityB - priorityA;
+    const radiusA = Number(a.zone.radiusMeters || 0);
+    const radiusB = Number(b.zone.radiusMeters || 0);
+    if (radiusA !== radiusB) return radiusA - radiusB;
+    return a.distance - b.distance;
+  });
+
+  const best = matches[0].zone;
+  const fee = Number(best.fee || 0);
+  return {
+    fee: Number.isFinite(fee) ? fee : 0,
+    zone: best,
+    etaMinutes: Number.isFinite(Number(best.etaMinutes)) ? Number(best.etaMinutes) : undefined
+  };
+};
+
+const ensureOrderItems = (data = {}) => {
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (items.length > 0) return data;
+  const lineItems = Array.isArray(data.lineItems) ? data.lineItems : [];
+  if (lineItems.length === 0) return data;
+  const derivedItems = lineItems.map((item) => {
+    const quantity = Number(item?.quantity) || 1;
+    const name = (item?.name || 'Item').toString();
+    return `${quantity}x ${name}`;
+  });
+  return { ...data, items: derivedItems };
+};
+
 const parseOrderRow = (row) => {
   if (!row) return null;
-  const data = normalizeOrderPayload(row.data || {});
+  const data = ensureOrderItems(normalizeOrderPayload(row.data || {}));
+  const orderType = resolveOrderTypeFromData(data);
+  const normalizedStatus = normalizeStoredStatusForType(row.status, orderType);
   const storeId = data.storeId || row.store_id;
   return {
     id: row.id,
-    status: row.status,
+    status: normalizedStatus,
     storeCity: row.store_city,
     createdAt: row.created_at,
     ...(storeId ? { storeId } : {}),
@@ -820,21 +1053,52 @@ app.get('/api/print/jobs', async (req, res) => {
       return res.status(401).json({ error: 'unauthorized' });
     }
     const { rows: deviceRows } = await query(
-      'SELECT 1 FROM print_devices WHERE merchant_id = $1 AND token = $2',
+      'SELECT merchant_id, machine_id FROM print_devices WHERE merchant_id = $1 AND token = $2',
       [merchantId, token]
     );
     if (deviceRows.length === 0) {
       return res.status(403).json({ error: 'invalid token' });
     }
 
+    const machineId = deviceRows[0].machine_id;
+    const limit = Math.max(1, Math.min(20, Number(req.query.limit) || 10));
+
+    await query(
+      `
+      UPDATE print_jobs
+      SET status = $1, processing_at = NULL, processing_by_machine_id = NULL
+      WHERE merchant_id = $2
+        AND status = $3
+        AND processing_at IS NOT NULL
+        AND processing_at < NOW() - INTERVAL '60 seconds'
+      `,
+      [PRINT_JOB_STATUS.pending, merchantId, PRINT_JOB_STATUS.processing]
+    );
+
     const { rows } = await query(
       `
-      SELECT id, payload, created_at
-      FROM print_jobs
-      WHERE merchant_id = $1 AND status = $2
+      WITH candidate AS (
+        SELECT id
+        FROM print_jobs
+        WHERE merchant_id = $1
+          AND status = $2
+          AND (failed_at IS NULL OR failed_at < NOW() - INTERVAL '10 seconds')
+        ORDER BY created_at ASC
+        LIMIT $3
+        FOR UPDATE SKIP LOCKED
+      ),
+      claimed AS (
+        UPDATE print_jobs
+        SET status = $4,
+            processing_at = NOW(),
+            processing_by_machine_id = $5
+        WHERE id IN (SELECT id FROM candidate)
+        RETURNING id, payload, created_at
+      )
+      SELECT * FROM claimed
       ORDER BY created_at ASC
       `,
-      [merchantId, PRINT_JOB_STATUS.pending]
+      [merchantId, PRINT_JOB_STATUS.pending, limit, PRINT_JOB_STATUS.processing, machineId]
     );
     const jobs = rows.map((row) => ({ id: row.id, ...(row.payload || {}) }));
     return res.json(jobs);
@@ -857,29 +1121,45 @@ app.post('/api/print/jobs/:id/printed', async (req, res) => {
     }
 
     let merchantId = getMerchantIdFromRequest(req);
+    let machineId = null;
     if (merchantId) {
       const { rows: deviceRows } = await query(
-        'SELECT 1 FROM print_devices WHERE merchant_id = $1 AND token = $2',
+        'SELECT machine_id FROM print_devices WHERE merchant_id = $1 AND token = $2',
         [merchantId, token]
       );
       if (deviceRows.length === 0) {
         return res.status(403).json({ error: 'invalid token' });
       }
+      machineId = deviceRows[0].machine_id;
     } else {
-      const { rows } = await query('SELECT merchant_id FROM print_devices WHERE token = $1', [token]);
+      const { rows } = await query('SELECT merchant_id, machine_id FROM print_devices WHERE token = $1', [token]);
       if (rows.length === 0) {
         return res.status(403).json({ error: 'invalid token' });
       }
       merchantId = rows[0].merchant_id;
+      machineId = rows[0].machine_id;
     }
 
     const { rowCount } = await query(
       `
       UPDATE print_jobs
-      SET status = $1, printed_at = NOW()
-      WHERE id = $2 AND merchant_id = $3 AND status = $4
+      SET status = $1,
+          printed_at = NOW(),
+          processing_at = NULL,
+          processing_by_machine_id = NULL
+      WHERE id = $2
+        AND merchant_id = $3
+        AND status IN ($4, $5)
+        AND (processing_by_machine_id IS NULL OR processing_by_machine_id = $6)
       `,
-      [PRINT_JOB_STATUS.printed, req.params.id, merchantId, PRINT_JOB_STATUS.pending]
+      [
+        PRINT_JOB_STATUS.printed,
+        req.params.id,
+        merchantId,
+        PRINT_JOB_STATUS.pending,
+        PRINT_JOB_STATUS.processing,
+        machineId
+      ]
     );
 
     if (!rowCount) {
@@ -898,15 +1178,87 @@ app.post('/api/print/jobs/:id/printed', async (req, res) => {
   }
 });
 
+app.post('/api/print/jobs/:id/failed', async (req, res) => {
+  try {
+    const token = getPrintTokenFromRequest(req);
+    if (!token) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    let merchantId = getMerchantIdFromRequest(req);
+    let machineId = null;
+    if (merchantId) {
+      const { rows: deviceRows } = await query(
+        'SELECT machine_id FROM print_devices WHERE merchant_id = $1 AND token = $2',
+        [merchantId, token]
+      );
+      if (deviceRows.length === 0) {
+        return res.status(403).json({ error: 'invalid token' });
+      }
+      machineId = deviceRows[0].machine_id;
+    } else {
+      const { rows } = await query('SELECT merchant_id, machine_id FROM print_devices WHERE token = $1', [token]);
+      if (rows.length === 0) {
+        return res.status(403).json({ error: 'invalid token' });
+      }
+      merchantId = rows[0].merchant_id;
+      machineId = rows[0].machine_id;
+    }
+
+    const reason = (req.body?.reason || '').toString().slice(0, 500);
+    const retry = req.body?.retry === true;
+    const nextStatus = retry ? PRINT_JOB_STATUS.pending : PRINT_JOB_STATUS.failed;
+    const { rowCount } = await query(
+      `
+      UPDATE print_jobs
+      SET status = $1,
+          failed_at = NOW(),
+          failed_reason = $2,
+          retry_count = COALESCE(retry_count, 0) + 1,
+          processing_at = NULL,
+          processing_by_machine_id = NULL
+      WHERE id = $3
+        AND merchant_id = $4
+        AND status IN ($5, $6)
+        AND (processing_by_machine_id IS NULL OR processing_by_machine_id = $7)
+      `,
+      [
+        nextStatus,
+        reason || null,
+        req.params.id,
+        merchantId,
+        PRINT_JOB_STATUS.pending,
+        PRINT_JOB_STATUS.processing,
+        machineId
+      ]
+    );
+
+    if (!rowCount) {
+      return res.status(404).json({ error: 'job not found' });
+    }
+
+    return res.json({ ok: true, status: nextStatus });
+  } catch (error) {
+    await logError({
+      source: 'server',
+      message: 'failed to mark print job failed',
+      stack: error?.stack,
+      context: { route: 'POST /api/print/jobs/:id/failed', jobId: req.params.id }
+    });
+    return res.status(500).json({ error: 'failed to mark print job failed' });
+  }
+});
+
 // --- Auth ---
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, role = 'CLIENT', profile = {} } = req.body || {};
-    if (!email || !password) {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (!normalizedEmail || !password) {
       return res.status(400).json({ error: 'email and password required' });
     }
 
-    const { rows: existing } = await query('SELECT id FROM users WHERE email = $1', [email]);
+    const { rows: existing } = await query('SELECT id FROM users WHERE lower(email) = $1', [normalizedEmail]);
     if (existing.length > 0) {
       return res.status(409).json({ error: 'email already in use' });
     }
@@ -914,11 +1266,11 @@ app.post('/api/auth/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const { rows } = await query(
       'INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3) RETURNING id, role',
-      [email, passwordHash, role]
+      [normalizedEmail, passwordHash, role]
     );
 
     const userId = rows[0].id;
-    const profileSaved = await upsertProfile(userId, { email, role, ...profile, uid: userId });
+    const profileSaved = await upsertProfile(userId, { email: normalizedEmail, role, ...profile, uid: userId });
     if (!profileSaved) {
       throw new Error('failed to create profile');
     }
@@ -942,11 +1294,14 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
-    if (!email || !password) {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (!normalizedEmail || !password) {
       return res.status(400).json({ error: 'email and password required' });
     }
 
-    const { rows } = await query('SELECT id, password_hash, role FROM users WHERE email = $1', [email]);
+    const { rows } = await query('SELECT id, password_hash, role FROM users WHERE lower(email) = $1', [
+      normalizedEmail
+    ]);
     if (rows.length === 0) {
       return res.status(401).json({ error: 'invalid credentials' });
     }
@@ -998,19 +1353,20 @@ app.get('/api/auth/me', async (req, res) => {
 // --- Stores ---
 app.get('/api/stores', async (req, res) => {
   const merchantId = getMerchantIdFromRequest(req);
+  const now = getZonedNow();
   if (merchantId) {
     const store = await getStoreByMerchantId(merchantId);
     if (!store) return res.json([]);
-    return res.json([mapRow(store)]);
+    return res.json([mapStoreRowWithStatus(store, now)]);
   }
 
   const { rows } = await query('SELECT id, data FROM stores', []);
-  res.json(mapRows(rows));
+  res.json(rows.map((row) => mapStoreRowWithStatus(row, now)));
 });
 
 app.get('/api/stores/:id', async (req, res) => {
   const { rows } = await query('SELECT id, data FROM stores WHERE id = $1', [req.params.id]);
-  const store = mapRow(rows[0]);
+  const store = mapStoreRowWithStatus(rows[0], getZonedNow());
   if (!store) return res.status(404).json({ error: 'not found' });
   res.json(store);
 });
@@ -1040,7 +1396,7 @@ app.post('/api/stores', async (req, res) => {
 app.post('/api/stores/with-user', async (req, res) => {
   const payload = req.body || {};
   const ownerName = payload.ownerName || payload.storeName;
-  const email = payload.email;
+  const email = (payload.email || '').trim().toLowerCase();
   const password = payload.password;
   const phone = payload.phone;
   const storeData = payload.store || {};
@@ -1049,7 +1405,7 @@ app.post('/api/stores/with-user', async (req, res) => {
     return res.status(400).json({ error: 'ownerName, email, and password are required' });
   }
 
-  const existing = await query('SELECT id FROM users WHERE email = $1', [email]);
+  const existing = await query('SELECT id FROM users WHERE lower(email) = $1', [email]);
   if (existing.rows.length > 0) {
     return res.status(409).json({ error: 'email already exists' });
   }
@@ -1152,6 +1508,104 @@ const updateStoreData = async (storeId, nextData) => {
   ]);
 };
 
+const getStoreNeighborhoodList = (storeData = {}) => {
+  if (Array.isArray(storeData.neighborhoodFees)) return storeData.neighborhoodFees;
+  if (Array.isArray(storeData.deliveryNeighborhoods)) return storeData.deliveryNeighborhoods;
+  return [];
+};
+
+app.post('/api/stores/:id/neighborhoods/import', async (req, res) => {
+  const storeId = req.params.id;
+  const { rows } = await query('SELECT data FROM stores WHERE id = $1', [storeId]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+
+  const storeData = rows[0].data || {};
+  const city = String(req.body?.city || storeData.city || '').trim();
+  const state = String(req.body?.state || storeData.state || '').trim();
+  if (!city) return res.status(400).json({ error: 'city required' });
+
+  const existingList = getStoreNeighborhoodList(storeData);
+  const existingKeys = new Set(
+    existingList
+      .map((item) => normalizeNeighborhoodName(item?.name))
+      .filter(Boolean)
+  );
+  const prevState = storeData.neighborhoodImportState || {};
+  const normalizedCity = normalizeNeighborhoodName(city);
+  const normalizedState = normalizeNeighborhoodName(state);
+  const prevCity = normalizeNeighborhoodName(prevState.city || '');
+  const prevStateCode = normalizeNeighborhoodName(prevState.state || '');
+  const shouldReset = (prevCity && prevCity !== normalizedCity) || (prevStateCode && normalizedState && prevStateCode !== normalizedState);
+
+  const runsCount = shouldReset ? 0 : Number(prevState.runsCount || 0);
+  const nextGridIndex = shouldReset ? 0 : Number(prevState.nextGridIndex || 0);
+  const nextKeywordIndex = shouldReset ? 0 : Number(prevState.nextKeywordIndex || 0);
+  const ignoredKeys = new Set([
+    ...(Array.isArray(prevState.ignoredKeys) && !shouldReset ? prevState.ignoredKeys : []),
+    ...existingKeys
+  ]);
+
+  const { neighborhoods, error, meta } = await fetchGoogleNeighborhoodsIncremental(city, state, {
+    ignoreSet: ignoredKeys,
+    gridIndex: nextGridIndex,
+    keywordIndex: nextKeywordIndex,
+    runIndex: runsCount,
+    batchSize: 10
+  });
+
+  if (error && error.status && error.status !== 'ZERO_RESULTS') {
+    return res.status(502).json({
+      error: 'google_api_error',
+      googleStatus: error.status,
+      message: error.message || 'Google API error'
+    });
+  }
+
+  const added = Array.isArray(neighborhoods) ? neighborhoods : [];
+  const addedItems = added.map((name) => ({
+    name,
+    active: true,
+    fee: 0
+  }));
+  const mergedList = existingList.concat(addedItems);
+  const importedAt = new Date().toISOString();
+  const updatedIgnored = new Set([...ignoredKeys, ...added.map((name) => normalizeNeighborhoodName(name))].filter(Boolean));
+  const nextState = {
+    city,
+    state,
+    ignoredKeys: Array.from(updatedIgnored),
+    lastRunAt: importedAt,
+    runsCount: runsCount + 1,
+    lastRequestsCount: meta?.requestCount || 0,
+    lastResultCount: added.length,
+    nextGridIndex: meta?.nextGridIndex ?? nextGridIndex,
+    nextKeywordIndex: meta?.nextKeywordIndex ?? nextKeywordIndex
+  };
+
+  const nextData = {
+    ...storeData,
+    deliveryFeeMode: 'BY_NEIGHBORHOOD',
+    deliveryNeighborhoods: mergedList,
+    neighborhoodFees: mergedList,
+    neighborhoodFeesImportedAt: importedAt,
+    neighborhoodFeesSource: 'google',
+    neighborhoodImportState: nextState
+  };
+
+  await updateStoreData(storeId, nextData);
+
+  res.json({
+    neighborhoods: mergedList,
+    addedCount: added.length,
+    totalCount: mergedList.length,
+    sampleAdded: added.slice(0, 10),
+    meta: meta || { partial: false, requestCount: 0 },
+    neighborhoodImportState: nextState,
+    neighborhoodFeesImportedAt: importedAt,
+    neighborhoodFeesSource: 'google'
+  });
+});
+
 app.get('/api/stores/:id/availability', async (req, res) => {
   const { rows } = await query('SELECT data FROM stores WHERE id = $1', [req.params.id]);
   if (rows.length === 0) return res.status(404).json({ error: 'not found' });
@@ -1176,7 +1630,10 @@ app.get('/api/stores/:id/availability', async (req, res) => {
     scheduleOpen: availability.scheduleOpen,
     autoOpenClose: availability.autoOpenClose,
     pause: availability.pause,
-    nextChangeAt: availability.nextChangeAt
+    nextChangeAt: availability.nextChangeAt,
+    nextOpenAt: availability.nextOpenAt,
+    nextCloseAt: availability.nextCloseAt,
+    hasSchedule: availability.hasSchedule
   });
 });
 
@@ -1448,6 +1905,9 @@ app.post('/api/store-requests/:id/finalize', async (req, res) => {
       deliveryTime: '30-40 min',
       pickupTime: '20-30 min',
       deliveryFee: 5,
+      deliveryFeeMode: 'FIXED',
+      deliveryNeighborhoods: [],
+      neighborhoodFees: [],
       imageUrl: '',
       isPopular: false,
       isActive: true,
@@ -1847,6 +2307,83 @@ app.delete('/api/products/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+const normalizeLinkedCategoryIds = (linkedCategoryIds, allowedCategories) => {
+  if (!Array.isArray(linkedCategoryIds)) return undefined;
+  const seen = new Set();
+  const normalized = [];
+  linkedCategoryIds.forEach((value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) return;
+    if (allowedCategories && !allowedCategories.has(key)) return;
+    seen.add(key);
+    normalized.push(trimmed);
+  });
+  return normalized.length > 0 ? normalized : undefined;
+};
+
+const getStoreCategorySet = async (storeId) => {
+  if (!storeId) return null;
+  const { rows } = await query('SELECT data FROM stores WHERE id = $1', [storeId]);
+  if (!rows[0]) return null;
+  const menuCategories = rows[0].data?.menuCategories;
+  if (!Array.isArray(menuCategories)) return null;
+  const allowed = new Set();
+  menuCategories.forEach((value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    allowed.add(trimmed.toLowerCase());
+  });
+  return allowed;
+};
+
+// --- Option Group Templates ---
+app.get('/api/option-group-templates', async (req, res) => {
+  const storeId = req.query.storeId;
+  const { rows } = await query(
+    storeId
+      ? 'SELECT id, data FROM option_group_templates WHERE store_id = $1'
+      : 'SELECT id, data FROM option_group_templates',
+    storeId ? [storeId] : []
+  );
+  res.json(mapRows(rows));
+});
+
+app.post('/api/option-group-templates', async (req, res) => {
+  const payload = req.body || {};
+  if (!payload.storeId) return res.status(400).json({ error: 'storeId required' });
+  const allowedCategories = await getStoreCategorySet(payload.storeId);
+  payload.linkedCategoryIds = normalizeLinkedCategoryIds(payload.linkedCategoryIds, allowedCategories);
+  if (!payload.linkedCategoryIds) delete payload.linkedCategoryIds;
+  const { rows } = await query(
+    'INSERT INTO option_group_templates (store_id, data) VALUES ($1, $2) RETURNING id',
+    [payload.storeId || null, payload]
+  );
+  res.json({ id: rows[0].id, ...payload });
+});
+
+app.put('/api/option-group-templates/:id', async (req, res) => {
+  const payload = req.body || {};
+  if (!payload.storeId) return res.status(400).json({ error: 'storeId required' });
+  const allowedCategories = await getStoreCategorySet(payload.storeId);
+  payload.linkedCategoryIds = normalizeLinkedCategoryIds(payload.linkedCategoryIds, allowedCategories);
+  if (!payload.linkedCategoryIds) delete payload.linkedCategoryIds;
+  await query('UPDATE option_group_templates SET data = $1, store_id = $2 WHERE id = $3', [
+    payload,
+    payload.storeId || null,
+    req.params.id
+  ]);
+  res.json({ id: req.params.id, ...payload });
+});
+
+app.delete('/api/option-group-templates/:id', async (req, res) => {
+  await query('DELETE FROM option_group_templates WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+});
+
 // --- Pizza Flavors ---
 app.get('/api/pizza-flavors', async (req, res) => {
   const storeId = req.query.storeId;
@@ -1994,6 +2531,20 @@ const isValidCoords = (coords) =>
   Number.isFinite(coords.lat) &&
   Number.isFinite(coords.lng);
 
+const haversineDistanceMeters = (coord1, coord2) => {
+  if (!isValidCoords(coord1) || !isValidCoords(coord2)) return Infinity;
+  const R = 6371000;
+  const dLat = ((coord2.lat - coord1.lat) * Math.PI) / 180;
+  const dLng = ((coord2.lng - coord1.lng) * Math.PI) / 180;
+  const lat1 = (coord1.lat * Math.PI) / 180;
+  const lat2 = (coord2.lat * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
 const isFallbackCoords = (coords) =>
   isValidCoords(coords) &&
   Math.abs(coords.lat - DEFAULT_COORDS.lat) < COORDS_EPSILON &&
@@ -2011,8 +2562,35 @@ const buildAddressQuery = (address = {}) => {
   return parts.join(', ');
 };
 
-const fetchGoogleGeocode = async ({ address, lat, lng } = {}) => {
-  if (!GOOGLE_MAPS_API_KEY) return null;
+const sanitizeGoogleUrl = (url) => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.searchParams.has('key')) parsed.searchParams.set('key', 'REDACTED');
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
+
+const logGoogleApiResult = (context, url, httpStatus, data) => {
+  const googleStatus = data?.status || null;
+  const message = data?.error_message || null;
+  console.info('[google-api]', {
+    context,
+    url: sanitizeGoogleUrl(url),
+    httpStatus,
+    googleStatus,
+    message
+  });
+};
+
+const fetchGoogleGeocode = async ({ address, lat, lng, returnDetails = false } = {}) => {
+  if (!GOOGLE_MAPS_API_KEY) {
+    if (returnDetails) {
+      return { results: null, status: 'NO_API_KEY', errorMessage: 'Google API key not configured', httpStatus: 0 };
+    }
+    return null;
+  }
   const params = new URLSearchParams({
     key: GOOGLE_MAPS_API_KEY,
     language: 'pt-BR',
@@ -2025,19 +2603,470 @@ const fetchGoogleGeocode = async ({ address, lat, lng } = {}) => {
   const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
   try {
     const response = await fetchWithTimeout(url);
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data || data.status !== 'OK' || !Array.isArray(data.results)) {
-      if (data?.status && data.status !== 'ZERO_RESULTS') {
-        console.warn('Google geocode status', data.status, data.error_message || '');
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    logGoogleApiResult('geocode', url, response.status, data);
+    if (!response.ok) {
+      if (returnDetails) {
+        return {
+          results: null,
+          status: data?.status || 'HTTP_ERROR',
+          errorMessage: data?.error_message || `HTTP ${response.status}`,
+          httpStatus: response.status
+        };
       }
+      return null;
+    }
+    if (!data || !Array.isArray(data.results)) {
+      if (returnDetails) {
+        return {
+          results: null,
+          status: data?.status || 'INVALID_RESPONSE',
+          errorMessage: data?.error_message || 'Invalid geocode response',
+          httpStatus: response.status
+        };
+      }
+      return null;
+    }
+    if (returnDetails) {
+      return {
+        results: data.results,
+        status: data.status,
+        errorMessage: data.error_message || null,
+        httpStatus: response.status
+      };
+    }
+    if (data.status !== 'OK') {
       return null;
     }
     return data.results;
   } catch (error) {
     console.warn('Google geocode failed', error);
+    if (returnDetails) {
+      return { results: null, status: 'FETCH_FAILED', errorMessage: String(error), httpStatus: 0 };
+    }
     return null;
   }
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fetchGooglePlacesNearby = async (params) => {
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
+  try {
+    const response = await fetchWithTimeout(url);
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    logGoogleApiResult('places-nearby', url, response.status, data);
+    if (!response.ok) {
+      return {
+        status: data?.status || 'HTTP_ERROR',
+        errorMessage: data?.error_message || `HTTP ${response.status}`,
+        results: []
+      };
+    }
+    return data;
+  } catch (error) {
+    console.warn('Google places nearby failed', error);
+    return { status: 'FETCH_FAILED', errorMessage: String(error), results: [] };
+  }
+};
+
+const neighborhoodCache = new Map();
+const NEIGHBORHOOD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_NEIGHBORHOOD_REQUESTS = 200;
+const RESERVED_DETAIL_REQUESTS = 80;
+const NEARBY_PAGES_ESTIMATE = 2;
+
+const extractNeighborhoodFromDetails = (data) => {
+  const components = data?.result?.address_components || [];
+  const pick = (type) => components.find((comp) => Array.isArray(comp.types) && comp.types.includes(type));
+  const candidate =
+    pick('sublocality_level_1') ||
+    pick('sublocality') ||
+    pick('neighborhood') ||
+    pick('political');
+  const name = (candidate?.long_name || '').toString().trim();
+  return name || '';
+};
+
+const fetchGooglePlaceDetails = async (placeId) => {
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  const params = new URLSearchParams({
+    key: GOOGLE_MAPS_API_KEY,
+    language: 'pt-BR',
+    region: 'br',
+    place_id: placeId,
+    fields: 'address_component'
+  });
+  const url = `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`;
+  try {
+    const response = await fetchWithTimeout(url);
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    logGoogleApiResult('place-details', url, response.status, data);
+    if (!response.ok) {
+      return {
+        status: data?.status || 'HTTP_ERROR',
+        errorMessage: data?.error_message || `HTTP ${response.status}`,
+        result: null
+      };
+    }
+    return data;
+  } catch (error) {
+    console.warn('Google place details failed', error);
+    return { status: 'FETCH_FAILED', errorMessage: String(error), result: null };
+  }
+};
+
+const buildGridPoints = (bounds, maxPoints) => {
+  if (!bounds) return [];
+  const sw = bounds.southwest;
+  const ne = bounds.northeast;
+  const latSpan = Math.abs(ne.lat - sw.lat);
+  const lngSpan = Math.abs(ne.lng - sw.lng);
+  const maxSpan = Math.max(latSpan, lngSpan);
+  let gridSize = 5;
+  if (maxSpan > 0.6) gridSize = 7;
+  if (maxSpan < 0.15) gridSize = 3;
+  if (maxPoints && Number.isFinite(maxPoints)) {
+    const maxGrid = Math.max(2, Math.floor(Math.sqrt(maxPoints)));
+    gridSize = Math.min(gridSize, maxGrid);
+  }
+  const latStep = latSpan / Math.max(1, gridSize - 1);
+  const lngStep = lngSpan / Math.max(1, gridSize - 1);
+  const points = [];
+  for (let i = 0; i < gridSize; i += 1) {
+    for (let j = 0; j < gridSize; j += 1) {
+      points.push({
+        lat: sw.lat + latStep * i,
+        lng: sw.lng + lngStep * j
+      });
+    }
+  }
+  if (maxPoints && points.length > maxPoints) {
+    return points.slice(0, maxPoints);
+  }
+  return points;
+};
+
+const buildGridPointsFixed = (bounds, gridSize) => {
+  if (!bounds) return [];
+  const sw = bounds.southwest;
+  const ne = bounds.northeast;
+  const size = Math.max(2, Number(gridSize) || 5);
+  const latSpan = Math.abs(ne.lat - sw.lat);
+  const lngSpan = Math.abs(ne.lng - sw.lng);
+  const latStep = latSpan / Math.max(1, size - 1);
+  const lngStep = lngSpan / Math.max(1, size - 1);
+  const points = [];
+  for (let i = 0; i < size; i += 1) {
+    for (let j = 0; j < size; j += 1) {
+      points.push({
+        lat: sw.lat + latStep * i,
+        lng: sw.lng + lngStep * j
+      });
+    }
+  }
+  return points;
+};
+
+const collectGridBatch = (points, startIndex, batchSize) => {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  const size = points.length;
+  const start = Number.isFinite(startIndex) ? startIndex : 0;
+  const total = Math.max(1, Number(batchSize) || 1);
+  const batch = [];
+  for (let i = 0; i < total && batch.length < size; i += 1) {
+    batch.push(points[(start + i) % size]);
+  }
+  return batch;
+};
+
+const fetchGoogleNeighborhoodsIncremental = async (
+  city,
+  state,
+  {
+    ignoreSet = new Set(),
+    gridIndex = 0,
+    keywordIndex = 0,
+    runIndex = 0,
+    batchSize = 10
+  } = {}
+) => {
+  if (!city) return { neighborhoods: [], error: { status: 'INVALID_REQUEST', message: 'city required' } };
+  if (!GOOGLE_MAPS_API_KEY) {
+    return { neighborhoods: [], error: { status: 'NO_API_KEY', message: 'Google API key not configured' } };
+  }
+
+  let requestCount = 0;
+  let partial = false;
+  const locationQuery = [city, state, 'Brasil'].filter(Boolean).join(', ');
+  const geocodeDetails = await fetchGoogleGeocode({ address: locationQuery, returnDetails: true });
+  requestCount += 1;
+  const geocodeStatus = geocodeDetails?.status || null;
+  if (geocodeStatus && geocodeStatus !== 'OK' && geocodeStatus !== 'ZERO_RESULTS') {
+    return {
+      neighborhoods: [],
+      error: { status: geocodeStatus, message: geocodeDetails?.errorMessage || 'Google geocode error' }
+    };
+  }
+  const geometry = geocodeDetails?.results?.[0]?.geometry || {};
+  const bounds = geometry?.bounds || geometry?.viewport;
+  const location = geometry?.location || null;
+  const lat = Number(location?.lat);
+  const lng = Number(location?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { neighborhoods: [], error: { status: geocodeStatus || 'ZERO_RESULTS', message: 'City not found' } };
+  }
+
+  const keywordsCycle = ['bairro', '', 'vila', 'jardim'];
+  const keyword = keywordsCycle[keywordIndex % keywordsCycle.length] ?? 'bairro';
+  const radiusOptions = [4000, 6000, 8000];
+  const radius = radiusOptions[runIndex % radiusOptions.length];
+  const types = ['sublocality_level_1', 'sublocality', 'political'];
+  const gridSize = bounds ? (Math.max(Math.abs(bounds.northeast.lat - bounds.southwest.lat), Math.abs(bounds.northeast.lng - bounds.southwest.lng)) > 0.6 ? 7 : 5) : 5;
+  const points = bounds ? buildGridPointsFixed(bounds, gridSize) : [{ lat, lng }];
+  const batchPoints = collectGridBatch(points, gridIndex, batchSize);
+  const nextGridIndex = points.length === 0 ? 0 : (gridIndex + batchPoints.length) % points.length;
+
+  const placeIds = new Set();
+  const maxRequests = MAX_NEIGHBORHOOD_REQUESTS;
+
+  for (const point of batchPoints) {
+    for (const type of types) {
+      if (requestCount >= maxRequests) {
+        partial = true;
+        break;
+      }
+      let pageToken = null;
+      for (let page = 0; page < 3; page += 1) {
+        if (requestCount >= maxRequests) {
+          partial = true;
+          break;
+        }
+        const params = new URLSearchParams({
+          key: GOOGLE_MAPS_API_KEY,
+          language: 'pt-BR',
+          region: 'br',
+          location: `${point.lat},${point.lng}`,
+          radius: String(radius),
+          type
+        });
+        if (keyword) params.set('keyword', keyword);
+        if (pageToken) params.set('pagetoken', pageToken);
+        const data = await fetchGooglePlacesNearby(params);
+        requestCount += 1;
+        if (!data) break;
+        if (data.status === 'INVALID_REQUEST' && pageToken) {
+          await sleep(1500);
+          page -= 1;
+          continue;
+        }
+        if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+          return {
+            neighborhoods: [],
+            error: { status: data.status, message: data.error_message || 'Google places error' }
+          };
+        }
+        for (const item of data.results || []) {
+          if (item?.place_id) placeIds.add(item.place_id);
+        }
+        pageToken = data.next_page_token;
+        if (!pageToken) break;
+        await sleep(1500);
+      }
+    }
+    if (partial) break;
+  }
+
+  const names = new Map();
+  for (const placeId of placeIds) {
+    if (requestCount >= maxRequests) {
+      partial = true;
+      break;
+    }
+    const details = await fetchGooglePlaceDetails(placeId);
+    requestCount += 1;
+    if (!details) continue;
+    if (details.status && details.status !== 'OK') {
+      if (details.status !== 'ZERO_RESULTS') {
+        return {
+          neighborhoods: [],
+          error: { status: details.status, message: details.error_message || 'Google place details error' }
+        };
+      }
+      continue;
+    }
+    const name = extractNeighborhoodFromDetails(details);
+    if (!name) continue;
+    const key = normalizeNeighborhoodName(name);
+    if (!key || ignoreSet.has(key) || names.has(key)) continue;
+    names.set(key, name);
+  }
+
+  const neighborhoods = Array.from(names.values()).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  return {
+    neighborhoods,
+    meta: {
+      partial,
+      requestCount,
+      keyword: keyword || null,
+      radius,
+      batchSize: batchPoints.length,
+      gridSize,
+      nextGridIndex,
+      nextKeywordIndex: (keywordIndex + 1) % keywordsCycle.length
+    },
+    error: null
+  };
+};
+
+const fetchGoogleNeighborhoods = async (city, state) => {
+  if (!city) return { neighborhoods: [], error: { status: 'INVALID_REQUEST', message: 'city required' } };
+  if (!GOOGLE_MAPS_API_KEY) {
+    return { neighborhoods: [], error: { status: 'NO_API_KEY', message: 'Google API key not configured' } };
+  }
+
+  const cacheKey = normalizeNeighborhoodName(`${city}-${state || ''}`);
+  const cached = neighborhoodCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < NEIGHBORHOOD_CACHE_TTL_MS) {
+    return cached.payload;
+  }
+
+  let requestCount = 0;
+  let partial = false;
+  const locationQuery = [city, state, 'Brasil'].filter(Boolean).join(', ');
+  const geocodeDetails = await fetchGoogleGeocode({ address: locationQuery, returnDetails: true });
+  requestCount += 1;
+  const geocodeStatus = geocodeDetails?.status || null;
+  if (geocodeStatus && geocodeStatus !== 'OK' && geocodeStatus !== 'ZERO_RESULTS') {
+    return {
+      neighborhoods: [],
+      error: { status: geocodeStatus, message: geocodeDetails?.errorMessage || 'Google geocode error' }
+    };
+  }
+  const geometry = geocodeDetails?.results?.[0]?.geometry || {};
+  const bounds = geometry?.bounds || geometry?.viewport;
+  const location = geometry?.location || null;
+  const lat = Number(location?.lat);
+  const lng = Number(location?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { neighborhoods: [], error: { status: geocodeStatus || 'ZERO_RESULTS', message: 'City not found' } };
+  }
+
+  const types = ['sublocality_level_1', 'sublocality', 'political'];
+  const keywords = ['bairro', ''];
+  const maxSearchRequests = Math.max(0, MAX_NEIGHBORHOOD_REQUESTS - RESERVED_DETAIL_REQUESTS);
+  const requestsPerPoint = types.length * keywords.length * NEARBY_PAGES_ESTIMATE;
+  const maxPoints = Math.max(1, Math.floor(maxSearchRequests / Math.max(1, requestsPerPoint)));
+  const points = buildGridPoints(bounds, maxPoints);
+  if (points.length === 0) {
+    points.push({ lat, lng });
+  }
+  const placeIds = new Set();
+
+  for (const point of points) {
+    for (const type of types) {
+      for (const keyword of keywords) {
+        if (requestCount >= maxSearchRequests) {
+          partial = true;
+          break;
+        }
+        let pageToken = null;
+        for (let page = 0; page < 3; page += 1) {
+          if (requestCount >= maxSearchRequests) {
+            partial = true;
+            break;
+          }
+          const params = new URLSearchParams({
+            key: GOOGLE_MAPS_API_KEY,
+            language: 'pt-BR',
+            region: 'br',
+            location: `${point.lat},${point.lng}`,
+            radius: '7000',
+            type
+          });
+          if (keyword) params.set('keyword', keyword);
+          if (pageToken) params.set('pagetoken', pageToken);
+          const data = await fetchGooglePlacesNearby(params);
+          requestCount += 1;
+          if (!data) break;
+          if (data.status === 'INVALID_REQUEST' && pageToken) {
+            await sleep(1500);
+            page -= 1;
+            continue;
+          }
+          if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+            return {
+              neighborhoods: [],
+              error: { status: data.status, message: data.error_message || 'Google places error' }
+            };
+          }
+          for (const item of data.results || []) {
+            if (item?.place_id) placeIds.add(item.place_id);
+          }
+          pageToken = data.next_page_token;
+          if (!pageToken) break;
+          await sleep(1500);
+        }
+      }
+      if (partial) break;
+    }
+    if (partial) break;
+  }
+
+  const names = new Map();
+  for (const placeId of placeIds) {
+    if (requestCount >= MAX_NEIGHBORHOOD_REQUESTS) {
+      partial = true;
+      break;
+    }
+    const details = await fetchGooglePlaceDetails(placeId);
+    requestCount += 1;
+    if (!details) continue;
+    if (details.status && details.status !== 'OK') {
+      if (details.status !== 'ZERO_RESULTS') {
+        return {
+          neighborhoods: [],
+          error: { status: details.status, message: details.error_message || 'Google place details error' }
+        };
+      }
+      continue;
+    }
+    const name = extractNeighborhoodFromDetails(details);
+    if (!name) continue;
+    const key = normalizeNeighborhoodName(name);
+    if (!key || names.has(key)) continue;
+    names.set(key, name);
+  }
+
+  const neighborhoods = Array.from(names.values()).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  const payload = {
+    neighborhoods,
+    meta: {
+      partial,
+      requestCount
+    },
+    error: null
+  };
+  if (neighborhoods.length > 0 || !partial) {
+    neighborhoodCache.set(cacheKey, { timestamp: Date.now(), payload });
+  }
+  return payload;
 };
 
 const geocodeAddressCoordinates = async (address = {}) => {
@@ -2224,6 +3253,29 @@ app.get('/api/geocode/search', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'failed to geocode search' });
+  }
+});
+
+app.get('/api/geocode/neighborhoods', async (req, res) => {
+  const city = String(req.query.city || '').trim();
+  const state = String(req.query.state || '').trim();
+  if (!city) return res.status(400).json({ error: 'city required' });
+  try {
+    const { neighborhoods, error, meta } = await fetchGoogleNeighborhoods(city, state);
+    if (error && error.status && error.status !== 'ZERO_RESULTS') {
+      return res.status(502).json({
+        error: 'google_api_error',
+        googleStatus: error.status,
+        message: error.message || 'Google API error'
+      });
+    }
+    res.json({
+      neighborhoods,
+      meta: meta || { partial: false, requestCount: 0 }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'failed to fetch neighborhoods' });
   }
 });
 
@@ -2560,10 +3612,55 @@ app.post('/api/orders', async (req, res) => {
   const payload = req.body || {};
   let status = payload.status || 'PENDING';
   let customerId = payload.customerId || null;
+  let storeData = null;
+  const authPayload = getAuthPayload(req);
+  const orderType =
+    payload.type || (payload.pickup ? 'PICKUP' : payload.tableNumber ? 'TABLE' : 'DELIVERY');
+
+  if (orderType === 'TABLE' && status === 'PENDING') {
+    status = 'PREPARING';
+    payload.autoAccepted = true;
+    payload.autoAcceptedAt = new Date().toISOString();
+  }
+
+  if (payload.storeId) {
+    const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [payload.storeId]);
+    storeData = storeRows[0]?.data || {};
+  }
+
+  if (authPayload) {
+    const profileData = await getProfile(authPayload.sub);
+    payload.userId = authPayload.sub;
+    if (!payload.customerName) {
+      payload.customerName = (profileData?.name || profileData?.email || '').trim();
+    }
+    if (!payload.customerPhone && profileData?.phone) {
+      payload.customerPhone = profileData.phone;
+    }
+    if (!payload.cpf && profileData?.cpf) {
+      payload.cpf = profileData.cpf;
+    }
+    if (orderType === 'DELIVERY' && !payload.deliveryAddress) {
+      const addresses = Array.isArray(profileData?.addresses) ? profileData.addresses : [];
+      if (addresses.length > 0) {
+        const defaultAddress = addresses[0];
+        payload.deliveryAddress = defaultAddress;
+        if (!payload.deliveryCoordinates && defaultAddress?.coordinates) {
+          payload.deliveryCoordinates = defaultAddress.coordinates;
+        }
+      }
+    }
+  }
+
   const deliveryAddress = payload.deliveryAddress || null;
   const customerPhone = payload.customerPhone ? String(payload.customerPhone) : '';
   const customerName = payload.customerName ? String(payload.customerName) : '';
-  let storeData = null;
+
+  if (orderType === 'DELIVERY' && !deliveryAddress) {
+    return res.status(400).json({
+      error: 'delivery address required'
+    });
+  }
 
   if (deliveryAddress) {
     const currentCoords = payload.deliveryCoordinates || deliveryAddress.coordinates;
@@ -2785,9 +3882,6 @@ app.post('/api/orders', async (req, res) => {
       });
 
       payload.lineItems = updatedLineItems;
-      const subtotal = updatedLineItems.reduce((sum, line) => sum + Number(line?.totalPrice || 0), 0);
-      const deliveryFee = Number(payload.deliveryFee || 0);
-      payload.total = subtotal + deliveryFee;
     } catch (error) {
       return res.status(400).json({
         error: 'invalid pizza order',
@@ -2796,9 +3890,96 @@ app.post('/api/orders', async (req, res) => {
     }
   }
 
+  const normalizedLineItems = Array.isArray(payload.lineItems) ? payload.lineItems : [];
+  const lineItemsSubtotal = normalizedLineItems.reduce((sum, item) => sum + Number(item?.totalPrice || 0), 0);
+  let resolvedDeliveryFee = 0;
+  if (orderType === 'DELIVERY') {
+    if (storeData?.acceptsDelivery === false) {
+      return res.status(400).json({
+        error: 'Esta loja não aceita pedidos para entrega.'
+      });
+    }
+    if (storeData?.deliveryFeeMode === 'BY_NEIGHBORHOOD') {
+      const neighborhoodResult = resolveDeliveryNeighborhood(
+        storeData,
+        payload.deliveryAddress || null,
+        payload.deliveryNeighborhood || ''
+      );
+      if (neighborhoodResult.error) {
+        return res.status(400).json({ error: neighborhoodResult.error });
+      }
+      resolvedDeliveryFee = Number(neighborhoodResult.fee || 0);
+      if (neighborhoodResult.neighborhood) {
+        payload.deliveryNeighborhood = neighborhoodResult.neighborhood;
+      }
+    } else if (storeData?.deliveryFeeMode === 'BY_RADIUS') {
+      const coords = payload.deliveryCoordinates || payload.deliveryAddress?.coordinates;
+      const zoneResult = resolveDeliveryZone(storeData, coords);
+      if (zoneResult.error) {
+        return res.status(400).json({ error: zoneResult.error });
+      }
+      resolvedDeliveryFee = Number(zoneResult.fee || 0);
+      if (zoneResult.zone) {
+        payload.deliveryZoneId = zoneResult.zone.id;
+        payload.deliveryZoneName = zoneResult.zone.name;
+        if (zoneResult.etaMinutes !== undefined) {
+          payload.deliveryEtaMinutes = zoneResult.etaMinutes;
+        }
+      }
+    } else {
+      resolvedDeliveryFee = Number(storeData?.deliveryFee || 0);
+    }
+  }
+  payload.deliveryFee = resolvedDeliveryFee;
+  payload.total = lineItemsSubtotal + resolvedDeliveryFee;
+  const couponCodeRaw = (payload.couponCode || payload.coupon?.code || '').toString().trim();
+  const couponIdRaw = (payload.couponId || payload.coupon?.id || '').toString().trim();
+  if ((couponCodeRaw || couponIdRaw) && payload.storeId) {
+    const couponQuery = couponIdRaw
+      ? 'SELECT id, data FROM coupons WHERE id = $1 AND store_id = $2'
+      : 'SELECT id, data FROM coupons WHERE upper(data->>\'code\') = $1 AND store_id = $2';
+    const couponParams = couponIdRaw ? [couponIdRaw, payload.storeId] : [couponCodeRaw.toUpperCase(), payload.storeId];
+    const { rows: couponRows } = await query(couponQuery, couponParams);
+    const couponRow = couponRows[0];
+    if (!couponRow) {
+      return res.status(400).json({ error: 'Cupom inválido.' });
+    }
+    const couponData = couponRow.data || {};
+    if (!couponData.isActive) {
+      return res.status(400).json({ error: 'Cupom inativo.' });
+    }
+    if (couponData.expiresAt && new Date(couponData.expiresAt).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'Cupom expirado.' });
+    }
+    if (couponData.usageLimit && couponData.usageCount >= couponData.usageLimit) {
+      return res.status(400).json({ error: 'Cupom esgotado.' });
+    }
+    if (couponData.minOrderValue && lineItemsSubtotal < Number(couponData.minOrderValue || 0)) {
+      return res.status(400).json({ error: `Pedido mínimo para este cupom é R$ ${couponData.minOrderValue}.` });
+    }
+
+    const baseDiscount =
+      couponData.discountType === 'PERCENTAGE'
+        ? (lineItemsSubtotal * Number(couponData.discountValue || 0)) / 100
+        : Number(couponData.discountValue || 0);
+    const appliedDiscount = Math.min(baseDiscount, lineItemsSubtotal);
+    const deliveryFee = Number(payload.deliveryFee || 0);
+    const baseTotal = Number(payload.total || lineItemsSubtotal + deliveryFee);
+    payload.couponId = couponRow.id;
+    payload.couponCode = couponData.code || couponCodeRaw.toUpperCase();
+    payload.couponDiscount = appliedDiscount;
+    payload.total = Math.max(0, baseTotal - appliedDiscount);
+  }
+
   if (payload.storeId) {
-    const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [payload.storeId]);
-    storeData = storeRows[0]?.data || {};
+    storeData = storeData || {};
+    const allowOrdersWhenClosed = storeData.allowOrdersWhenClosed === true;
+    const openStatus = resolveStoreOpenStatus(storeData);
+    if (!openStatus.isOpenNow && !allowOrdersWhenClosed) {
+      return res.status(400).json({
+        error: 'Loja fechada no momento. Verifique os horários de funcionamento.'
+      });
+    }
     if (storeData.autoAcceptOrders && status === 'PENDING') {
       status = 'PREPARING';
       payload.autoAccepted = true;
@@ -2926,11 +4107,23 @@ app.post('/api/orders/:id/print', async (req, res) => {
     store: storeData,
     flavorMap
   });
+  const { rows: reprintRows } = await query(
+    'SELECT COUNT(*)::int AS count FROM print_jobs WHERE order_id = $1 AND kind = $2',
+    [orderRow.id, PRINT_JOB_KIND.reprint]
+  );
+  const reprintNumber = Number(reprintRows[0]?.count || 0) + 1;
   await createPrintJob({
     merchantId: storeData.merchantId,
     orderId: orderRow.id,
     kind: PRINT_JOB_KIND.reprint,
-    printText
+    printText,
+    payload: {
+      reprint: true,
+      reprintNumber,
+      orderId: orderRow.id,
+      storeId: orderRow.store_id,
+      merchantId: storeData.merchantId
+    }
   });
 
   res.json({ ok: true });
@@ -2954,22 +4147,88 @@ app.put('/api/orders/:id/assign', async (req, res) => {
 app.put('/api/orders/:id/status', async (req, res) => {
   const { status, reason } = req.body || {};
   if (!status) return res.status(400).json({ error: 'status required' });
-  const { rows: currentRows } = await query('SELECT status, data FROM orders WHERE id = $1', [req.params.id]);
+  const { rows: currentRows } = await query(
+    'SELECT status, data, store_id, created_at FROM orders WHERE id = $1',
+    [req.params.id]
+  );
   if (currentRows.length === 0) return res.status(404).json({ error: 'not found' });
-  const currentStatus = currentRows[0].status;
-  const resolvedStatus = await resolvePickupStatus(req.params.id, null, status);
-  if (!canAdvanceOrderStatus(currentStatus, resolvedStatus)) {
+  const orderRow = currentRows[0];
+  const orderData = orderRow.data || {};
+  const orderType = resolveOrderTypeFromData(orderData);
+  const currentStatus = normalizeStoredStatusForType(orderRow.status, orderType);
+  const resolvedStatus = status;
+  const allowedFlow = getOrderStatusFlow(orderType);
+  if (!allowedFlow.includes(resolvedStatus)) {
+    return res.status(400).json({ error: 'Status inválido para este tipo de pedido.' });
+  }
+  if (!canAdvanceOrderStatus(currentStatus, resolvedStatus, orderType)) {
     return res.status(400).json({
       error:
         'Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.'
     });
   }
   if (reason && status === 'CANCELLED') {
-    const data = { ...(currentRows[0].data || {}), cancelReason: String(reason) };
+    const data = { ...(orderRow.data || {}), cancelReason: String(reason) };
     await query('UPDATE orders SET status = $1, data = $2 WHERE id = $3', [resolvedStatus, data, req.params.id]);
     return res.json({ ok: true });
   }
   await query('UPDATE orders SET status = $1 WHERE id = $2', [resolvedStatus, req.params.id]);
+  if (resolvedStatus === 'PREPARING') {
+    try {
+      if (orderRow.store_id) {
+        const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
+        const storeData = storeRows[0]?.data || null;
+        if (storeData?.merchantId) {
+          const { rows: existingPrint } = await query(
+            'SELECT 1 FROM print_jobs WHERE order_id = $1 AND kind = $2 LIMIT 1',
+            [req.params.id, PRINT_JOB_KIND.newOrder]
+          );
+          if (existingPrint.length === 0) {
+            const orderPayload = {
+              id: req.params.id,
+              status: resolvedStatus,
+              createdAt: orderRow.created_at,
+              ...(orderData || {})
+            };
+            const flavorIds = Array.from(
+              new Set(
+                (orderPayload.lineItems || [])
+                  .flatMap((item) => item?.pizza?.flavors || [])
+                  .map((entry) => entry?.flavorId)
+                  .filter(Boolean)
+              )
+            );
+            const flavorMap = new Map();
+            if (flavorIds.length > 0) {
+              const { rows: flavorRows } = await query(
+                'SELECT id, data FROM pizza_flavors WHERE id = ANY($1::uuid[])',
+                [flavorIds]
+              );
+              flavorRows.forEach((row) => flavorMap.set(row.id, row.data?.name || row.data?.title || row.id));
+            }
+            const printText = buildOrderPrintText({
+              order: orderPayload,
+              store: storeData,
+              flavorMap
+            });
+            await createPrintJob({
+              merchantId: storeData.merchantId,
+              orderId: req.params.id,
+              kind: PRINT_JOB_KIND.newOrder,
+              printText
+            });
+          }
+        }
+      }
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to create print job on preparing',
+        stack: error?.stack,
+        context: { route: 'PUT /api/orders/:id/status', orderId: req.params.id }
+      });
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -3188,9 +4447,27 @@ app.put('/api/qualifaz/orders/:id/status', async (req, res) => {
         orderId: req.params.id
       });
     }
-    const currentStatus = currentRows[0].status;
-    const resolvedStatus = await resolvePickupStatus(req.params.id, store.id, status);
-    if (!canAdvanceOrderStatus(currentStatus, resolvedStatus)) {
+    const orderData = currentRows[0].data || {};
+    const orderType = resolveOrderTypeFromData(orderData);
+    const currentStatus = normalizeStoredStatusForType(currentRows[0].status, orderType);
+    const resolvedStatus = status;
+    const allowedFlow = getOrderStatusFlow(orderType);
+    if (!allowedFlow.includes(resolvedStatus)) {
+      return respondQualifazError(
+        res,
+        400,
+        'QUALIFAZ_INVALID_STATUS',
+        'Status inválido para este tipo de pedido.',
+        {
+          route: 'PUT /qualifaz/orders/:id/status',
+          merchantId,
+          orderId: req.params.id,
+          currentStatus,
+          nextStatus: resolvedStatus
+        }
+      );
+    }
+    if (!canAdvanceOrderStatus(currentStatus, resolvedStatus, orderType)) {
       return respondQualifazError(
         res,
         400,

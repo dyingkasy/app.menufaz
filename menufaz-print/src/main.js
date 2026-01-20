@@ -22,6 +22,7 @@ const DEFAULT_API_URL_DEV = 'http://localhost:3001';
 const getDefaultApiUrl = () => (app && app.isPackaged ? DEFAULT_API_URL_PROD : DEFAULT_API_URL_DEV);
 const CONFIG_FILENAME = 'config.json';
 const POLL_INTERVAL_MS = 5000;
+const PRINT_TIMEOUT_MS = 15000;
 const ESC_POS_CHARSET_CP860 = Buffer.from([0x1b, 0x74, 0x03]);
 const ESC_POS_CUT = Buffer.from([0x1d, 0x56, 0x00]);
 const PRINT_WRAP_COLUMNS = 48;
@@ -32,13 +33,19 @@ let pollingTimer = null;
 let pollingInFlight = false;
 let lastPrinterMissing = false;
 let logFilePath = '';
+let processingQueue = false;
+const jobQueue = [];
+const inFlightJobIds = new Set();
+let currentConfig = null;
 
 const state = {
   storeName: '',
   connected: false,
+  currentStatus: 'Idle',
   lastPrintedAt: '',
   lastPrintedId: '',
   lastError: '',
+  logFilePath: '',
   printerSupport: Boolean(printer)
 };
 
@@ -50,6 +57,7 @@ const ensureLogFile = () => {
     fs.mkdirSync(logDir, { recursive: true });
   } catch {}
   logFilePath = path.join(logDir, 'app.log');
+  updateStatus({ logFilePath });
   return logFilePath;
 };
 
@@ -311,25 +319,127 @@ const printJob = (config, job) => new Promise((resolve, reject) => {
   });
 });
 
+const printJobWithTimeout = async (config, job, timeoutMs) => new Promise((resolve, reject) => {
+  let done = false;
+  const timeout = setTimeout(() => {
+    if (done) return;
+    done = true;
+    reject(new Error('print timeout'));
+  }, timeoutMs);
+
+  printJob(config, job)
+    .then((result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      resolve(result);
+    })
+    .catch((error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+});
+
 const markPrinted = async (config, jobId) => {
-  logInfo('marking printed', { jobId, url: `${config.apiUrl}/api/print/jobs/${jobId}/printed` });
+  logInfo('ack start', { jobId, url: `${config.apiUrl}/api/print/jobs/${jobId}/printed` });
   await apiRequest(config, `/api/print/jobs/${jobId}/printed`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.printToken}`
     }
   });
+  logInfo('ack success', { jobId });
+};
+
+const markFailed = async (config, jobId, reason, retry = true) => {
+  logInfo('mark failed start', { jobId, retry });
+  await apiRequest(config, `/api/print/jobs/${jobId}/failed`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.printToken}`
+    },
+    body: { reason, retry }
+  });
+  logInfo('mark failed success', { jobId });
+};
+
+const enqueueJobs = (jobs) => {
+  let added = 0;
+  jobs.forEach((job) => {
+    if (!job || !job.id) return;
+    if (inFlightJobIds.has(job.id)) return;
+    inFlightJobIds.add(job.id);
+    jobQueue.push(job);
+    added += 1;
+    logInfo('job picked', { jobId: job.id });
+  });
+  return added;
+};
+
+const processQueue = async () => {
+  if (processingQueue) return;
+  processingQueue = true;
+  while (jobQueue.length > 0) {
+    const job = jobQueue.shift();
+    if (!job) continue;
+    const config = currentConfig || ensureConfig();
+    updateStatus({ currentStatus: 'Printing' });
+    logInfo('print start', { jobId: job.id, printerName: config.printerName });
+    try {
+      await printJobWithTimeout(config, job, PRINT_TIMEOUT_MS);
+      logInfo('print success', { jobId: job.id });
+      try {
+        await markPrinted(config, job.id);
+        updateStatus({
+          lastPrintedAt: new Date().toISOString(),
+          lastPrintedId: job.id,
+          lastError: ''
+        });
+      } catch (ackError) {
+        const ackMessage = String(ackError?.message || ackError);
+        logError('ack error', { jobId: job.id, error: ackMessage });
+        updateStatus({ lastError: ackMessage, currentStatus: 'Error' });
+        try {
+          await markFailed(config, job.id, `ack failed: ${ackMessage}`, false);
+        } catch (markError) {
+          logError('mark failed error', {
+            jobId: job.id,
+            error: String(markError?.message || markError)
+          });
+        }
+      }
+    } catch (error) {
+      const message = String(error?.message || error);
+      logError('print error', { jobId: job.id, error: message, stack: error?.stack });
+      updateStatus({ lastError: message, currentStatus: 'Error' });
+      try {
+        await markFailed(config, job.id, message, true);
+      } catch (markError) {
+        logError('mark failed error', {
+          jobId: job.id,
+          error: String(markError?.message || markError)
+        });
+      }
+    } finally {
+      inFlightJobIds.delete(job.id);
+    }
+  }
+  processingQueue = false;
+  updateStatus({ currentStatus: state.lastError ? 'Error' : 'Idle' });
 };
 
 const pollJobs = async () => {
   if (pollingInFlight) return;
   if (!mainWindow) return;
   const config = ensureConfig();
+  currentConfig = config;
   if (!config.printToken || !config.merchantId) return;
   pollingInFlight = true;
   try {
     validatePrinter(config);
-    logInfo('polling jobs', {
+    logInfo('polling start', {
       url: `${config.apiUrl}/api/print/jobs?merchantId=${encodeURIComponent(config.merchantId)}`
     });
     const jobs = await apiRequest(
@@ -344,27 +454,14 @@ const pollJobs = async () => {
     const count = Array.isArray(jobs) ? jobs.length : 0;
     logInfo('polling success', { count });
     if (Array.isArray(jobs)) {
-      for (const job of jobs) {
-        logInfo('job received', { jobId: job.id });
-        try {
-          await printJob(config, job);
-          await markPrinted(config, job.id);
-          logInfo('job printed', { jobId: job.id });
-          updateStatus({
-            lastPrintedAt: new Date().toISOString(),
-            lastPrintedId: job.id,
-            lastError: ''
-          });
-        } catch (error) {
-          logError('print error', { jobId: job.id, error: String(error.message || error) });
-          updateStatus({ lastError: String(error.message || error) });
-          throw error;
-        }
+      const added = enqueueJobs(jobs);
+      if (added > 0) {
+        processQueue();
       }
     }
   } catch (error) {
     logError('polling error', { error: String(error.message || error) });
-    updateStatus({ lastError: String(error.message || error) });
+    updateStatus({ lastError: String(error.message || error), currentStatus: 'Error' });
   } finally {
     pollingInFlight = false;
   }
@@ -441,7 +538,7 @@ const initialize = async () => {
   logInfo('initializing app');
   const config = ensureConfig();
   logInfo('merchant loaded', { merchantId: config.merchantId || '' });
-  updateStatus({ connected: false, lastError: '' });
+  updateStatus({ connected: false, lastError: '', currentStatus: 'Idle' });
 
   if (config.merchantId) {
     try {

@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS products (
   data JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS option_group_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS option_group_templates_store_id_idx ON option_group_templates (store_id);
+
 CREATE TABLE IF NOT EXISTS pizza_flavors (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
@@ -131,7 +140,12 @@ CREATE TABLE IF NOT EXISTS print_jobs (
   status TEXT NOT NULL DEFAULT 'pending',
   payload JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  printed_at TIMESTAMP WITH TIME ZONE
+  printed_at TIMESTAMP WITH TIME ZONE,
+  processing_at TIMESTAMP WITH TIME ZONE,
+  processing_by_machine_id TEXT,
+  failed_at TIMESTAMP WITH TIME ZONE,
+  failed_reason TEXT,
+  retry_count INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
