@@ -666,8 +666,11 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
 
     // --- BLOCKING LOGIC ---
 
+    const isStoreBlocked = (store: Store) =>
+        Boolean(store.blockReason) || store.isFinancialBlock === true;
+
     const handleOpenBlockModal = (store: Store) => {
-        if (!store.isActive) {
+        if (isStoreBlocked(store)) {
             // Se já está bloqueada, vamos desbloquear (simples confirm)
             if (confirm(`Tem certeza que deseja DESBLOQUEAR a loja ${store.name}?`)) {
                 confirmUnblock(store);
@@ -726,6 +729,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
             alert("Erro ao desbloquear empresa.");
         }
     };
+
 
 
     const handleDelete = async (storeId: string) => {
@@ -2014,6 +2018,14 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                             const ratingCount = Number(store.ratingCount ?? 0);
                                             const ratingValue = Number(store.rating) || 0;
                                             const ratingLabel = ratingCount > 0 ? ratingValue.toFixed(1) : 'Sem avaliações';
+                                            const isBlocked = isStoreBlocked(store);
+                                            const isClosed = !isBlocked && (store.isOpenNow === false || store.pause?.active);
+                                            const statusLabel = isBlocked ? 'Bloqueada' : isClosed ? 'Fechada' : 'Aberta';
+                                            const statusClasses = isBlocked
+                                                ? 'bg-red-50 text-red-700 border-red-200'
+                                                : isClosed
+                                                ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                                : 'bg-green-50 text-green-700 border-green-200';
 
                                             return (
                                             <tr key={store.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors">
@@ -2032,22 +2044,23 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                     {store.category}
                                                 </td>
                                                 <td className="px-6 py-4">
-                                                    <button 
-                                                        onClick={() => handleOpenBlockModal(store)}
-                                                        className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${store.isActive ? 'bg-green-50 text-green-700 border-green-200 hover:bg-red-50 hover:text-red-600 hover:border-red-200' : 'bg-red-50 text-red-700 border-red-200 hover:bg-green-50 hover:text-green-600 hover:border-green-200'} transition-all w-fit`}
-                                                    >
-                                                        {store.isActive ? (
-                                                            <><CheckCircle size={12} /> Ativa</>
-                                                        ) : (
-                                                            <><XCircle size={12} /> Bloqueada</>
-                                                        )}
-                                                    </button>
+                                                    <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${statusClasses}`}>
+                                                        {isBlocked ? <XCircle size={12} /> : isClosed ? <XCircle size={12} /> : <CheckCircle size={12} />}
+                                                        {statusLabel}
+                                                    </span>
                                                 </td>
                                                 <td className={`px-6 py-4 text-sm font-bold ${ratingCount > 0 ? 'text-yellow-600' : 'text-gray-400'}`}>
                                                     ⭐ {ratingLabel}
                                                 </td>
                                                 <td className="px-6 py-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
+                                                        <button
+                                                            onClick={() => handleOpenBlockModal(store)}
+                                                            className={`p-2 ${isBlocked ? 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100' : 'text-rose-600 bg-rose-50 hover:bg-rose-100'} rounded-lg transition-colors`}
+                                                            title={isBlocked ? 'Desbloquear loja' : 'Bloquear loja'}
+                                                        >
+                                                            {isBlocked ? <Unlock size={18} /> : <Lock size={18} />}
+                                                        </button>
                                                         <button 
                                                             onClick={() => onManageStore(store)}
                                                             className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors" 
