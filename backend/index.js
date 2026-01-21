@@ -6,6 +6,11 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { query, withClient } from './db.js';
 import { initErrorLogTable, logError } from './logger.js';
+import {
+  createSolicitacaoPixRepasse,
+  consultarStatusPixRepasse,
+  cancelSolicitacaoPixRepasse
+} from './pixRepasse.js';
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -13,6 +18,9 @@ const jwtSecret = process.env.JWT_SECRET || 'change-me';
 const corsOrigin = process.env.CORS_ORIGIN || '*';
 const imagekitPrivateKey = process.env.IMAGEKIT_PRIVATE_KEY || '';
 const geminiApiKey = process.env.GEMINI_API_KEY || '';
+const pixRepasseBaseUrl = process.env.PIXREPASSE_BASE_URL || 'https://meinobolso.com';
+const pixRepasseToken = process.env.PIXREPASSE_TOKEN_API_EXTERNA || '';
+const pixRepasseTtlMinutes = Math.max(1, Number(process.env.PIXREPASSE_TTL_MINUTES || 60));
 
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
@@ -62,12 +70,61 @@ const ensurePrintTables = async () => {
   await query('CREATE INDEX IF NOT EXISTS idx_print_jobs_order_kind ON print_jobs(order_id, kind)');
 };
 
+const ensurePaymentTables = async () => {
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS order_payments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      id_solicitacao UUID,
+      timestamp_limite TIMESTAMP WITH TIME ZONE,
+      valor NUMERIC(18,2),
+      qr_code TEXT,
+      codigo_tipo_pagamento INT,
+      codigo_estado_pagamento INT,
+      codigo_estado_solicitacao INT,
+      descricao_status TEXT,
+      numero_solicitacao TEXT,
+      numero_convenio TEXT,
+      url_solicitacao TEXT,
+      system_status TEXT,
+      status_local TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+    `
+  );
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS id_solicitacao UUID');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS timestamp_limite TIMESTAMP WITH TIME ZONE');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS valor NUMERIC(18,2)');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS qr_code TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS codigo_tipo_pagamento INT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS codigo_estado_pagamento INT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS codigo_estado_solicitacao INT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS descricao_status TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS numero_solicitacao TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS numero_convenio TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS url_solicitacao TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS system_status TEXT');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS status_local TEXT NOT NULL DEFAULT \'PENDING\'');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await query('ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await query('CREATE INDEX IF NOT EXISTS idx_order_payments_order ON order_payments(order_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_order_payments_provider ON order_payments(provider)');
+  await query('CREATE INDEX IF NOT EXISTS idx_order_payments_status ON order_payments(status_local)');
+};
+
 initErrorLogTable().catch((error) => {
   console.error('Failed to initialize error log table', error);
 });
 
 ensurePrintTables().catch((error) => {
   console.error('Failed to initialize print tables', error);
+});
+
+ensurePaymentTables().catch((error) => {
+  console.error('Failed to initialize payment tables', error);
 });
 
 app.use((req, res, next) => {
@@ -116,6 +173,13 @@ const getAuthPayload = (req) => {
   } catch {
     return null;
   }
+};
+
+const getStoreIdFromAuth = async (authPayload, requestedStoreId = '') => {
+  if (!authPayload?.sub) return null;
+  if (authPayload.role === 'ADMIN' && requestedStoreId) return requestedStoreId;
+  const profileData = await getProfile(authPayload.sub);
+  return profileData?.storeId || null;
 };
 
 const requireAdmin = (req, res, next) => {
@@ -174,9 +238,34 @@ const mapRow = (row) => {
 
 const mapRows = (rows) => rows.map(mapRow);
 
+const sanitizeStoreForPublic = (payload = {}) => {
+  const {
+    pix_hash_recebedor_01,
+    pix_hash_recebedor_02,
+    pix_identificacao_pdv,
+    ...rest
+  } = payload || {};
+  const pixOnlineReady =
+    payload.pix_enabled === true &&
+    !!pix_hash_recebedor_01 &&
+    !!pix_hash_recebedor_02;
+  return {
+    ...rest,
+    pix_enabled: payload.pix_enabled === true,
+    pixOnlineReady,
+    pix_hashes_configured: pixOnlineReady
+  };
+};
+
+const stripStockQty = (payload = {}) => {
+  if (!payload || typeof payload !== 'object') return payload;
+  const { stock_qty, ...rest } = payload;
+  return rest;
+};
+
 const mapStoreRowWithStatus = (row, now = getZonedNow()) => {
   if (!row) return null;
-  const payload = row.data || {};
+  const payload = sanitizeStoreForPublic(row.data || {});
   const availability = resolveStoreOpenStatus(payload, now);
   return {
     id: row.id,
@@ -197,10 +286,111 @@ const normalizeStoreRatings = (storeData = {}) => {
   };
 };
 
+const maskSecret = (value) => {
+  const raw = (value || '').toString();
+  if (!raw) return '';
+  if (raw.length <= 8) return '*'.repeat(raw.length);
+  return `${raw.slice(0, 4)}****${raw.slice(-4)}`;
+};
+
+const redactSensitive = (input) => {
+  if (!input || typeof input !== 'object') return input;
+  if (Array.isArray(input)) return input.map((item) => redactSensitive(item));
+  const result = {};
+  Object.entries(input).forEach(([key, value]) => {
+    if (/tokenApiExterna|pix_hash|pix_identificacao_pdv/i.test(key)) {
+      result[key] = '***';
+    } else if (value && typeof value === 'object') {
+      result[key] = redactSensitive(value);
+    } else {
+      result[key] = value;
+    }
+  });
+  return result;
+};
+
+const extractPixRepasseFields = (data = {}) => ({
+  pix_enabled: data.pix_enabled === true,
+  pix_hash_recebedor_01: data.pix_hash_recebedor_01 || '',
+  pix_hash_recebedor_02: data.pix_hash_recebedor_02 || '',
+  pix_identificacao_pdv: data.pix_identificacao_pdv || ''
+});
+
+const buildPixConfigResponse = (data = {}) => {
+  const pix = extractPixRepasseFields(data);
+  return {
+    pix_enabled: pix.pix_enabled,
+    pix_hash_recebedor_01: pix.pix_hash_recebedor_01 ? maskSecret(pix.pix_hash_recebedor_01) : '',
+    pix_hash_recebedor_02: pix.pix_hash_recebedor_02 ? maskSecret(pix.pix_hash_recebedor_02) : '',
+    pix_identificacao_pdv: pix.pix_identificacao_pdv || ''
+  };
+};
+
+const normalizePixRepasseInput = (input = {}) => ({
+  pix_enabled: input.pix_enabled === true,
+  pix_hash_recebedor_01: (input.pix_hash_recebedor_01 || '').toString().trim(),
+  pix_hash_recebedor_02: (input.pix_hash_recebedor_02 || '').toString().trim()
+});
+
 const stripSplitSurcharge = (payload) => {
   if (!payload || typeof payload !== 'object') return payload;
   const { splitSurcharge, ...rest } = payload;
   return rest;
+};
+
+const extractPixResponseValue = (payload, keys) => {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload || {}, key)) {
+      return payload[key];
+    }
+  }
+  return null;
+};
+
+const mapPixRepasseResponse = (payload = {}) => {
+  return {
+    idSolicitacao: extractPixResponseValue(payload, ['idSolicitacao', 'id_solicitacao', 'idSolicitacaoPix']),
+    qrCode: extractPixResponseValue(payload, ['qrCode', 'qr_code', 'pixCopiaECola', 'copiaECola', 'copia_cola']),
+    codigoTipoPagamento: extractPixResponseValue(payload, ['codigoTipoPagamento', 'codigo_tipo_pagamento']),
+    codigoEstadoPagamento: extractPixResponseValue(payload, ['codigoEstadoPagamento', 'codigo_estado_pagamento']),
+    codigoEstadoSolicitacao: extractPixResponseValue(payload, ['codigoEstadoSolicitacao', 'codigo_estado_solicitacao']),
+    descricaoStatus: extractPixResponseValue(payload, ['descricaoStatus', 'descricao_status']),
+    numeroSolicitacao: extractPixResponseValue(payload, ['numeroSolicitacao', 'numero_solicitacao']),
+    numeroConvenio: extractPixResponseValue(payload, ['numeroConvenio', 'numero_convenio']),
+    urlSolicitacao: extractPixResponseValue(payload, ['urlSolicitacao', 'url_solicitacao']),
+    systemStatus: extractPixResponseValue(payload, ['systemStatus', 'system_status'])
+  };
+};
+
+const isPixStatusExpiredByCode = (codigoEstadoSolicitacao) => {
+  const code = Number(codigoEstadoSolicitacao);
+  return [800, 850, 900].includes(code);
+};
+
+const resolvePixExpirationReason = ({ codigoEstadoSolicitacao, timestampLimite }) => {
+  const code = Number(codigoEstadoSolicitacao);
+  if (Number.isFinite(code) && [800, 850, 900].includes(code)) {
+    const labelMap = {
+      800: 'Expirada',
+      850: 'Abandonada',
+      900: 'Excluida'
+    };
+    return labelMap[code] || `Solicitacao expirada (${code})`;
+  }
+  if (timestampLimite && new Date(timestampLimite).getTime() <= Date.now()) {
+    return 'Tempo limite excedido';
+  }
+  return 'PIX expirado';
+};
+
+const isPixPaymentPendingAndValid = (row) => {
+  if (!row) return false;
+  if (row.status_local !== ORDER_PAYMENT_STATUS.pending) return false;
+  if (isPixStatusExpiredByCode(row.codigo_estado_solicitacao)) return false;
+  if (row.timestamp_limite && new Date(row.timestamp_limite).getTime() <= Date.now()) {
+    return false;
+  }
+  return true;
 };
 
 const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'];
@@ -209,6 +399,18 @@ const PRINT_JOB_STATUS = {
   processing: 'processing',
   printed: 'printed',
   failed: 'failed'
+};
+
+const ORDER_PAYMENT_PROVIDER = {
+  pixRepasse: 'PIX_REPASSE'
+};
+
+const ORDER_PAYMENT_STATUS = {
+  pending: 'PENDING',
+  paid: 'PAID',
+  expired: 'EXPIRED',
+  failed: 'FAILED',
+  cancelled: 'CANCELLED'
 };
 
 const PRINT_JOB_KIND = {
@@ -785,6 +987,350 @@ const createPrintJob = async ({ merchantId, orderId, kind, printText, payload })
   return rows[0]?.id || null;
 };
 
+const insertOrderPayment = async ({
+  orderId,
+  provider,
+  response,
+  timestampLimite,
+  valor,
+  statusLocal = ORDER_PAYMENT_STATUS.pending,
+  client
+}) => {
+  const mapped = mapPixRepasseResponse(response || {});
+  const executor = client ? client.query.bind(client) : query;
+  const { rows } = await executor(
+    `
+    INSERT INTO order_payments (
+      order_id,
+      provider,
+      id_solicitacao,
+      timestamp_limite,
+      valor,
+      qr_code,
+      codigo_tipo_pagamento,
+      codigo_estado_pagamento,
+      codigo_estado_solicitacao,
+      descricao_status,
+      numero_solicitacao,
+      numero_convenio,
+      url_solicitacao,
+      system_status,
+      status_local,
+      created_at,
+      updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
+    RETURNING *
+    `,
+    [
+      orderId,
+      provider,
+      mapped.idSolicitacao || null,
+      timestampLimite ? new Date(timestampLimite) : null,
+      Number.isFinite(Number(valor)) ? Number(valor) : null,
+      mapped.qrCode || null,
+      mapped.codigoTipoPagamento !== null ? Number(mapped.codigoTipoPagamento) : null,
+      mapped.codigoEstadoPagamento !== null ? Number(mapped.codigoEstadoPagamento) : null,
+      mapped.codigoEstadoSolicitacao !== null ? Number(mapped.codigoEstadoSolicitacao) : null,
+      mapped.descricaoStatus || null,
+      mapped.numeroSolicitacao || null,
+      mapped.numeroConvenio || null,
+      mapped.urlSolicitacao || null,
+      mapped.systemStatus || null,
+      statusLocal
+    ]
+  );
+  return rows[0] || null;
+};
+
+const updateOrderPaymentFromStatus = async ({ paymentId, response, statusLocal, timestampLimite }) => {
+  const mapped = mapPixRepasseResponse(response || {});
+  await query(
+    `
+    UPDATE order_payments
+    SET
+      qr_code = COALESCE($2, qr_code),
+      codigo_tipo_pagamento = COALESCE($3, codigo_tipo_pagamento),
+      codigo_estado_pagamento = COALESCE($4, codigo_estado_pagamento),
+      codigo_estado_solicitacao = COALESCE($5, codigo_estado_solicitacao),
+      descricao_status = COALESCE($6, descricao_status),
+      numero_solicitacao = COALESCE($7, numero_solicitacao),
+      numero_convenio = COALESCE($8, numero_convenio),
+      url_solicitacao = COALESCE($9, url_solicitacao),
+      system_status = COALESCE($10, system_status),
+      timestamp_limite = COALESCE($11, timestamp_limite),
+      status_local = $12,
+      updated_at = NOW()
+    WHERE id = $1
+    `,
+    [
+      paymentId,
+      mapped.qrCode || null,
+      mapped.codigoTipoPagamento !== null ? Number(mapped.codigoTipoPagamento) : null,
+      mapped.codigoEstadoPagamento !== null ? Number(mapped.codigoEstadoPagamento) : null,
+      mapped.codigoEstadoSolicitacao !== null ? Number(mapped.codigoEstadoSolicitacao) : null,
+      mapped.descricaoStatus || null,
+      mapped.numeroSolicitacao || null,
+      mapped.numeroConvenio || null,
+      mapped.urlSolicitacao || null,
+      mapped.systemStatus || null,
+      timestampLimite ? new Date(timestampLimite) : null,
+      statusLocal
+    ]
+  );
+};
+
+const getLatestPixPaymentForUpdate = async (client, orderId) => {
+  const { rows } = await client.query(
+    `
+    SELECT *
+    FROM order_payments
+    WHERE order_id = $1 AND provider = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [orderId, ORDER_PAYMENT_PROVIDER.pixRepasse]
+  );
+  return rows[0] || null;
+};
+
+const expirePixPaymentRow = async (client, paymentRow) => {
+  if (!paymentRow?.id) return;
+  await client.query(
+    'UPDATE order_payments SET status_local = $2, updated_at = NOW() WHERE id = $1',
+    [paymentRow.id, ORDER_PAYMENT_STATUS.expired]
+  );
+};
+
+const maskIdentifier = (value) => {
+  const raw = (value || '').toString();
+  if (!raw) return '';
+  if (raw.length <= 4) return raw;
+  return `${raw.slice(0, 2)}***${raw.slice(-2)}`;
+};
+
+const attemptPixCancelExternal = async ({ orderId, paymentRow }) => {
+  if (!paymentRow) return null;
+  if (paymentRow.status_local !== ORDER_PAYMENT_STATUS.pending) return null;
+  if (Number(paymentRow.codigo_estado_pagamento) === 200) return null;
+  if (!paymentRow.numero_convenio || !paymentRow.numero_solicitacao) return null;
+
+  const result = await cancelSolicitacaoPixRepasse({
+    numeroConvenio: paymentRow.numero_convenio,
+    numeroSolicitacao: paymentRow.numero_solicitacao,
+    baseUrl: pixRepasseBaseUrl,
+    tokenApiExterna: pixRepasseToken
+  });
+
+  if (!result.ok && result.status !== 404) {
+    await logError({
+      source: 'server',
+      level: 'warning',
+      message: 'pix repasse cancel failed',
+      context: {
+        orderId,
+        numeroConvenio: maskIdentifier(paymentRow.numero_convenio),
+        numeroSolicitacao: maskIdentifier(paymentRow.numero_solicitacao),
+        status: result.status
+      }
+    });
+  }
+
+  return result;
+};
+
+const ensurePixPaymentForOrder = async ({ orderId, storeData, valor, forceNew = false }) => {
+  return withClient(async (client) => {
+    await client.query('BEGIN');
+    try {
+      await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      let paymentRow = await getLatestPixPaymentForUpdate(client, orderId);
+
+      if (!forceNew && isPixPaymentPendingAndValid(paymentRow)) {
+        await client.query('COMMIT');
+        return { reused: true, paymentRow };
+      }
+
+      if (
+        paymentRow &&
+        paymentRow.status_local === ORDER_PAYMENT_STATUS.pending &&
+        paymentRow.timestamp_limite &&
+        new Date(paymentRow.timestamp_limite).getTime() <= Date.now()
+      ) {
+        await expirePixPaymentRow(client, paymentRow);
+      }
+
+      const timestampLimiteSolicitacao = new Date(
+        Date.now() + pixRepasseTtlMinutes * 60 * 1000
+      ).toISOString();
+      const pixResponse = await createSolicitacaoPixRepasse({
+        empresa: storeData,
+        valor,
+        timestampLimiteSolicitacao,
+        baseUrl: pixRepasseBaseUrl,
+        tokenApiExterna: pixRepasseToken
+      });
+
+      if (!pixResponse.ok) {
+        await client.query('ROLLBACK');
+        return { error: pixResponse.message || 'pix repasse failed' };
+      }
+
+      paymentRow = await insertOrderPayment({
+        orderId,
+        provider: ORDER_PAYMENT_PROVIDER.pixRepasse,
+        response: pixResponse.data,
+        timestampLimite: timestampLimiteSolicitacao,
+        valor,
+        statusLocal: ORDER_PAYMENT_STATUS.pending,
+        client
+      });
+
+      await client.query('COMMIT');
+      return {
+        reused: false,
+        paymentRow,
+        pixResponse,
+        timestampLimiteSolicitacao
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+  });
+};
+
+const normalizePhoneDigits = (value) => (value || '').toString().replace(/\D/g, '');
+
+const canAccessOrder = (authPayload, orderRow, orderData, query) => {
+  if (!orderRow) return false;
+  if (authPayload?.sub && orderRow.user_id && authPayload.sub === orderRow.user_id) {
+    return true;
+  }
+  const customerPhone = normalizePhoneDigits(query?.customerPhone || '');
+  if (customerPhone && normalizePhoneDigits(orderData?.customerPhone) === customerPhone) {
+    return true;
+  }
+  const customerId = (query?.customerId || '').toString();
+  if (customerId && orderData?.customerId && orderData.customerId === customerId) {
+    return true;
+  }
+  return false;
+};
+
+const resolvePixStatusLocal = ({ codigoEstadoPagamento, codigoEstadoSolicitacao, timestampLimite }) => {
+  if (Number(codigoEstadoPagamento) === 200) return ORDER_PAYMENT_STATUS.paid;
+  if (isPixStatusExpiredByCode(codigoEstadoSolicitacao)) return ORDER_PAYMENT_STATUS.expired;
+  if (timestampLimite && new Date(timestampLimite).getTime() <= Date.now()) {
+    return ORDER_PAYMENT_STATUS.expired;
+  }
+  return ORDER_PAYMENT_STATUS.pending;
+};
+
+const buildStockDeltaMap = (orderData = {}) => {
+  const deltas = new Map();
+  const lineItems = Array.isArray(orderData.lineItems) ? orderData.lineItems : [];
+  lineItems.forEach((item) => {
+    if (!item?.productId) return;
+    const qty = Number(item.quantity || 0);
+    if (!Number.isFinite(qty) || qty === 0) return;
+    const current = deltas.get(item.productId) || 0;
+    deltas.set(item.productId, current + qty);
+  });
+  return deltas;
+};
+
+const applyStockDelta = async ({ storeId, deltas, client }) => {
+  if (!storeId || !deltas || deltas.size === 0) return;
+  for (const [productId, qtyDelta] of deltas.entries()) {
+    const { rows } = await client.query(
+      'SELECT id, data FROM products WHERE id = $1 AND store_id = $2 FOR UPDATE',
+      [productId, storeId]
+    );
+    if (rows.length === 0) continue;
+    const data = rows[0].data || {};
+    const currentQty = Number(data.stock_qty || 0);
+    const nextQty = currentQty + qtyDelta;
+    const nextData = { ...data, stock_qty: nextQty };
+    await client.query('UPDATE products SET data = $1 WHERE id = $2', [nextData, productId]);
+  }
+};
+
+const deductStockForOrder = async ({ orderRow, orderData }) => {
+  if (!orderRow?.id || !orderRow?.store_id) return;
+  if (orderData?.stockDeductedAt) return;
+  const deltas = buildStockDeltaMap(orderData);
+  if (deltas.size === 0) return;
+  await withClient(async (client) => {
+    await client.query('BEGIN');
+    await applyStockDelta({ storeId: orderRow.store_id, deltas: new Map([...deltas].map(([id, qty]) => [id, -qty])), client });
+    const nextData = {
+      ...(orderData || {}),
+      stockDeductedAt: new Date().toISOString()
+    };
+    await client.query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderRow.id]);
+    await client.query('COMMIT');
+  });
+};
+
+const restockForCancelledOrder = async ({ orderRow, orderData }) => {
+  if (!orderRow?.id || !orderRow?.store_id) return;
+  if (!orderData?.stockDeductedAt || orderData?.stockRestockedAt) return;
+  const deltas = buildStockDeltaMap(orderData);
+  if (deltas.size === 0) return;
+  await withClient(async (client) => {
+    await client.query('BEGIN');
+    await applyStockDelta({ storeId: orderRow.store_id, deltas, client });
+    const nextData = {
+      ...(orderData || {}),
+      stockRestockedAt: new Date().toISOString()
+    };
+    await client.query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderRow.id]);
+    await client.query('COMMIT');
+  });
+};
+
+const updateOrderPaymentAndStatus = async ({ orderRow, orderData, paymentRow, response, statusLocal }) => {
+  if (
+    (statusLocal === ORDER_PAYMENT_STATUS.expired || statusLocal === ORDER_PAYMENT_STATUS.cancelled) &&
+    paymentRow?.status_local === ORDER_PAYMENT_STATUS.pending
+  ) {
+    try {
+      await attemptPixCancelExternal({ orderId: orderRow.id, paymentRow });
+    } catch (error) {
+      await logError({
+        source: 'server',
+        level: 'warning',
+        message: 'pix repasse cancel attempt failed',
+        context: { orderId: orderRow.id }
+      });
+    }
+  }
+  await updateOrderPaymentFromStatus({
+    paymentId: paymentRow.id,
+    response,
+    statusLocal,
+    timestampLimite: paymentRow.timestamp_limite
+  });
+  const nextData = {
+    ...(orderData || {}),
+    paymentStatus: statusLocal,
+    paymentProvider: ORDER_PAYMENT_PROVIDER.pixRepasse
+  };
+  let nextStatus = orderRow.status;
+  if (statusLocal === ORDER_PAYMENT_STATUS.paid) {
+    if (orderRow.status === 'PENDING' && orderData?.autoAcceptEligible) {
+      nextStatus = 'PREPARING';
+      nextData.autoAccepted = true;
+      nextData.autoAcceptedAt = new Date().toISOString();
+    }
+    await query('UPDATE orders SET data = $1, status = $2 WHERE id = $3', [nextData, nextStatus, orderRow.id]);
+  } else {
+    await query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderRow.id]);
+  }
+};
+
 const generateUniqueMerchantId = async () => {
   let candidate = crypto.randomUUID();
   let attempts = 0;
@@ -872,23 +1418,25 @@ const normalizeOrderPayload = (payload = {}) => {
   return next;
 };
 
-const resolveDeliveryNeighborhood = (storeData = {}, deliveryAddress = null, selectedNeighborhood = '') => {
+const resolveDeliveryNeighborhood = (storeData = {}, deliveryAddress = null) => {
   const neighborhoods = Array.isArray(storeData.neighborhoodFees)
     ? storeData.neighborhoodFees
     : Array.isArray(storeData.deliveryNeighborhoods)
     ? storeData.deliveryNeighborhoods
     : [];
-  const activeNeighborhoods = neighborhoods.filter((item) => item && item.name);
+  const activeNeighborhoods = neighborhoods.filter(
+    (item) => item && item.name && item.active !== false
+  );
   if (activeNeighborhoods.length === 0) {
     return { error: 'Nenhum bairro de entrega configurado.' };
   }
 
   const candidates = buildNeighborhoodCandidates(
-    selectedNeighborhood || deliveryAddress?.district,
+    deliveryAddress?.district,
     deliveryAddress?.city || storeData.city
   );
   if (candidates.length === 0) {
-    return { error: 'Selecione um bairro para calcular a entrega.' };
+    return { error: 'Informe o endereço completo com bairro.' };
   }
 
   const normalizedCandidates = candidates.map((value) => normalizeNeighborhoodName(value));
@@ -897,10 +1445,7 @@ const resolveDeliveryNeighborhood = (storeData = {}, deliveryAddress = null, sel
   );
 
   if (!match) {
-    return { error: 'Selecione um bairro válido para a entrega.' };
-  }
-  if (!match.active) {
-    return { error: 'Esta loja não realiza entregas para o seu bairro.' };
+    return { error: 'store does not deliver to this neighborhood' };
   }
   const fee = Number(match.fee || 0);
   return { fee: Number.isFinite(fee) ? fee : 0, neighborhood: match.name };
@@ -1371,6 +1916,65 @@ app.get('/api/stores/:id', async (req, res) => {
   res.json(store);
 });
 
+app.get('/api/empresa/pagamentos/pix-repasse', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.query?.storeId || ''));
+  if (!storeId) {
+    return res.status(400).json({ error: 'storeId required' });
+  }
+  const { rows } = await query('SELECT data FROM stores WHERE id = $1', [storeId]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  res.json(buildPixConfigResponse(rows[0].data || {}));
+});
+
+app.put('/api/empresa/pagamentos/pix-repasse', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.body?.storeId || req.query?.storeId || ''));
+  if (!storeId) {
+    return res.status(400).json({ error: 'storeId required' });
+  }
+  const { rows } = await query('SELECT data FROM stores WHERE id = $1', [storeId]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const storeData = rows[0].data || {};
+  const incoming = normalizePixRepasseInput(req.body || {});
+  const existingPix = extractPixRepasseFields(storeData);
+  const hash1 =
+    incoming.pix_hash_recebedor_01 && !incoming.pix_hash_recebedor_01.includes('*')
+      ? incoming.pix_hash_recebedor_01
+      : existingPix.pix_hash_recebedor_01;
+  const hash2 =
+    incoming.pix_hash_recebedor_02 && !incoming.pix_hash_recebedor_02.includes('*')
+      ? incoming.pix_hash_recebedor_02
+      : existingPix.pix_hash_recebedor_02;
+  const pixEnabled = incoming.pix_enabled;
+
+  if (pixEnabled && (!hash1 || !hash2)) {
+    return res.status(400).json({ error: 'pix hashes required' });
+  }
+
+  let identificacao = existingPix.pix_identificacao_pdv;
+  if (pixEnabled && !identificacao) {
+    identificacao = crypto.randomUUID();
+  }
+
+  const nextData = {
+    ...storeData,
+    pix_enabled: pixEnabled,
+    pix_hash_recebedor_01: hash1 || '',
+    pix_hash_recebedor_02: hash2 || '',
+    pix_identificacao_pdv: identificacao || ''
+  };
+
+  await query('UPDATE stores SET data = $1 WHERE id = $2', [nextData, storeId]);
+  res.json(buildPixConfigResponse(nextData));
+});
+
 app.post('/api/stores', async (req, res) => {
   const payload = req.body || {};
   const normalizedPayload = normalizeStoreRatings(payload);
@@ -1550,7 +2154,7 @@ app.post('/api/stores/:id/neighborhoods/import', async (req, res) => {
     gridIndex: nextGridIndex,
     keywordIndex: nextKeywordIndex,
     runIndex: runsCount,
-    batchSize: 10
+    batchSize: 20
   });
 
   if (error && error.status && error.status !== 'ZERO_RESULTS') {
@@ -1577,6 +2181,18 @@ app.post('/api/stores/:id/neighborhoods/import', async (req, res) => {
     lastRunAt: importedAt,
     runsCount: runsCount + 1,
     lastRequestsCount: meta?.requestCount || 0,
+    lastNearbyRequests: meta?.nearbyRequestCount || 0,
+    lastDetailRequests: meta?.detailRequestCount || 0,
+    lastTextRequests: meta?.textRequestCount || 0,
+    lastRawResultsCount: meta?.rawResultsCount || 0,
+    lastExtractedCount: meta?.extractedCount || 0,
+    lastIgnoredCount: meta?.ignoredCount || 0,
+    lastDuplicateCount: meta?.duplicateCount || 0,
+    lastPointsProcessed: meta?.pointsProcessed || 0,
+    lastKeyword: meta?.keyword || null,
+    lastRadius: meta?.radius || null,
+    lastGridIndexStart: meta?.gridIndexStart ?? null,
+    lastGridIndexEnd: meta?.gridIndexEnd ?? null,
     lastResultCount: added.length,
     nextGridIndex: meta?.nextGridIndex ?? nextGridIndex,
     nextKeywordIndex: meta?.nextKeywordIndex ?? nextKeywordIndex
@@ -1593,6 +2209,15 @@ app.post('/api/stores/:id/neighborhoods/import', async (req, res) => {
   };
 
   await updateStoreData(storeId, nextData);
+
+  console.log('[neighborhood-import]', {
+    storeId,
+    city,
+    state,
+    addedCount: added.length,
+    totalCount: mergedList.length,
+    meta
+  });
 
   res.json({
     neighborhoods: mergedList,
@@ -2259,11 +2884,14 @@ app.get('/api/products', async (req, res) => {
     storeId ? 'SELECT id, data FROM products WHERE store_id = $1' : 'SELECT id, data FROM products',
     storeId ? [storeId] : []
   );
-  res.json(mapRows(rows).map(stripSplitSurcharge));
+  res.json(mapRows(rows).map(stripSplitSurcharge).map(stripStockQty));
 });
 
 app.post('/api/products', async (req, res) => {
   const payload = stripSplitSurcharge(req.body || {});
+  if (typeof payload.stock_qty !== 'number') {
+    payload.stock_qty = 0;
+  }
   const { rows } = await query(
     'INSERT INTO products (store_id, data) VALUES ($1, $2) RETURNING id',
     [payload.storeId || null, payload]
@@ -2294,17 +2922,56 @@ app.post('/api/products/bulk', async (req, res) => {
 
 app.put('/api/products/:id', async (req, res) => {
   const payload = stripSplitSurcharge(req.body || {});
+  const { rows } = await query('SELECT data FROM products WHERE id = $1', [req.params.id]);
+  const existing = rows[0]?.data || {};
+  const stockQty =
+    typeof payload.stock_qty === 'number'
+      ? payload.stock_qty
+      : typeof existing.stock_qty === 'number'
+      ? existing.stock_qty
+      : 0;
+  const nextPayload = { ...payload, stock_qty: stockQty };
   await query('UPDATE products SET data = $1, store_id = $2 WHERE id = $3', [
-    payload,
+    nextPayload,
     payload.storeId || null,
     req.params.id
   ]);
-  res.json({ id: req.params.id, ...payload });
+  res.json({ id: req.params.id, ...nextPayload });
 });
 
 app.delete('/api/products/:id', async (req, res) => {
   await query('DELETE FROM products WHERE id = $1', [req.params.id]);
   res.json({ ok: true });
+});
+
+app.get('/api/merchant/products', requireAuth, async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  const { rows } = await query('SELECT id, data FROM products WHERE store_id = $1', [storeId]);
+  res.json(mapRows(rows).map(stripSplitSurcharge));
+});
+
+app.patch('/api/merchant/products/:id/stock', requireAuth, async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.body?.storeId || req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  const rawQty = req.body?.stock_qty;
+  const parsedQty = Number(rawQty);
+  if (!Number.isFinite(parsedQty)) {
+    return res.status(400).json({ error: 'stock_qty must be a number' });
+  }
+  const stock_qty = Math.trunc(parsedQty);
+  const { rows } = await query('SELECT data, store_id FROM products WHERE id = $1', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const productStoreId = rows[0].store_id;
+  if (productStoreId !== storeId) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const existing = rows[0].data || {};
+  const nextData = { ...existing, stock_qty };
+  await query('UPDATE products SET data = $1 WHERE id = $2', [nextData, req.params.id]);
+  res.json({ id: req.params.id, ...nextData });
 });
 
 const normalizeLinkedCategoryIds = (linkedCategoryIds, allowedCategories) => {
@@ -2681,6 +3348,32 @@ const fetchGooglePlacesNearby = async (params) => {
   }
 };
 
+const fetchGooglePlacesTextSearch = async (params) => {
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params.toString()}`;
+  try {
+    const response = await fetchWithTimeout(url);
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    logGoogleApiResult('places-text', url, response.status, data);
+    if (!response.ok) {
+      return {
+        status: data?.status || 'HTTP_ERROR',
+        errorMessage: data?.error_message || `HTTP ${response.status}`,
+        results: []
+      };
+    }
+    return data;
+  } catch (error) {
+    console.warn('Google places text search failed', error);
+    return { status: 'FETCH_FAILED', errorMessage: String(error), results: [] };
+  }
+};
+
 const neighborhoodCache = new Map();
 const NEIGHBORHOOD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_NEIGHBORHOOD_REQUESTS = 200;
@@ -2696,7 +3389,16 @@ const extractNeighborhoodFromDetails = (data) => {
     pick('neighborhood') ||
     pick('political');
   const name = (candidate?.long_name || '').toString().trim();
-  return name || '';
+  if (name) return name;
+  const resultName = (data?.result?.name || '').toString().trim();
+  const resultTypes = Array.isArray(data?.result?.types) ? data.result.types : [];
+  const normalized = normalizeNeighborhoodName(resultName);
+  const keywordMatch = ['bairro', 'vila', 'jardim', 'centro'].some((keyword) => normalized.includes(keyword));
+  const typeMatch = resultTypes.some((type) =>
+    ['sublocality_level_1', 'sublocality', 'neighborhood'].includes(type)
+  );
+  if (resultName && (keywordMatch || typeMatch)) return resultName;
+  return '';
 };
 
 const fetchGooglePlaceDetails = async (placeId) => {
@@ -2785,15 +3487,18 @@ const buildGridPointsFixed = (bounds, gridSize) => {
 };
 
 const collectGridBatch = (points, startIndex, batchSize) => {
-  if (!Array.isArray(points) || points.length === 0) return [];
+  if (!Array.isArray(points) || points.length === 0) {
+    return { batch: [], nextIndex: 0 };
+  }
   const size = points.length;
   const start = Number.isFinite(startIndex) ? startIndex : 0;
-  const total = Math.max(1, Number(batchSize) || 1);
+  const total = Math.min(size, Math.max(1, Number(batchSize) || 1));
   const batch = [];
-  for (let i = 0; i < total && batch.length < size; i += 1) {
-    batch.push(points[(start + i) % size]);
+  for (let i = 0; i < total && start + i < size; i += 1) {
+    batch.push(points[start + i]);
   }
-  return batch;
+  const nextIndex = start + batch.length >= size ? 0 : start + batch.length;
+  return { batch, nextIndex };
 };
 
 const fetchGoogleNeighborhoodsIncremental = async (
@@ -2813,7 +3518,16 @@ const fetchGoogleNeighborhoodsIncremental = async (
   }
 
   let requestCount = 0;
+  let nearbyRequestCount = 0;
+  let detailRequestCount = 0;
+  let textRequestCount = 0;
+  let rawResultsCount = 0;
+  let extractedCount = 0;
+  let ignoredCount = 0;
+  let duplicateCount = 0;
+  let pointsProcessed = 0;
   let partial = false;
+  const statusCounts = {};
   const locationQuery = [city, state, 'Brasil'].filter(Boolean).join(', ');
   const geocodeDetails = await fetchGoogleGeocode({ address: locationQuery, returnDetails: true });
   requestCount += 1;
@@ -2833,20 +3547,30 @@ const fetchGoogleNeighborhoodsIncremental = async (
     return { neighborhoods: [], error: { status: geocodeStatus || 'ZERO_RESULTS', message: 'City not found' } };
   }
 
-  const keywordsCycle = ['bairro', '', 'vila', 'jardim'];
+  const keywordsCycle = ['bairro', '', 'vila', 'jardim', 'centro'];
   const keyword = keywordsCycle[keywordIndex % keywordsCycle.length] ?? 'bairro';
-  const radiusOptions = [4000, 6000, 8000];
+  const radiusOptions = [3000, 6000, 9000, 15000, 20000];
   const radius = radiusOptions[runIndex % radiusOptions.length];
-  const types = ['sublocality_level_1', 'sublocality', 'political'];
-  const gridSize = bounds ? (Math.max(Math.abs(bounds.northeast.lat - bounds.southwest.lat), Math.abs(bounds.northeast.lng - bounds.southwest.lng)) > 0.6 ? 7 : 5) : 5;
+  const baseTypes = ['sublocality_level_1', 'sublocality', 'neighborhood', 'political'];
+  const includeOpenType = runIndex % 2 === 1;
+  const types = includeOpenType ? [...baseTypes, null] : baseTypes;
+  const gridSpan = bounds
+    ? Math.max(Math.abs(bounds.northeast.lat - bounds.southwest.lat), Math.abs(bounds.northeast.lng - bounds.southwest.lng))
+    : 0;
+  const gridSize = bounds ? (gridSpan > 1.5 ? 9 : gridSpan > 0.7 ? 7 : 5) : 5;
   const points = bounds ? buildGridPointsFixed(bounds, gridSize) : [{ lat, lng }];
-  const batchPoints = collectGridBatch(points, gridIndex, batchSize);
-  const nextGridIndex = points.length === 0 ? 0 : (gridIndex + batchPoints.length) % points.length;
+  const gridIndexStart = Number.isFinite(gridIndex) ? gridIndex : 0;
+  const { batch: batchPoints, nextIndex: nextGridIndex } = collectGridBatch(points, gridIndexStart, batchSize);
 
   const placeIds = new Set();
   const maxRequests = MAX_NEIGHBORHOOD_REQUESTS;
+  const trackStatus = (status) => {
+    if (!status) return;
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+  };
 
   for (const point of batchPoints) {
+    pointsProcessed += 1;
     for (const type of types) {
       if (requestCount >= maxRequests) {
         partial = true;
@@ -2858,19 +3582,24 @@ const fetchGoogleNeighborhoodsIncremental = async (
           partial = true;
           break;
         }
+        if (!type && !keyword) {
+          break;
+        }
         const params = new URLSearchParams({
           key: GOOGLE_MAPS_API_KEY,
           language: 'pt-BR',
           region: 'br',
           location: `${point.lat},${point.lng}`,
-          radius: String(radius),
-          type
+          radius: String(radius)
         });
         if (keyword) params.set('keyword', keyword);
+        if (type) params.set('type', type);
         if (pageToken) params.set('pagetoken', pageToken);
         const data = await fetchGooglePlacesNearby(params);
         requestCount += 1;
+        nearbyRequestCount += 1;
         if (!data) break;
+        trackStatus(data.status);
         if (data.status === 'INVALID_REQUEST' && pageToken) {
           await sleep(1500);
           page -= 1;
@@ -2882,7 +3611,9 @@ const fetchGoogleNeighborhoodsIncremental = async (
             error: { status: data.status, message: data.error_message || 'Google places error' }
           };
         }
-        for (const item of data.results || []) {
+        const results = data.results || [];
+        rawResultsCount += results.length;
+        for (const item of results) {
           if (item?.place_id) placeIds.add(item.place_id);
         }
         pageToken = data.next_page_token;
@@ -2893,6 +3624,64 @@ const fetchGoogleNeighborhoodsIncremental = async (
     if (partial) break;
   }
 
+  const textKeywords = ['bairro', 'vila', 'jardim', 'centro'];
+  const textKeyword = textKeywords[runIndex % textKeywords.length] || 'bairro';
+  const textQueries = [];
+  const primaryQuery = [textKeyword, city, state].filter(Boolean).join(' ');
+  if (primaryQuery) textQueries.push(primaryQuery);
+  if (textKeyword !== 'bairro') {
+    textQueries.push(['bairro', city, state].filter(Boolean).join(' '));
+  }
+  if (textKeyword !== 'centro') {
+    textQueries.push(['centro', city, state].filter(Boolean).join(' '));
+  }
+  const textRadius = Math.min(radius * 2, 20000);
+  if (requestCount < maxRequests && placeIds.size < 80) {
+    for (const textQuery of textQueries) {
+      if (!textQuery || requestCount >= maxRequests) break;
+      let pageToken = null;
+      for (let page = 0; page < 3; page += 1) {
+        if (requestCount >= maxRequests) {
+          partial = true;
+          break;
+        }
+        const params = new URLSearchParams({
+          key: GOOGLE_MAPS_API_KEY,
+          language: 'pt-BR',
+          region: 'br',
+          query: textQuery,
+          location: `${lat},${lng}`,
+          radius: String(textRadius)
+        });
+        if (pageToken) params.set('pagetoken', pageToken);
+        const data = await fetchGooglePlacesTextSearch(params);
+        requestCount += 1;
+        textRequestCount += 1;
+        if (!data) break;
+        trackStatus(data.status);
+        if (data.status === 'INVALID_REQUEST' && pageToken) {
+          await sleep(1500);
+          page -= 1;
+          continue;
+        }
+        if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+          return {
+            neighborhoods: [],
+            error: { status: data.status, message: data.error_message || 'Google places error' }
+          };
+        }
+        const results = data.results || [];
+        rawResultsCount += results.length;
+        for (const item of results) {
+          if (item?.place_id) placeIds.add(item.place_id);
+        }
+        pageToken = data.next_page_token;
+        if (!pageToken) break;
+        await sleep(1500);
+      }
+    }
+  }
+
   const names = new Map();
   for (const placeId of placeIds) {
     if (requestCount >= maxRequests) {
@@ -2901,7 +3690,9 @@ const fetchGoogleNeighborhoodsIncremental = async (
     }
     const details = await fetchGooglePlaceDetails(placeId);
     requestCount += 1;
+    detailRequestCount += 1;
     if (!details) continue;
+    trackStatus(details.status);
     if (details.status && details.status !== 'OK') {
       if (details.status !== 'ZERO_RESULTS') {
         return {
@@ -2913,8 +3704,17 @@ const fetchGoogleNeighborhoodsIncremental = async (
     }
     const name = extractNeighborhoodFromDetails(details);
     if (!name) continue;
+    extractedCount += 1;
     const key = normalizeNeighborhoodName(name);
-    if (!key || ignoreSet.has(key) || names.has(key)) continue;
+    if (!key) continue;
+    if (ignoreSet.has(key)) {
+      ignoredCount += 1;
+      continue;
+    }
+    if (names.has(key)) {
+      duplicateCount += 1;
+      continue;
+    }
     names.set(key, name);
   }
 
@@ -2929,7 +3729,21 @@ const fetchGoogleNeighborhoodsIncremental = async (
       batchSize: batchPoints.length,
       gridSize,
       nextGridIndex,
-      nextKeywordIndex: (keywordIndex + 1) % keywordsCycle.length
+      nextKeywordIndex: (keywordIndex + 1) % keywordsCycle.length,
+      gridIndexStart,
+      gridIndexEnd: nextGridIndex,
+      pointsProcessed,
+      nearbyRequestCount,
+      detailRequestCount,
+      textRequestCount,
+      rawResultsCount,
+      extractedCount,
+      ignoredCount,
+      duplicateCount,
+      placeIdsCount: placeIds.size,
+      types: types.map((item) => item || 'any'),
+      textQueries,
+      statusCounts
     },
     error: null
   };
@@ -3614,10 +4428,14 @@ app.post('/api/orders', async (req, res) => {
   let customerId = payload.customerId || null;
   let storeData = null;
   const authPayload = getAuthPayload(req);
+  const paymentProvider =
+    payload.paymentProvider ||
+    (payload.paymentMethod === ORDER_PAYMENT_PROVIDER.pixRepasse ? ORDER_PAYMENT_PROVIDER.pixRepasse : null);
+  const isPixRepasse = paymentProvider === ORDER_PAYMENT_PROVIDER.pixRepasse;
   const orderType =
     payload.type || (payload.pickup ? 'PICKUP' : payload.tableNumber ? 'TABLE' : 'DELIVERY');
 
-  if (orderType === 'TABLE' && status === 'PENDING') {
+  if (orderType === 'TABLE' && status === 'PENDING' && !isPixRepasse) {
     status = 'PREPARING';
     payload.autoAccepted = true;
     payload.autoAcceptedAt = new Date().toISOString();
@@ -3626,6 +4444,23 @@ app.post('/api/orders', async (req, res) => {
   if (payload.storeId) {
     const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [payload.storeId]);
     storeData = storeRows[0]?.data || {};
+  }
+
+  if (isPixRepasse) {
+    if (!storeData?.pix_enabled) {
+      return res.status(400).json({ error: 'PIX Repasse não habilitado para esta loja.' });
+    }
+    if (!storeData.pix_hash_recebedor_01 || !storeData.pix_hash_recebedor_02) {
+      return res.status(400).json({ error: 'PIX Repasse sem hashes configurados.' });
+    }
+    if (!storeData.pix_identificacao_pdv) {
+      return res.status(422).json({ error: 'PIX Repasse sem identificacao PDV configurada.' });
+    }
+    payload.paymentProvider = ORDER_PAYMENT_PROVIDER.pixRepasse;
+    payload.paymentStatus = ORDER_PAYMENT_STATUS.pending;
+    if (storeData.autoAcceptOrders) {
+      payload.autoAcceptEligible = true;
+    }
   }
 
   if (authPayload) {
@@ -3902,8 +4737,7 @@ app.post('/api/orders', async (req, res) => {
     if (storeData?.deliveryFeeMode === 'BY_NEIGHBORHOOD') {
       const neighborhoodResult = resolveDeliveryNeighborhood(
         storeData,
-        payload.deliveryAddress || null,
-        payload.deliveryNeighborhood || ''
+        payload.deliveryAddress || null
       );
       if (neighborhoodResult.error) {
         return res.status(400).json({ error: neighborhoodResult.error });
@@ -3980,7 +4814,7 @@ app.post('/api/orders', async (req, res) => {
         error: 'Loja fechada no momento. Verifique os horários de funcionamento.'
       });
     }
-    if (storeData.autoAcceptOrders && status === 'PENDING') {
+    if (storeData.autoAcceptOrders && status === 'PENDING' && !isPixRepasse) {
       status = 'PREPARING';
       payload.autoAccepted = true;
       payload.autoAcceptedAt = new Date().toISOString();
@@ -4004,6 +4838,64 @@ app.post('/api/orders', async (req, res) => {
   const orderId = rows[0].id;
   const createdAt = rows[0].created_at;
   const responsePayload = { id: orderId, status, createdAt, ...payload };
+
+  if (status === 'PREPARING') {
+    try {
+      await deductStockForOrder({ orderRow: { id: orderId, store_id: payload.storeId }, orderData: payload });
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to deduct stock on create',
+        stack: error?.stack,
+        context: { route: 'POST /api/orders', orderId }
+      });
+    }
+  }
+
+  if (isPixRepasse) {
+    try {
+      const paymentResult = await ensurePixPaymentForOrder({
+        orderId,
+        storeData,
+        valor: Number(payload.total || 0),
+        forceNew: false
+      });
+
+      if (paymentResult?.error) {
+        const nextData = { ...(payload || {}), paymentStatus: ORDER_PAYMENT_STATUS.failed };
+        await query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderId]);
+        return res.status(502).json({
+          error: 'Falha ao criar cobrança PIX.',
+          detail: paymentResult.error
+        });
+      }
+
+      const paymentRow = paymentResult.paymentRow;
+      const mapped = mapPixRepasseResponse(paymentResult.pixResponse?.data || {});
+      const idSolicitacao = paymentRow?.id_solicitacao || mapped.idSolicitacao || null;
+      const qrCode = paymentRow?.qr_code || mapped.qrCode || null;
+      const expiresAt = paymentRow?.timestamp_limite || paymentResult.timestampLimiteSolicitacao;
+
+      const updatedOrderData = {
+        ...(payload || {}),
+        paymentProvider: ORDER_PAYMENT_PROVIDER.pixRepasse,
+        paymentStatus: ORDER_PAYMENT_STATUS.pending,
+        paymentIdSolicitacao: idSolicitacao,
+        paymentQrCode: qrCode,
+        paymentExpiresAt: expiresAt
+      };
+      await query('UPDATE orders SET data = $1 WHERE id = $2', [updatedOrderData, orderId]);
+      responsePayload.payment = {
+        provider: ORDER_PAYMENT_PROVIDER.pixRepasse,
+        idSolicitacao
+      };
+      responsePayload.redirectUrl = `/pedido/${orderId}/pagamento/pix`;
+    } catch (error) {
+      const nextData = { ...(payload || {}), paymentStatus: ORDER_PAYMENT_STATUS.failed };
+      await query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderId]);
+      return res.status(502).json({ error: 'Falha ao criar cobrança PIX.' });
+    }
+  }
 
   if (storeData?.merchantId && orderId) {
     try {
@@ -4052,6 +4944,260 @@ app.post('/api/orders', async (req, res) => {
   }
 
   res.json(responsePayload);
+});
+
+const getLatestPixPayment = async (orderId) => {
+  const { rows } = await query(
+    `
+    SELECT *
+    FROM order_payments
+    WHERE order_id = $1 AND provider = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [orderId, ORDER_PAYMENT_PROVIDER.pixRepasse]
+  );
+  return rows[0] || null;
+};
+
+app.get('/api/pedidos/:orderId/pagamento/pix', async (req, res) => {
+  const orderId = req.params.orderId;
+  const authPayload = getAuthPayload(req);
+  const { rows } = await query(
+    'SELECT id, status, store_id, user_id, created_at, data FROM orders WHERE id = $1',
+    [orderId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'order not found' });
+  const orderRow = rows[0];
+  const orderData = orderRow.data || {};
+  if (!canAccessOrder(authPayload, orderRow, orderData, req.query)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const paymentRow = await getLatestPixPayment(orderId);
+  if (!paymentRow) return res.status(404).json({ error: 'payment not found' });
+  res.json({
+    orderId,
+    valor: Number(paymentRow.valor || orderData.total || 0),
+    expiresAt: paymentRow.timestamp_limite,
+    qrCode: paymentRow.qr_code,
+    idSolicitacao: paymentRow.id_solicitacao,
+    codigoEstadoPagamento: paymentRow.codigo_estado_pagamento,
+    codigoEstadoSolicitacao: paymentRow.codigo_estado_solicitacao,
+    descricaoStatus: paymentRow.descricao_status,
+    statusLocal: paymentRow.status_local
+  });
+});
+
+app.post('/api/pedidos/:orderId/pagamento/pix/recriar', async (req, res) => {
+  const orderId = req.params.orderId;
+  const authPayload = getAuthPayload(req);
+  const { rows } = await query(
+    'SELECT id, status, store_id, user_id, created_at, data FROM orders WHERE id = $1',
+    [orderId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'order not found' });
+  const orderRow = rows[0];
+  const orderData = orderRow.data || {};
+  if (!canAccessOrder(authPayload, orderRow, orderData, req.query)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
+  const storeData = storeRows[0]?.data || {};
+  if (!storeData?.pix_enabled) {
+    return res.status(400).json({ error: 'PIX Repasse não habilitado para esta loja.' });
+  }
+  if (!storeData.pix_hash_recebedor_01 || !storeData.pix_hash_recebedor_02) {
+    return res.status(400).json({ error: 'PIX Repasse sem hashes configurados.' });
+  }
+  if (!storeData.pix_identificacao_pdv) {
+    return res.status(422).json({ error: 'PIX Repasse sem identificacao PDV configurada.' });
+  }
+  const paymentResult = await ensurePixPaymentForOrder({
+    orderId,
+    storeData,
+    valor: Number(orderData.total || 0),
+    forceNew: false
+  });
+  if (paymentResult?.error) {
+    return res.status(502).json({ error: 'Falha ao criar cobrança PIX.' });
+  }
+  const paymentRow = paymentResult.paymentRow;
+  const mapped = mapPixRepasseResponse(paymentResult.pixResponse?.data || {});
+  const idSolicitacao = paymentRow?.id_solicitacao || mapped.idSolicitacao || null;
+  const qrCode = paymentRow?.qr_code || mapped.qrCode || null;
+  const expiresAt = paymentRow?.timestamp_limite || paymentResult.timestampLimiteSolicitacao;
+  const nextData = {
+    ...(orderData || {}),
+    paymentProvider: ORDER_PAYMENT_PROVIDER.pixRepasse,
+    paymentStatus: ORDER_PAYMENT_STATUS.pending,
+    paymentIdSolicitacao: idSolicitacao,
+    paymentQrCode: qrCode,
+    paymentExpiresAt: expiresAt
+  };
+  await query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, orderId]);
+  res.json({
+    orderId,
+    payment: { provider: ORDER_PAYMENT_PROVIDER.pixRepasse, idSolicitacao },
+    redirectUrl: `/pedido/${orderId}/pagamento/pix`
+  });
+});
+
+app.get('/api/sse/pedidos/:orderId/pix', async (req, res) => {
+  const orderId = req.params.orderId;
+  const authPayload = getAuthPayload(req);
+  const { rows } = await query(
+    'SELECT id, status, store_id, user_id, created_at, data FROM orders WHERE id = $1',
+    [orderId]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'order not found' });
+  const orderRow = rows[0];
+  const orderData = orderRow.data || {};
+  if (!canAccessOrder(authPayload, orderRow, orderData, req.query)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const paymentRow = await getLatestPixPayment(orderId);
+  if (!paymentRow) return res.status(404).json({ error: 'payment not found' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendEvent = (event, data) => {
+    if (event) res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  sendEvent('connected', { orderId });
+
+  let lastStatus = {
+    codigoEstadoPagamento: paymentRow.codigo_estado_pagamento,
+    codigoEstadoSolicitacao: paymentRow.codigo_estado_solicitacao,
+    descricaoStatus: paymentRow.descricao_status,
+    qrCode: paymentRow.qr_code,
+    statusLocal: paymentRow.status_local
+  };
+
+  let pollInterval = null;
+  let pingInterval = null;
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    if (pollInterval) clearInterval(pollInterval);
+    if (pingInterval) clearInterval(pingInterval);
+  };
+
+  if (paymentRow.qr_code) {
+    sendEvent('qr_ready', { qrCode: paymentRow.qr_code });
+  }
+
+  const initialStatusLocal = resolvePixStatusLocal({
+    codigoEstadoPagamento: paymentRow.codigo_estado_pagamento,
+    codigoEstadoSolicitacao: paymentRow.codigo_estado_solicitacao,
+    timestampLimite: paymentRow.timestamp_limite
+  });
+
+  if (initialStatusLocal === ORDER_PAYMENT_STATUS.expired) {
+    await updateOrderPaymentAndStatus({
+      orderRow,
+      orderData,
+      paymentRow,
+      response: {},
+      statusLocal: ORDER_PAYMENT_STATUS.expired
+    });
+    sendEvent('expired', {
+      orderId,
+      expiresAt: paymentRow.timestamp_limite,
+      reason: resolvePixExpirationReason({
+        codigoEstadoSolicitacao: paymentRow.codigo_estado_solicitacao,
+        timestampLimite: paymentRow.timestamp_limite
+      })
+    });
+    cleanup();
+    res.end();
+    return;
+  }
+
+  const poll = async () => {
+    const statusResponse = await consultarStatusPixRepasse({
+      idSolicitacao: paymentRow.id_solicitacao,
+      baseUrl: pixRepasseBaseUrl,
+      tokenApiExterna: pixRepasseToken
+    });
+    if (!statusResponse.ok) {
+      sendEvent('payment_failed', { reason: statusResponse.message || 'status error' });
+      return;
+    }
+    const mapped = mapPixRepasseResponse(statusResponse.data || {});
+    const statusLocal = resolvePixStatusLocal({
+      codigoEstadoPagamento: mapped.codigoEstadoPagamento,
+      codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+      timestampLimite: paymentRow.timestamp_limite
+    });
+    await updateOrderPaymentAndStatus({
+      orderRow,
+      orderData,
+      paymentRow,
+      response: statusResponse.data,
+      statusLocal
+    });
+
+    const nextStatus = {
+      codigoEstadoPagamento: mapped.codigoEstadoPagamento,
+      codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+      descricaoStatus: mapped.descricaoStatus,
+      qrCode: mapped.qrCode || paymentRow.qr_code,
+      statusLocal
+    };
+
+    if (mapped.qrCode && !lastStatus.qrCode) {
+      sendEvent('qr_ready', { qrCode: mapped.qrCode });
+    }
+
+    if (
+      nextStatus.codigoEstadoPagamento !== lastStatus.codigoEstadoPagamento ||
+      nextStatus.codigoEstadoSolicitacao !== lastStatus.codigoEstadoSolicitacao ||
+      nextStatus.descricaoStatus !== lastStatus.descricaoStatus ||
+      nextStatus.statusLocal !== lastStatus.statusLocal
+    ) {
+      sendEvent('status_updated', nextStatus);
+      lastStatus = nextStatus;
+    }
+
+    if (statusLocal === ORDER_PAYMENT_STATUS.paid) {
+      sendEvent('payment_received', { orderId });
+      cleanup();
+      res.end();
+      return true;
+    }
+    if (statusLocal === ORDER_PAYMENT_STATUS.expired) {
+      sendEvent('expired', {
+        orderId,
+        expiresAt: paymentRow.timestamp_limite,
+        reason: resolvePixExpirationReason({
+          codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+          timestampLimite: paymentRow.timestamp_limite
+        })
+      });
+      cleanup();
+      res.end();
+      return true;
+    }
+    return false;
+  };
+
+  pollInterval = setInterval(() => {
+    poll().catch(() => {});
+  }, 5000);
+
+  pingInterval = setInterval(() => {
+    sendEvent('ping', { ts: new Date().toISOString() });
+  }, 20000);
+
+  req.on('close', () => {
+    cleanup();
+  });
 });
 
 app.post('/api/orders/:id/print', async (req, res) => {
@@ -4167,13 +5313,46 @@ app.put('/api/orders/:id/status', async (req, res) => {
         'Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.'
     });
   }
-  if (reason && status === 'CANCELLED') {
-    const data = { ...(orderRow.data || {}), cancelReason: String(reason) };
+  if (resolvedStatus === 'CANCELLED') {
+    const data = {
+      ...(orderRow.data || {}),
+      cancelReason: reason ? String(reason) : (orderRow.data || {}).cancelReason
+    };
     await query('UPDATE orders SET status = $1, data = $2 WHERE id = $3', [resolvedStatus, data, req.params.id]);
+    try {
+      await restockForCancelledOrder({ orderRow: { id: req.params.id, store_id: orderRow.store_id }, orderData: data });
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to restock on cancel',
+        stack: error?.stack,
+        context: { route: 'PUT /api/orders/:id/status', orderId: req.params.id }
+      });
+    }
+    const paymentRow = await getLatestPixPayment(req.params.id);
+    if (paymentRow && paymentRow.status_local === ORDER_PAYMENT_STATUS.pending) {
+      await updateOrderPaymentAndStatus({
+        orderRow: { id: req.params.id, status: resolvedStatus },
+        orderData: data,
+        paymentRow,
+        response: {},
+        statusLocal: ORDER_PAYMENT_STATUS.cancelled
+      });
+    }
     return res.json({ ok: true });
   }
   await query('UPDATE orders SET status = $1 WHERE id = $2', [resolvedStatus, req.params.id]);
   if (resolvedStatus === 'PREPARING') {
+    try {
+      await deductStockForOrder({ orderRow: { id: req.params.id, store_id: orderRow.store_id }, orderData });
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to deduct stock',
+        stack: error?.stack,
+        context: { route: 'PUT /api/orders/:id/status', orderId: req.params.id }
+      });
+    }
     try {
       if (orderRow.store_id) {
         const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
@@ -4482,14 +5661,27 @@ app.put('/api/qualifaz/orders/:id/status', async (req, res) => {
         }
       );
     }
-    if (reason && status === 'CANCELLED') {
-      const data = { ...(currentRows[0].data || {}), cancelReason: String(reason) };
+    if (resolvedStatus === 'CANCELLED') {
+      const data = {
+        ...(currentRows[0].data || {}),
+        cancelReason: reason ? String(reason) : (currentRows[0].data || {}).cancelReason
+      };
       await query('UPDATE orders SET status = $1, data = $2 WHERE id = $3 AND store_id = $4', [
         resolvedStatus,
         data,
         req.params.id,
         store.id
       ]);
+      const paymentRow = await getLatestPixPayment(req.params.id);
+      if (paymentRow && paymentRow.status_local === ORDER_PAYMENT_STATUS.pending) {
+        await updateOrderPaymentAndStatus({
+          orderRow: { id: req.params.id, status: resolvedStatus },
+          orderData: data,
+          paymentRow,
+          response: {},
+          statusLocal: ORDER_PAYMENT_STATUS.cancelled
+        });
+      }
       return res.json({ ok: true });
     }
     const { rowCount } = await query('UPDATE orders SET status = $1 WHERE id = $2 AND store_id = $3', [
@@ -4844,7 +6036,7 @@ app.use(async (err, req, res, _next) => {
         method: req.method,
         params: req.params,
         query: req.query,
-        body: req.body
+        body: redactSensitive(req.body)
       }
     });
   } catch (error) {
@@ -4887,6 +6079,78 @@ app.post('/api/ai/recommendation', (req, res) => {
   res.json(response);
 });
 
+let pixReconcileRunning = false;
+const startPixRepasseReconciler = () => {
+  setInterval(async () => {
+    if (pixReconcileRunning) return;
+    pixReconcileRunning = true;
+    try {
+      const { rows } = await query(
+        `
+        SELECT p.*, o.status, o.data
+        FROM order_payments p
+        JOIN orders o ON o.id = p.order_id
+        WHERE p.provider = $1
+          AND p.status_local = $2
+        ORDER BY p.created_at ASC
+        LIMIT 25
+        `,
+        [ORDER_PAYMENT_PROVIDER.pixRepasse, ORDER_PAYMENT_STATUS.pending]
+      );
+      for (const row of rows) {
+        const orderRow = { id: row.order_id, status: row.status };
+        const orderData = row.data || {};
+        if (row.timestamp_limite && new Date(row.timestamp_limite).getTime() <= Date.now()) {
+          await updateOrderPaymentAndStatus({
+            orderRow,
+            orderData,
+            paymentRow: row,
+            response: {},
+            statusLocal: ORDER_PAYMENT_STATUS.expired
+          });
+          continue;
+        }
+        if (isPixStatusExpiredByCode(row.codigo_estado_solicitacao)) {
+          await updateOrderPaymentAndStatus({
+            orderRow,
+            orderData,
+            paymentRow: row,
+            response: {},
+            statusLocal: ORDER_PAYMENT_STATUS.expired
+          });
+          continue;
+        }
+        const statusResponse = await consultarStatusPixRepasse({
+          idSolicitacao: row.id_solicitacao,
+          baseUrl: pixRepasseBaseUrl,
+          tokenApiExterna: pixRepasseToken
+        });
+        if (!statusResponse.ok) {
+          continue;
+        }
+        const mapped = mapPixRepasseResponse(statusResponse.data || {});
+        const statusLocal = resolvePixStatusLocal({
+          codigoEstadoPagamento: mapped.codigoEstadoPagamento,
+          codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+          timestampLimite: row.timestamp_limite
+        });
+        await updateOrderPaymentAndStatus({
+          orderRow,
+          orderData,
+          paymentRow: row,
+          response: statusResponse.data,
+          statusLocal
+        });
+      }
+    } catch (error) {
+      console.error('pix repasse reconcile failed', error);
+    } finally {
+      pixReconcileRunning = false;
+    }
+  }, 90 * 1000);
+};
+
 app.listen(port, () => {
   console.log(`API listening on port ${port}`);
+  startPixRepasseReconciler();
 });
