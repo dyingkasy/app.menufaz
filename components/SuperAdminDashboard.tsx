@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { LayoutDashboard, Building2, Users, LogOut, Search, CheckCircle, XCircle, Trash2, ExternalLink, TrendingUp, DollarSign, ShieldCheck, Inbox, Phone, MapPin, User, Check, X, Mail, Copy, Send, Loader2, AlertTriangle, Settings, Save, HelpCircle, Info, Lock, Unlock, Banknote, ListChecks, Filter, Upload, Download } from 'lucide-react';
+import { LayoutDashboard, Building2, Users, LogOut, Search, CheckCircle, XCircle, Trash2, ExternalLink, TrendingUp, DollarSign, ShieldCheck, Inbox, Phone, MapPin, User, Check, X, Mail, Copy, Send, Loader2, AlertTriangle, Settings, Save, HelpCircle, Info, Lock, Unlock, Banknote, ListChecks, Filter, Upload, Download, Power } from 'lucide-react';
 import { Store, StoreRequest, AppSettings, ErrorLogEntry, Product, Order } from '../types';
 import { CATEGORIES } from '../constants';
-import { getStores, toggleStoreStatus, deleteStore, getStoreRequests, approveStoreRequest, rejectStoreRequest, getAppSettings, saveAppSettings, getErrorLogs, setErrorLogResolved, clearErrorLogs, createStoreWithUser, saveProduct, importProductsBulk, getOrders } from '../services/db';
+import { getStores, toggleStoreStatus, deleteStore, getStoreRequests, approveStoreRequest, rejectStoreRequest, getAppSettings, saveAppSettings, getErrorLogs, setErrorLogResolved, clearErrorLogs, createStoreWithUser, saveProduct, importProductsBulk, getOrders, getStoreAvailability, pauseStore, resumeStorePause } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
 import { compressImageFile } from '../utils/image';
 import { uploadImageKit, deleteImageKit } from '../services/imagekit';
@@ -727,6 +727,63 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
             setStores(prev => prev.map(s => s.id === store.id ? { ...s, ...updatedData } : s));
         } catch (e) {
             alert("Erro ao desbloquear empresa.");
+        }
+    };
+
+    const [manualToggleLoadingId, setManualToggleLoadingId] = useState<string | null>(null);
+
+    const handleManualToggleStore = async (store: Store) => {
+        if (manualToggleLoadingId === store.id) return;
+        setManualToggleLoadingId(store.id);
+        try {
+            const availability = await getStoreAvailability(store.id);
+            if (availability?.pause?.active) {
+                if (!availability.scheduleOpen) {
+                    const confirmed = confirm(
+                        'A loja está fora do horário configurado agora. Deseja abrir manualmente mesmo assim?'
+                    );
+                    if (!confirmed) {
+                        setManualToggleLoadingId(null);
+                        return;
+                    }
+                }
+                const result = await resumeStorePause(store.id);
+                const nextAvailability = await getStoreAvailability(store.id);
+                setStores((prev) =>
+                    prev.map((s) =>
+                        s.id === store.id
+                            ? {
+                                  ...s,
+                                  pause: result.pause,
+                                  isOpenNow: nextAvailability.isOpen
+                              }
+                            : s
+                    )
+                );
+                alert('Loja aberta manualmente.');
+                return;
+            }
+
+            const reason = 'Fechada manualmente pelo Super Admin';
+            const minutes = 120;
+            const result = await pauseStore(store.id, minutes, reason);
+            const nextAvailability = await getStoreAvailability(store.id);
+            setStores((prev) =>
+                prev.map((s) =>
+                    s.id === store.id
+                        ? {
+                              ...s,
+                              pause: result.pause,
+                              isOpenNow: nextAvailability.isOpen
+                          }
+                        : s
+                )
+            );
+            alert('Loja fechada manualmente.');
+        } catch (error) {
+            alert('Erro ao atualizar status manual.');
+        } finally {
+            setManualToggleLoadingId(null);
         }
     };
 
@@ -2054,6 +2111,16 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                 </td>
                                                 <td className="px-6 py-4 text-right">
                                                     <div className="flex items-center justify-end gap-2">
+                                                        <button
+                                                            onClick={() => handleManualToggleStore(store)}
+                                                            className={`p-2 text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors ${
+                                                                manualToggleLoadingId === store.id ? 'opacity-60 cursor-not-allowed' : ''
+                                                            }`}
+                                                            title={store.pause?.active ? 'Abrir loja manualmente' : 'Fechar loja manualmente'}
+                                                            disabled={manualToggleLoadingId === store.id}
+                                                        >
+                                                            <Power size={18} />
+                                                        </button>
                                                         <button
                                                             onClick={() => handleOpenBlockModal(store)}
                                                             className={`p-2 ${isBlocked ? 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100' : 'text-rose-600 bg-rose-50 hover:bg-rose-100'} rounded-lg transition-colors`}
