@@ -12,12 +12,13 @@ export enum ViewState {
   CLIENT_PROFILE = 'CLIENT_PROFILE',
   FINISH_SIGNUP = 'FINISH_SIGNUP',
   COURIER_DASHBOARD = 'COURIER_DASHBOARD',
-  TABLE_TRACKING = 'TABLE_TRACKING'
+  TABLE_TRACKING = 'TABLE_TRACKING',
+  PIX_PAYMENT = 'PIX_PAYMENT'
 }
 
 export type UserRole = 'GUEST' | 'CLIENT' | 'BUSINESS' | 'ADMIN' | 'COURIER';
 
-export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'BUILDABLE_PRODUCTS' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES' | 'TABLES';
+export type DashboardSection = 'OVERVIEW' | 'ORDERS' | 'MENU' | 'BUILDABLE_PRODUCTS' | 'SETTINGS' | 'CUSTOMERS' | 'COURIERS' | 'GLOBAL_ADDONS' | 'COUPONS' | 'FINANCE' | 'EXPENSES' | 'REQUESTS' | 'SALES' | 'TABLES' | 'STOCK';
 
 export interface Coordinates {
   lat: number;
@@ -58,6 +59,21 @@ export interface StoreAvailability {
   autoOpenClose: boolean;
   pause: StorePause | null;
   nextChangeAt?: string | null;
+  nextOpenAt?: string | null;
+  nextCloseAt?: string | null;
+  hasSchedule?: boolean;
+}
+
+export interface NeighborhoodImportState {
+  city?: string;
+  state?: string;
+  ignoredKeys?: string[];
+  lastRunAt?: string;
+  runsCount?: number;
+  lastRequestsCount?: number;
+  lastResultCount?: number;
+  nextGridIndex?: number;
+  nextKeywordIndex?: number;
 }
 
 export interface Store {
@@ -70,6 +86,13 @@ export interface Store {
   deliveryTime: string;
   pickupTime?: string;
   deliveryFee: number;
+  deliveryFeeMode?: 'FIXED' | 'BY_NEIGHBORHOOD' | 'BY_RADIUS';
+  deliveryNeighborhoods?: DeliveryNeighborhood[];
+  neighborhoodFees?: DeliveryNeighborhood[];
+  deliveryZones?: DeliveryZone[];
+  neighborhoodFeesImportedAt?: string;
+  neighborhoodFeesSource?: 'google' | 'manual';
+  neighborhoodImportState?: NeighborhoodImportState;
   minOrderValue?: number; 
   imageUrl: string;
   isPopular: boolean;
@@ -118,6 +141,35 @@ export interface Store {
   merchantId?: string;
   merchantIdCreatedAt?: string;
   merchantIdRevokedAt?: string;
+  pix_enabled?: boolean;
+  pix_hash_recebedor_01?: string;
+  pix_hash_recebedor_02?: string;
+  pix_identificacao_pdv?: string;
+  pix_hashes_configured?: boolean;
+  pixOnlineReady?: boolean;
+
+  // Status de funcionamento
+  isOpenNow?: boolean;
+  nextOpenAt?: string | null;
+  nextCloseAt?: string | null;
+}
+
+export interface DeliveryNeighborhood {
+  name: string;
+  active: boolean;
+  fee: number;
+}
+
+export interface DeliveryZone {
+  id: string;
+  name: string;
+  centerLat: number;
+  centerLng: number;
+  radiusMeters: number;
+  fee: number;
+  etaMinutes?: number;
+  enabled: boolean;
+  priority?: number;
 }
 
 export interface StoreRequest {
@@ -168,6 +220,22 @@ export interface ProductOptionGroup {
   order?: number;
   extraChargeAfter?: number;
   extraChargeAmount?: number;
+  templateId?: string;
+}
+
+export interface OptionGroupTemplate {
+  id: string;
+  storeId: string;
+  name: string;
+  min: number;
+  max: number;
+  options: ProductOption[];
+  isRequired?: boolean;
+  selectionType?: 'SINGLE' | 'MULTIPLE';
+  extraChargeAfter?: number;
+  extraChargeAmount?: number;
+  linkedCategoryIds?: string[];
+  createdAt?: string;
 }
 
 export interface PizzaFlavor {
@@ -187,6 +255,7 @@ export interface Product {
     price: number;
     priceMode?: 'BASE' | 'BY_SIZE';
     isBuildable?: boolean;
+    stock_qty?: number;
     
     // Promoção Avançada
     promoPrice?: number; 
@@ -270,12 +339,31 @@ export interface Order {
     items: string[]; 
     lineItems?: OrderLineItem[];
     total: number;
-    status: 'PENDING' | 'PREPARING' | 'WAITING_COURIER' | 'DELIVERING' | 'COMPLETED' | 'CANCELLED';
+    status:
+        | 'PENDING'
+        | 'CONFIRMED'
+        | 'PREPARING'
+        | 'READY_FOR_PICKUP'
+        | 'READY'
+        | 'SERVED'
+        | 'WAITING_COURIER'
+        | 'DELIVERING'
+        | 'COMPLETED'
+        | 'CANCELLED';
     time: string;
     notes?: string; 
     paymentMethod?: string;
+    paymentProvider?: 'PIX_REPASSE' | 'PIX' | 'CARD' | 'CASH';
+    paymentStatus?: 'PENDING' | 'PAID' | 'EXPIRED' | 'FAILED' | 'CANCELLED';
+    paymentIdSolicitacao?: string;
+    paymentQrCode?: string;
+    paymentExpiresAt?: string;
     courierId?: string; 
     deliveryFee?: number;
+    deliveryNeighborhood?: string;
+    deliveryZoneId?: string;
+    deliveryZoneName?: string;
+    deliveryEtaMinutes?: number;
     
     // Geolocation para rastreio
     storeCoordinates?: Coordinates;
@@ -298,6 +386,14 @@ export interface Order {
     
     // Dados opcionais do cliente
     cpf?: string;
+    couponCode?: string;
+    couponId?: string;
+    couponDiscount?: number;
+    payment?: {
+        provider?: string;
+        idSolicitacao?: string | null;
+    };
+    redirectUrl?: string;
 }
 
 export interface Courier {

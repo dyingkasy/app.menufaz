@@ -4,6 +4,8 @@ import {
   Coordinates,
   Coupon,
   Courier,
+  DeliveryNeighborhood,
+  OptionGroupTemplate,
   FinancialTransaction,
   Order,
   PizzaFlavor,
@@ -50,7 +52,15 @@ const apiFetch = async <T>(path: string, options?: RequestInit): Promise<T> => {
 
   const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let message = `Request failed: ${response.status}`;
+    try {
+      const data = await response.json();
+      if (data?.error) message = data.error;
+      else if (data?.message) message = data.message;
+    } catch {}
+    const error: any = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return response.json() as Promise<T>;
 };
@@ -135,9 +145,103 @@ export const updateStoreAutoOpen = async (storeId: string, enabled: boolean) => 
   });
 };
 
+export const getPixRepasseConfig = async (storeId?: string) => {
+  ensureApi();
+  const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : '';
+  return apiFetch<{
+    pix_enabled: boolean;
+    pix_hash_recebedor_01?: string;
+    pix_hash_recebedor_02?: string;
+    pix_identificacao_pdv?: string;
+  }>(`/empresa/pagamentos/pix-repasse${query}`);
+};
+
+export const updatePixRepasseConfig = async (payload: {
+  storeId?: string;
+  pix_enabled: boolean;
+  pix_hash_recebedor_01?: string;
+  pix_hash_recebedor_02?: string;
+}) => {
+  ensureApi();
+  return apiFetch(`/empresa/pagamentos/pix-repasse`, {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  });
+};
+
 export const getStoreAvailability = async (storeId: string): Promise<StoreAvailability> => {
   ensureApi();
   return apiFetch<StoreAvailability>(`/stores/${storeId}/availability`);
+};
+
+export const getNeighborhoodsByCity = async (
+  city: string,
+  state?: string
+): Promise<{ neighborhoods: string[]; meta?: { partial?: boolean; requestCount?: number } }> => {
+  ensureApi();
+  const params = new URLSearchParams({ city });
+  if (state) params.set('state', state);
+  const response = await fetch(`${API_BASE_URL}/geocode/neighborhoods?${params.toString()}`);
+  if (!response.ok) {
+    let data: any = null;
+    try {
+      data = await response.json();
+    } catch {}
+    if (data?.error === 'google_api_error') {
+      const error: any = new Error(data.message || 'google_api_error');
+      error.code = 'google_api_error';
+      error.googleStatus = data.googleStatus;
+      throw error;
+    }
+    throw new Error(data?.error || `Request failed: ${response.status}`);
+  }
+  const data = await response.json();
+  if (Array.isArray(data)) {
+    return { neighborhoods: data };
+  }
+  return {
+    neighborhoods: Array.isArray(data?.neighborhoods) ? data.neighborhoods : [],
+    meta: data?.meta
+  };
+};
+
+export const importNeighborhoodsForStore = async (
+  storeId: string,
+  payload: { city?: string; state?: string } = {}
+): Promise<{
+  neighborhoods: DeliveryNeighborhood[];
+  addedCount: number;
+  totalCount: number;
+  sampleAdded?: string[];
+  meta?: { partial?: boolean; requestCount?: number };
+  neighborhoodImportState?: Store['neighborhoodImportState'];
+  neighborhoodFeesImportedAt?: string;
+  neighborhoodFeesSource?: Store['neighborhoodFeesSource'];
+}> => {
+  ensureApi();
+  const token = getAuthToken();
+  const headers = new Headers();
+  headers.set('Content-Type', 'application/json');
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${API_BASE_URL}/stores/${storeId}/neighborhoods/import`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let data: any = null;
+    try {
+      data = await response.json();
+    } catch {}
+    if (data?.error === 'google_api_error') {
+      const error: any = new Error(data.message || 'google_api_error');
+      error.code = 'google_api_error';
+      error.googleStatus = data.googleStatus;
+      throw error;
+    }
+    throw new Error(data?.error || `Request failed: ${response.status}`);
+  }
+  return response.json();
 };
 
 export const pauseStore = async (storeId: string, minutes: number, reason: string) => {
@@ -235,6 +339,53 @@ export const createStoreWithUser = async (payload: {
 export const getProductsByStore = async (storeId: string): Promise<Product[]> => {
   ensureApi();
   return apiFetch<Product[]>(`/products?storeId=${encodeURIComponent(storeId)}`);
+};
+
+export const getMerchantProductsWithStock = async (storeId: string): Promise<Product[]> => {
+  ensureApi();
+  return apiFetch<Product[]>(`/merchant/products?storeId=${encodeURIComponent(storeId)}`);
+};
+
+export const updateProductStock = async (
+  productId: string,
+  stock_qty: number,
+  storeId: string
+): Promise<Product> => {
+  ensureApi();
+  return apiFetch<Product>(`/merchant/products/${productId}/stock?storeId=${encodeURIComponent(storeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ stock_qty })
+  });
+};
+
+export const getOptionGroupTemplatesByStore = async (
+  storeId: string
+): Promise<OptionGroupTemplate[]> => {
+  ensureApi();
+  return apiFetch<OptionGroupTemplate[]>(
+    `/option-group-templates?storeId=${encodeURIComponent(storeId)}`
+  );
+};
+
+export const saveOptionGroupTemplate = async (
+  template: Omit<OptionGroupTemplate, 'id'> & { id?: string }
+) => {
+  ensureApi();
+  if (template.id) {
+    return apiFetch<OptionGroupTemplate>(`/option-group-templates/${template.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(template)
+    });
+  }
+  return apiFetch<OptionGroupTemplate>('/option-group-templates', {
+    method: 'POST',
+    body: JSON.stringify(template)
+  });
+};
+
+export const deleteOptionGroupTemplate = async (templateId: string) => {
+  ensureApi();
+  await apiFetch(`/option-group-templates/${templateId}`, { method: 'DELETE' });
 };
 
 export const saveProduct = async (product: Omit<Product, 'id'> & { id?: string }) => {
@@ -450,6 +601,32 @@ export const createOrder = async (order: Omit<Order, 'id' | 'status' | 'createdA
   return apiFetch<Order>('/orders', {
     method: 'POST',
     body: JSON.stringify(order)
+  });
+};
+
+const buildPixPaymentQuery = (params?: { customerPhone?: string; customerId?: string }) => {
+  const search = new URLSearchParams();
+  if (params?.customerPhone) search.set('customerPhone', params.customerPhone);
+  if (params?.customerId) search.set('customerId', params.customerId);
+  const qs = search.toString();
+  return qs ? `?${qs}` : '';
+};
+
+export const getPixPayment = async (
+  orderId: string,
+  params?: { customerPhone?: string; customerId?: string }
+) => {
+  ensureApi();
+  return apiFetch(`/pedidos/${orderId}/pagamento/pix${buildPixPaymentQuery(params)}`);
+};
+
+export const recreatePixPayment = async (
+  orderId: string,
+  params?: { customerPhone?: string; customerId?: string }
+) => {
+  ensureApi();
+  return apiFetch(`/pedidos/${orderId}/pagamento/pix/recriar${buildPixPaymentQuery(params)}`, {
+    method: 'POST'
   });
 };
 

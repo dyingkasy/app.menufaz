@@ -1,11 +1,14 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
+import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, Legend, ComposedChart
 } from 'recharts';
 import { 
     DollarSign, Users, ClipboardList, AlertTriangle, 
     CheckCircle, XCircle, ArrowLeft, LayoutDashboard, 
-    ShoppingBasket, UtensilsCrossed, Settings, LogOut, Menu, Search, Plus, Edit, Trash, CreditCard, Clock, Store, Image as ImageIcon, UploadCloud, Calendar, X, ChevronRight, Layers, Tag, Save, Copy, Timer, Percent, CalendarDays, Bike, UserPlus, ChevronLeft, Power, Banknote, Calculator, ChevronDown, Check, TrendingUp, TrendingDown, Activity, AlertCircle, Lock, Unlock, Phone, MapPin, User, Zap, Ticket, PieChart as PieChartIcon, Wallet, Upload, Trash2, Eye, Package, Trophy, Navigation, MessageSquare, ArrowUpCircle, ArrowDownCircle, Coins, Receipt, EyeOff, Send, ShieldAlert, ShieldCheck, Mail, ToggleLeft, ToggleRight, Slice, Database, Table, Download
+    ShoppingBasket, UtensilsCrossed, Settings, LogOut, Menu, Search, Plus, Edit, Trash, CreditCard, Clock, Store, Image as ImageIcon, UploadCloud, Calendar, X, ChevronRight, Layers, Tag, Save, Copy, Timer, Percent, CalendarDays, Bike, UserPlus, ChevronLeft, Power, Banknote, Calculator, ChevronDown, Check, TrendingUp, TrendingDown, Activity, AlertCircle, Lock, Unlock, Phone, MapPin, User, Zap, Ticket, PieChart as PieChartIcon, Wallet, Upload, Trash2, Eye, Package, Trophy, Navigation, MessageSquare, ArrowUpCircle, ArrowDownCircle, Coins, Receipt, EyeOff, Send, ShieldAlert, ShieldCheck, Mail, ToggleLeft, ToggleRight, Slice, Database, Table, Download, GripVertical, Loader2
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import JSZip from 'jszip';
@@ -16,6 +19,7 @@ import {
     Order,
     ProductOptionGroup,
     ProductOption,
+    OptionGroupTemplate,
     Courier,
     Store as StoreType,
     StoreAvailability,
@@ -24,7 +28,9 @@ import {
     FinancialTransaction,
     PaymentMethod,
     PizzaFlavor,
-    Address
+    Address,
+    DeliveryNeighborhood,
+    DeliveryZone
 } from '../types';
 import { formatCurrencyBRL } from '../utils/format';
 import { compressImageFile } from '../utils/image';
@@ -40,6 +46,9 @@ import {
     pauseStore,
     resumeStorePause,
     getProductsByStore,
+    getOptionGroupTemplatesByStore,
+    saveOptionGroupTemplate,
+    deleteOptionGroupTemplate,
     saveProduct,
     deleteProduct,
     subscribeToOrders,
@@ -60,10 +69,15 @@ import {
     savePizzaFlavor,
     deletePizzaFlavor,
     generateMerchantId,
-    revokeMerchantId
+    revokeMerchantId,
+    importNeighborhoodsForStore,
+    getPixRepasseConfig,
+    updatePixRepasseConfig,
+    getMerchantProductsWithStock,
+    updateProductStock
 } from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
-import { searchAddress, GEO_API_ENABLED, fetchCepData } from '../utils/geo';
+import { searchAddress, GEO_API_ENABLED, fetchCepData, ensureGoogleMapsLoaded } from '../utils/geo';
 
 interface AdminDashboardProps {
     onBack: () => void;
@@ -107,14 +121,27 @@ const PRICING_STRATEGIES = [
     { id: 'MAX', label: 'Maior sabor' }
 ];
 
-const ORDER_STATUS_SEQUENCE: Order['status'][] = [
-    'PENDING',
-    'PREPARING',
-    'WAITING_COURIER',
-    'DELIVERING',
-    'COMPLETED',
-    'CANCELLED'
-];
+const normalizeCategoryValue = (value: string) => value.toLowerCase().trim();
+
+const ORDER_STATUS_FLOW_BY_TYPE: Record<Order['type'] | 'DEFAULT', Order['status'][]> = {
+    DELIVERY: ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING', 'COMPLETED', 'CANCELLED'],
+    PICKUP: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'COMPLETED', 'CANCELLED'],
+    TABLE: ['PENDING', 'PREPARING', 'READY', 'SERVED', 'COMPLETED', 'CANCELLED'],
+    DEFAULT: ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING', 'COMPLETED', 'CANCELLED']
+};
+
+const ORDER_STATUS_LABELS: Record<Order['status'], string> = {
+    PENDING: 'Novo',
+    CONFIRMED: 'Confirmado',
+    PREPARING: 'Em Preparo',
+    READY_FOR_PICKUP: 'Pronto p/ Retirada',
+    READY: 'Pronto',
+    SERVED: 'Entregue na Mesa',
+    WAITING_COURIER: 'Aguardando Motoboy',
+    DELIVERING: 'Saiu para Entrega',
+    COMPLETED: 'Concluído',
+    CANCELLED: 'Cancelado'
+};
 
 const normalizeSizeKey = (value: string) =>
     (value || '')
@@ -220,6 +247,102 @@ const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }
     );
 };
 
+const SortableCategoryItem: React.FC<{
+    id: string;
+    label: string;
+    onRemove: () => void;
+    onEdit: () => void;
+    isEditing: boolean;
+    editValue: string;
+    onEditChange: (value: string) => void;
+    onEditSave: () => void;
+    onEditCancel: () => void;
+}> = ({ id, label, onRemove, onEdit, isEditing, editValue, onEditChange, onEditSave, onEditCancel }) => {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+    const style: React.CSSProperties = {
+        transform: CSS.Transform.toString(transform),
+        transition,
+        boxShadow: isDragging ? '0 10px 20px rgba(15, 23, 42, 0.15)' : undefined,
+        opacity: isDragging ? 0.95 : 1
+    };
+
+    return (
+        <div
+            ref={setNodeRef}
+            style={style}
+            className="flex items-center justify-between p-3 rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900"
+        >
+            <div className="flex items-center gap-3 flex-1">
+                <button
+                    type="button"
+                    className="p-2 text-gray-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-grab active:cursor-grabbing"
+                    aria-label="Arrastar categoria"
+                    {...attributes}
+                    {...listeners}
+                >
+                    <GripVertical size={16} />
+                </button>
+                {isEditing ? (
+                    <input
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => onEditChange(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                onEditSave();
+                            }
+                            if (e.key === 'Escape') {
+                                e.preventDefault();
+                                onEditCancel();
+                            }
+                        }}
+                        className="flex-1 p-2 border rounded-lg text-sm dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                        autoFocus
+                    />
+                ) : (
+                    <span className="text-sm font-semibold text-slate-700 dark:text-gray-200">{label}</span>
+                )}
+            </div>
+            <div className="flex items-center gap-2">
+                {isEditing ? (
+                    <>
+                        <button
+                            onClick={onEditSave}
+                            className="p-2 text-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-slate-800 rounded-full"
+                            title="Salvar edição"
+                        >
+                            <Check size={16} />
+                        </button>
+                        <button
+                            onClick={onEditCancel}
+                            className="p-2 text-gray-400 hover:text-slate-700 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full"
+                            title="Cancelar edição"
+                        >
+                            <X size={16} />
+                        </button>
+                    </>
+                ) : (
+                    <button
+                        onClick={onEdit}
+                        className="p-2 text-gray-400 hover:text-slate-700 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full"
+                        title="Editar categoria"
+                    >
+                        <Edit size={16} />
+                    </button>
+                )}
+                <button
+                    onClick={onRemove}
+                    className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-slate-800 rounded-full"
+                    title="Remover categoria"
+                >
+                    <Trash2 size={16} />
+                </button>
+            </div>
+        </div>
+    );
+};
+
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targetStoreId, isDarkMode, toggleTheme }) => {
   const { user } = useAuth();
   const storeId = targetStoreId || user?.storeId;
@@ -235,11 +358,29 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const storeCoverInputRef = useRef<HTMLInputElement>(null);
   const productInfoInputRef = useRef<HTMLInputElement>(null);
   const buildableProductInputRef = useRef<HTMLInputElement>(null);
+  const deliveryZoneMapRef = useRef<any>(null);
+  const deliveryZoneCircleRef = useRef<any>(null);
+  const deliveryZoneMapContainerRef = useRef<HTMLDivElement>(null);
+  const deliveryZoneUpdateTimerRef = useRef<any>(null);
   const hasSyncedDerivedCategoriesRef = useRef(false);
 
   // --- STORE SETTINGS STATE ---
   const [storeProfile, setStoreProfile] = useState<Partial<StoreType>>({});
+  const [menuQrDataUrl, setMenuQrDataUrl] = useState('');
   const [menuCategories, setMenuCategories] = useState<string[]>([]);
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
+  const [editingCategoryName, setEditingCategoryName] = useState('');
+  const [categoryOrderDirty, setCategoryOrderDirty] = useState(false);
+  const [categoryOrderNotice, setCategoryOrderNotice] = useState<string | null>(null);
+  const [deliveryNeighborhoodSearch, setDeliveryNeighborhoodSearch] = useState('');
+  const [deliveryNeighborhoodLoading, setDeliveryNeighborhoodLoading] = useState(false);
+  const [deliveryNeighborhoodError, setDeliveryNeighborhoodError] = useState<string | null>(null);
+  const [deliveryNeighborhoodInfo, setDeliveryNeighborhoodInfo] = useState<string | null>(null);
+  const [manualNeighborhoodName, setManualNeighborhoodName] = useState('');
+  const [manualNeighborhoodFee, setManualNeighborhoodFee] = useState('');
+  const [selectedDeliveryZoneId, setSelectedDeliveryZoneId] = useState<string | null>(null);
+  const [deliveryZoneError, setDeliveryZoneError] = useState<string | null>(null);
+  const [deliveryZoneNotice, setDeliveryZoneNotice] = useState<string | null>(null);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isSavingCategories, setIsSavingCategories] = useState(false);
@@ -262,6 +403,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   
   // Payment Methods State
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>(DEFAULT_PAYMENT_METHODS);
+  const [pixRepasseConfig, setPixRepasseConfig] = useState({
+      pix_enabled: false,
+      pix_hash_recebedor_01: '',
+      pix_hash_recebedor_02: '',
+      pix_identificacao_pdv: ''
+  });
+  const [pixRepasseLoading, setPixRepasseLoading] = useState(false);
+  const [pixRepasseError, setPixRepasseError] = useState<string | null>(null);
+  const [pixRepasseNotice, setPixRepasseNotice] = useState<string | null>(null);
 
   // --- MENU STATE ---
   const [products, setProducts] = useState<Product[]>([]);
@@ -270,9 +420,59 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [productError, setProductError] = useState<string | null>(null);
   const [menuSearch, setMenuSearch] = useState('');
   const [selectedCategoryTab, setSelectedCategoryTab] = useState<string>('Todos');
+  const [stockProducts, setStockProducts] = useState<Product[]>([]);
+  const [stockSearch, setStockSearch] = useState('');
+  const [stockLoading, setStockLoading] = useState(false);
+  const [stockEdits, setStockEdits] = useState<Record<string, string>>({});
+  const [stockSavingIds, setStockSavingIds] = useState<Record<string, boolean>>({});
   const [showBuildableProductModal, setShowBuildableProductModal] = useState(false);
   const [buildableProduct, setBuildableProduct] = useState<Partial<Product>>({});
   const [buildableError, setBuildableError] = useState<string | null>(null);
+  const [optionGroupTemplates, setOptionGroupTemplates] = useState<OptionGroupTemplate[]>([]);
+  const [showOptionGroupTemplateModal, setShowOptionGroupTemplateModal] = useState(false);
+  const [templateDraft, setTemplateDraft] = useState<Partial<OptionGroupTemplate>>({});
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateNotice, setTemplateNotice] = useState<string | null>(null);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+
+  const appliedTemplateIds = useMemo(() => {
+      const ids = (newProduct.optionGroups || [])
+          .map((group) => group.templateId)
+          .filter(Boolean) as string[];
+      return new Set(ids);
+  }, [newProduct.optionGroups]);
+
+  const isTemplateApplied = useCallback(
+      (template: OptionGroupTemplate) => {
+          if (appliedTemplateIds.has(template.id)) return true;
+          const templateName = (template.name || '').toLowerCase().trim();
+          if (!templateName) return false;
+          return (newProduct.optionGroups || []).some(
+              (group) => (group.name || '').toLowerCase().trim() === templateName
+          );
+      },
+      [appliedTemplateIds, newProduct.optionGroups]
+  );
+
+  const suggestedTemplates = useMemo(() => {
+      const category = normalizeCategoryValue((newProduct.category || '').toString());
+      if (!category) return [];
+      return optionGroupTemplates.filter((template) => {
+          const linked = template.linkedCategoryIds || [];
+          if (linked.length === 0) return false;
+          return linked.some((value) => normalizeCategoryValue(value) === category);
+      });
+  }, [optionGroupTemplates, newProduct.category]);
+
+  const suggestedTemplateIds = useMemo(
+      () => new Set(suggestedTemplates.map((template) => template.id)),
+      [suggestedTemplates]
+  );
+
+  const availableTemplates = useMemo(
+      () => optionGroupTemplates.filter((template) => !suggestedTemplateIds.has(template.id)),
+      [optionGroupTemplates, suggestedTemplateIds]
+  );
 
   // --- FLAVOR MANAGER STATE ---
   const [pizzaFlavors, setPizzaFlavors] = useState<PizzaFlavor[]>([]);
@@ -325,6 +525,30 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [inputCode, setInputCode] = useState('');
   const [isVerifyingCode, setIsVerifyingCode] = useState(false);
   const tableCountValue = Math.max(0, Number(storeProfile.tableCount || 0));
+  const deliveryFeeMode =
+      storeProfile.deliveryFeeMode === 'BY_NEIGHBORHOOD'
+          ? 'BY_NEIGHBORHOOD'
+          : storeProfile.deliveryFeeMode === 'BY_RADIUS'
+          ? 'BY_RADIUS'
+          : 'FIXED';
+  const deliveryNeighborhoods = Array.isArray(storeProfile.neighborhoodFees)
+      ? (storeProfile.neighborhoodFees as DeliveryNeighborhood[])
+      : Array.isArray(storeProfile.deliveryNeighborhoods)
+      ? (storeProfile.deliveryNeighborhoods as DeliveryNeighborhood[])
+      : [];
+  const filteredDeliveryNeighborhoods = useMemo(() => {
+      const search = deliveryNeighborhoodSearch.trim().toLowerCase();
+      return deliveryNeighborhoods
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => {
+              if (!search) return true;
+              return (item.name || '').toLowerCase().includes(search);
+          });
+  }, [deliveryNeighborhoodSearch, deliveryNeighborhoods]);
+  const deliveryZones = Array.isArray(storeProfile.deliveryZones)
+      ? (storeProfile.deliveryZones as DeliveryZone[])
+      : [];
+  const selectedDeliveryZone = deliveryZones.find((zone) => zone.id === selectedDeliveryZoneId) || null;
   const [isDownloadingTables, setIsDownloadingTables] = useState(false);
   const [downloadingTable, setDownloadingTable] = useState<number | null>(null);
   const [selectedTableKey, setSelectedTableKey] = useState<string | null>(null);
@@ -400,6 +624,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           setPaymentMethods(extendedData.paymentMethods);
                       }
 
+                      setPixRepasseLoading(true);
+                      try {
+                          const pixConfig = await getPixRepasseConfig(storeId);
+                          setPixRepasseConfig({
+                              pix_enabled: !!pixConfig.pix_enabled,
+                              pix_hash_recebedor_01: pixConfig.pix_hash_recebedor_01 || '',
+                              pix_hash_recebedor_02: pixConfig.pix_hash_recebedor_02 || '',
+                              pix_identificacao_pdv: pixConfig.pix_identificacao_pdv || ''
+                          });
+                      } catch (error) {
+                          setPixRepasseError('Não foi possível carregar o PIX Repasse.');
+                      } finally {
+                          setPixRepasseLoading(false);
+                      }
+
                       setAvailabilityLoading(true);
                       try {
                           const latestAvailability = await getStoreAvailability(storeId);
@@ -422,6 +661,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
                   const flavorsData = await getPizzaFlavorsByStore(storeId);
                   setPizzaFlavors(flavorsData);
+
+                  const templatesData = await getOptionGroupTemplatesByStore(storeId);
+                  setOptionGroupTemplates(templatesData);
 
                   const couponsData = await getCouponsByStore(storeId);
                   setCoupons(couponsData);
@@ -449,6 +691,32 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           };
       }
   }, [storeId]);
+
+  const loadStockProducts = useCallback(async () => {
+      if (!storeId) return;
+      setStockLoading(true);
+      try {
+          const data = await getMerchantProductsWithStock(storeId);
+          setStockProducts(data);
+          setStockEdits(
+              data.reduce<Record<string, string>>((acc, product) => {
+                  const value = typeof product.stock_qty === 'number' ? product.stock_qty : 0;
+                  acc[product.id] = String(value);
+                  return acc;
+              }, {})
+          );
+      } catch (error) {
+          console.error('Error loading stock products:', error);
+          showToast('Erro ao carregar estoque.');
+      } finally {
+          setStockLoading(false);
+      }
+  }, [storeId]);
+
+  useEffect(() => {
+      if (activeSection !== 'STOCK') return;
+      loadStockProducts();
+  }, [activeSection, loadStockProducts]);
 
   // --- AUTO ACCEPT LOGIC ---
   useEffect(() => {
@@ -490,6 +758,112 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       hasSyncedDerivedCategoriesRef.current = true;
       persistMenuCategories(derived);
   }, [products, menuCategories.length, storeId]);
+
+  useEffect(() => {
+      const shouldLoad =
+          deliveryFeeMode === 'BY_NEIGHBORHOOD' &&
+          deliveryNeighborhoods.length === 0;
+      if (!shouldLoad) return;
+      importNeighborhoods(false);
+  }, [deliveryFeeMode, deliveryNeighborhoods.length]);
+
+  useEffect(() => {
+      if (deliveryFeeMode !== 'BY_RADIUS') return;
+      if (deliveryZones.length === 0) {
+          setSelectedDeliveryZoneId(null);
+          return;
+      }
+      if (!selectedDeliveryZoneId) {
+          setSelectedDeliveryZoneId(deliveryZones[0].id);
+          return;
+      }
+      if (!deliveryZones.find((zone) => zone.id === selectedDeliveryZoneId)) {
+          setSelectedDeliveryZoneId(deliveryZones[0].id);
+      }
+  }, [deliveryFeeMode, deliveryZones, selectedDeliveryZoneId]);
+
+  useEffect(() => {
+      if (settingsTab !== 'DELIVERY' || deliveryFeeMode !== 'BY_RADIUS') {
+          setDeliveryZoneError(null);
+          return;
+      }
+      let cancelled = false;
+      const initMap = async () => {
+          setDeliveryZoneError(null);
+          const loaded = await ensureGoogleMapsLoaded();
+          if (cancelled) return;
+          if (!loaded) {
+              setDeliveryZoneError('Erro ao carregar o mapa. Verifique a configuração da chave Google Maps.');
+              return;
+          }
+          setDeliveryZoneError(null);
+          if (!deliveryZoneMapContainerRef.current) return;
+          if (!deliveryZoneMapRef.current) {
+              const center = storeProfile.coordinates || { lat: -23.561684, lng: -46.655981 };
+              deliveryZoneMapRef.current = new window.google.maps.Map(
+                  deliveryZoneMapContainerRef.current,
+                  {
+                      center,
+                      zoom: 13,
+                      mapTypeControl: false,
+                      streetViewControl: false,
+                      fullscreenControl: false
+                  }
+              );
+          } else if (storeProfile.coordinates) {
+              deliveryZoneMapRef.current.setCenter(storeProfile.coordinates);
+          }
+      };
+      initMap();
+      return () => {
+          cancelled = true;
+      };
+  }, [settingsTab, deliveryFeeMode, storeProfile.coordinates?.lat, storeProfile.coordinates?.lng]);
+
+  useEffect(() => {
+      if (deliveryFeeMode !== 'BY_RADIUS') return;
+      if (!deliveryZoneMapRef.current || !window.google) return;
+      if (deliveryZoneCircleRef.current) {
+          window.google.maps.event.clearInstanceListeners(deliveryZoneCircleRef.current);
+          deliveryZoneCircleRef.current.setMap(null);
+          deliveryZoneCircleRef.current = null;
+      }
+      if (!selectedDeliveryZone) return;
+      const circle = new window.google.maps.Circle({
+          map: deliveryZoneMapRef.current,
+          center: { lat: selectedDeliveryZone.centerLat, lng: selectedDeliveryZone.centerLng },
+          radius: Number(selectedDeliveryZone.radiusMeters || 0),
+          editable: true,
+          draggable: true,
+          fillColor: '#ef4444',
+          fillOpacity: 0.2,
+          strokeColor: '#ef4444',
+          strokeWeight: 2
+      });
+      deliveryZoneCircleRef.current = circle;
+      deliveryZoneMapRef.current.panTo(circle.getCenter());
+
+      const scheduleSync = () => {
+          if (!selectedDeliveryZoneId || !deliveryZoneCircleRef.current) return;
+          if (deliveryZoneUpdateTimerRef.current) {
+              clearTimeout(deliveryZoneUpdateTimerRef.current);
+          }
+          deliveryZoneUpdateTimerRef.current = setTimeout(() => {
+              const center = deliveryZoneCircleRef.current.getCenter();
+              if (!center) return;
+              const radius = Math.round(deliveryZoneCircleRef.current.getRadius());
+              handleUpdateDeliveryZone(selectedDeliveryZoneId, {
+                  centerLat: center.lat(),
+                  centerLng: center.lng(),
+                  radiusMeters: radius
+              });
+          }, 150);
+      };
+
+      circle.addListener('center_changed', scheduleSync);
+      circle.addListener('radius_changed', scheduleSync);
+      circle.addListener('dragend', scheduleSync);
+  }, [deliveryFeeMode, selectedDeliveryZoneId, selectedDeliveryZone, deliveryZones]);
 
   // --- CALCULATED METRICS ---
   
@@ -557,8 +931,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       }
   };
 
+  const [manualStatusUpdating, setManualStatusUpdating] = useState(false);
+
   const handleToggleOpenStore = async () => {
-      if (!storeId) return;
+      if (!storeId || manualStatusUpdating) return;
+      const availabilitySnapshot = availability;
+      const isManualClosed = availabilitySnapshot?.pause?.active === true;
+      const scheduleOpen = availabilitySnapshot?.scheduleOpen === true;
+      const manualOpenOutsideSchedule =
+          storeProfile.isActive === true && availabilitySnapshot?.scheduleOpen === false && !isManualClosed;
+      const isCurrentlyOpen = (availabilitySnapshot?.isOpen ?? false) || manualOpenOutsideSchedule;
+
       if (storeProfile.autoOpenClose) {
           const confirmed = window.confirm('Auto abertura esta ativa. Deseja desativar e abrir/fechar manualmente?');
           if (!confirmed) return;
@@ -566,23 +949,39 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               await updateStoreAutoOpen(storeId, false);
               setStoreProfile(prev => ({ ...prev, autoOpenClose: false }));
           } catch (e) {
-              alert('Erro ao desativar auto abertura.');
+              showToast('Erro ao desativar auto abertura.');
               return;
           }
       }
-      const newState = !storeProfile.isActive;
-      
-      // Optimistic UI Update
-      setStoreProfile(prev => ({ ...prev, isActive: newState }));
-      
+
+      setManualStatusUpdating(true);
       try {
-          await updateStore(storeId, { isActive: newState });
-          await refreshAvailability();
+          if (isCurrentlyOpen) {
+              const result = await pauseStore(storeId, 720, 'Fechada manualmente pelo lojista');
+              setStoreProfile(prev => ({ ...prev, pause: result.pause, isActive: false }));
+              await refreshAvailability();
+              showToast('Loja fechada com sucesso.', 'success');
+          } else {
+              if (!scheduleOpen) {
+                  const confirmed = window.confirm(
+                      'A loja está fora do horário configurado agora. Deseja abrir manualmente mesmo assim?'
+                  );
+                  if (!confirmed) {
+                      setManualStatusUpdating(false);
+                      return;
+                  }
+              }
+              const result = await resumeStorePause(storeId);
+              setStoreProfile(prev => ({ ...prev, pause: result.pause, isActive: true }));
+              await refreshAvailability();
+              showToast('Loja aberta com sucesso.', 'success');
+          }
       } catch (e) {
           console.error(e);
-          alert("Erro ao atualizar status da loja.");
-          // Revert
-          setStoreProfile(prev => ({ ...prev, isActive: !newState }));
+          showToast('Não foi possível alterar o status da loja. Tente novamente.');
+          await refreshAvailability();
+      } finally {
+          setManualStatusUpdating(false);
       }
   };
 
@@ -656,6 +1055,37 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           alert('Erro ao retomar loja.');
       } finally {
           setPauseUpdating(false);
+      }
+  };
+
+  const handleStockInputChange = (productId: string, value: string) => {
+      setStockEdits((prev) => ({ ...prev, [productId]: value }));
+  };
+
+  const handleSaveStock = async (product: Product) => {
+      if (!storeId) return;
+      const rawValue = stockEdits[product.id];
+      const parsed = Number.parseInt(rawValue, 10);
+      if (!Number.isFinite(parsed)) {
+          showToast('Informe um estoque válido.');
+          return;
+      }
+      setStockSavingIds((prev) => ({ ...prev, [product.id]: true }));
+      try {
+          const updated = await updateProductStock(product.id, parsed, storeId);
+          setStockProducts((prev) =>
+              prev.map((item) => (item.id === product.id ? { ...item, stock_qty: updated.stock_qty } : item))
+          );
+          setStockEdits((prev) => ({ ...prev, [product.id]: String(updated.stock_qty ?? parsed) }));
+          showToast('Estoque atualizado.', 'success');
+      } catch (error) {
+          showToast('Erro ao atualizar estoque.');
+          setStockEdits((prev) => ({
+              ...prev,
+              [product.id]: String(typeof product.stock_qty === 'number' ? product.stock_qty : 0)
+          }));
+      } finally {
+          setStockSavingIds((prev) => ({ ...prev, [product.id]: false }));
       }
   };
 
@@ -939,6 +1369,246 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
 
   const generateId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const updateDeliveryZones = (next: DeliveryZone[]) => {
+      setStoreProfile((prev) => ({ ...prev, deliveryZones: next }));
+  };
+
+  const handleCreateDeliveryZone = () => {
+      const center = storeProfile.coordinates || { lat: -23.561684, lng: -46.655981 };
+      const nextZone: DeliveryZone = {
+          id: generateId(),
+          name: `Area ${deliveryZones.length + 1}`,
+          centerLat: center.lat,
+          centerLng: center.lng,
+          radiusMeters: 2000,
+          fee: 0,
+          etaMinutes: 30,
+          enabled: true,
+          priority: (deliveryZones.length || 0) + 1
+      };
+      const next = [...deliveryZones, nextZone];
+      updateDeliveryZones(next);
+      setSelectedDeliveryZoneId(nextZone.id);
+      setDeliveryZoneNotice('Area criada. Ajuste o raio no mapa.');
+  };
+
+  const handleUpdateDeliveryZone = (zoneId: string, updates: Partial<DeliveryZone>) => {
+      updateDeliveryZones(
+          deliveryZones.map((zone) => (zone.id === zoneId ? { ...zone, ...updates } : zone))
+      );
+  };
+
+  const handleDeleteDeliveryZone = (zoneId: string) => {
+      if (!confirm('Deseja remover esta area de entrega?')) return;
+      const next = deliveryZones.filter((zone) => zone.id !== zoneId);
+      updateDeliveryZones(next);
+      if (selectedDeliveryZoneId === zoneId) {
+          setSelectedDeliveryZoneId(next[0]?.id || null);
+      }
+  };
+
+  const resetTemplateDraft = (template?: OptionGroupTemplate | null) => {
+      if (template) {
+          setTemplateDraft({
+              ...template,
+              options: (template.options || []).map((opt, idx) => ({
+                  ...opt,
+                  order: opt.order ?? idx + 1
+              })),
+              linkedCategoryIds: Array.isArray(template.linkedCategoryIds)
+                  ? [...template.linkedCategoryIds]
+                  : undefined
+          });
+      } else {
+          setTemplateDraft({
+              storeId: storeId || '',
+              name: '',
+              min: 0,
+              max: 1,
+              options: [],
+              isRequired: false,
+              selectionType: 'SINGLE',
+              extraChargeAfter: 0,
+              extraChargeAmount: 0,
+              linkedCategoryIds: undefined
+          });
+      }
+      setTemplateError(null);
+      setTemplateNotice(null);
+  };
+
+  const handleAddTemplateOption = () => {
+      setTemplateDraft((prev) => {
+          const options = [...(prev.options || [])];
+          options.push({
+              id: generateId(),
+              name: '',
+              price: 0,
+              isAvailable: true,
+              order: options.length + 1
+          });
+          return { ...prev, options };
+      });
+  };
+
+  const handleUpdateTemplateOption = (optionId: string, field: keyof ProductOption, value: any) => {
+      setTemplateDraft((prev) => ({
+          ...prev,
+          options: (prev.options || []).map((opt) => (opt.id === optionId ? { ...opt, [field]: value } : opt))
+      }));
+  };
+
+  const handleRemoveTemplateOption = (optionId: string) => {
+      setTemplateDraft((prev) => ({
+          ...prev,
+          options: (prev.options || []).filter((opt) => opt.id !== optionId)
+      }));
+  };
+
+  const handleSaveTemplate = async () => {
+      if (!storeId) return;
+      const name = (templateDraft.name || '').trim();
+      if (!name) {
+          setTemplateError('Informe o nome do grupo.');
+          return;
+      }
+      const min = Number(templateDraft.min ?? 0);
+      const max = Number(templateDraft.max ?? 0);
+      if (Number.isNaN(min) || Number.isNaN(max) || min > max) {
+          setTemplateError('Minimo nao pode ser maior que o maximo.');
+          return;
+      }
+      const rawLinkedCategories = Array.isArray(templateDraft.linkedCategoryIds)
+          ? templateDraft.linkedCategoryIds
+                .map((value) => value.trim())
+                .filter(Boolean)
+          : [];
+      const allowedCategories = new Set(menuCategories.map(normalizeCategoryValue));
+      const linkedCategoryIds = rawLinkedCategories.filter((value, index, self) => {
+          if (self.findIndex((item) => normalizeCategoryValue(item) === normalizeCategoryValue(value)) !== index) {
+              return false;
+          }
+          if (allowedCategories.size > 0 && !allowedCategories.has(normalizeCategoryValue(value))) {
+              return false;
+          }
+          return true;
+      });
+      const payloadBase = {
+          storeId,
+          name,
+          min,
+          max,
+          options: (templateDraft.options || []).map((opt, idx) => ({
+              ...opt,
+              order: opt.order ?? idx + 1
+          })),
+          isRequired: templateDraft.isRequired ?? false,
+          selectionType: templateDraft.selectionType || (max === 1 ? 'SINGLE' : 'MULTIPLE'),
+          extraChargeAfter: Number(templateDraft.extraChargeAfter || 0),
+          extraChargeAmount: Number(templateDraft.extraChargeAmount || 0),
+          ...(linkedCategoryIds.length > 0 ? { linkedCategoryIds } : {})
+      };
+      const payload = templateDraft.id ? { ...payloadBase, id: templateDraft.id } : payloadBase;
+      try {
+          const saved = await saveOptionGroupTemplate(payload as OptionGroupTemplate & { id?: string });
+          setOptionGroupTemplates((prev) => {
+              const exists = prev.find((item) => item.id === saved.id);
+              if (exists) {
+                  return prev.map((item) => (item.id === saved.id ? saved : item));
+              }
+              return [...prev, saved];
+          });
+          setTemplateNotice('Template salvo');
+          setTemplateDraft({});
+      } catch (error) {
+          console.error(error);
+          setTemplateError('Falha ao salvar template.');
+      }
+  };
+
+  const handleEditTemplate = (template: OptionGroupTemplate) => {
+      resetTemplateDraft(template);
+  };
+
+  const handleDuplicateTemplate = async (template: OptionGroupTemplate) => {
+      if (!storeId) return;
+      const payload = {
+          ...template,
+          id: undefined,
+          storeId,
+          name: `${template.name} (copia)`
+      };
+      try {
+          const saved = await saveOptionGroupTemplate(payload as OptionGroupTemplate & { id?: string });
+          setOptionGroupTemplates((prev) => [...prev, saved]);
+          setTemplateNotice('Template duplicado');
+      } catch (error) {
+          console.error(error);
+          setTemplateError('Falha ao duplicar template.');
+      }
+  };
+
+  const handleDeleteTemplate = async (templateId: string) => {
+      if (!confirm('Deseja excluir este template?')) return;
+      try {
+          await deleteOptionGroupTemplate(templateId);
+          setOptionGroupTemplates((prev) => prev.filter((item) => item.id !== templateId));
+      } catch (error) {
+          console.error(error);
+          setTemplateError('Falha ao excluir template.');
+      }
+  };
+
+  const handleApplySelectedTemplates = () => {
+      const templates = optionGroupTemplates
+          .filter((template) => selectedTemplateIds.includes(template.id))
+          .filter((template) => !isTemplateApplied(template));
+      if (templates.length === 0) {
+          setSelectedTemplateIds([]);
+          setTemplateNotice('Templates já aplicados');
+          return;
+      }
+      const existingGroups = newProduct.optionGroups || [];
+      const nextGroups = [...existingGroups];
+      const baseOrder = nextGroups.length;
+      templates.forEach((template, index) => {
+          const baseName = template.name || 'Grupo';
+          let finalName = baseName;
+          let suffix = 1;
+          while (nextGroups.some((group) => (group.name || '').toLowerCase() === finalName.toLowerCase())) {
+              suffix += 1;
+              finalName = `${baseName} (${suffix})`;
+          }
+          const options = (template.options || []).map((opt, optIndex) => ({
+              ...opt,
+              id: generateId(),
+              order: opt.order ?? optIndex + 1
+          }));
+          nextGroups.push({
+              id: generateId(),
+              templateId: template.id,
+              name: finalName,
+              min: template.min ?? 0,
+              max: template.max ?? 1,
+              options,
+              isRequired: template.isRequired,
+              selectionType: template.selectionType || (template.max === 1 ? 'SINGLE' : 'MULTIPLE'),
+              order: baseOrder + index + 1,
+              extraChargeAfter: template.extraChargeAfter ?? 0,
+              extraChargeAmount: template.extraChargeAmount ?? 0
+          });
+      });
+      setNewProduct((prev) => ({ ...prev, optionGroups: nextGroups }));
+      setSelectedTemplateIds([]);
+      setTemplateNotice('Complementos adicionados ao produto');
+  };
+
+  const handleToggleTemplateSelection = (templateId: string, checked: boolean) => {
+      setSelectedTemplateIds((prev) =>
+          checked ? [...prev, templateId] : prev.filter((id) => id !== templateId)
+      );
+  };
 
   const handleAddBuildableGroup = () => {
       const newGroup: ProductOptionGroup = {
@@ -1424,9 +2094,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const handlePrintOrder = async (orderId: string) => {
       try {
           await printOrder(orderId);
-          alert('Pedido enviado para impressao.');
+          showToast('Pedido enviado para impressão.', 'success');
       } catch (e) {
-          alert('Erro ao enviar para impressao.');
+          showToast('Erro ao enviar para impressão.');
       }
   };
 
@@ -1491,9 +2161,137 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const query = `${addressForm.street}, ${addressForm.number} - ${addressForm.district}, ${addressForm.city}`;
       try { const results = await searchAddress(query); if (results && results.length > 0) { setStoreProfile(prev => ({ ...prev, coordinates: results[0].coordinates })); alert("Localização atualizada com sucesso no mapa!"); } else { alert("Endereço não encontrado."); } } catch (e) { alert("Erro ao buscar localização."); }
   };
+
+  const updateDeliveryNeighborhoods = (next: DeliveryNeighborhood[]) => {
+      setStoreProfile((prev) => ({ ...prev, deliveryNeighborhoods: next, neighborhoodFees: next }));
+  };
+
+  const handleToggleNeighborhood = (index: number, active: boolean) => {
+      const next = deliveryNeighborhoods.map((item, idx) =>
+          idx === index ? { ...item, active } : item
+      );
+      updateDeliveryNeighborhoods(next);
+  };
+
+  const handleNeighborhoodFeeChange = (index: number, value: string) => {
+      const fee = value === '' ? 0 : Number(value);
+      const next = deliveryNeighborhoods.map((item, idx) =>
+          idx === index ? { ...item, fee: Number.isFinite(fee) ? fee : 0 } : item
+      );
+      updateDeliveryNeighborhoods(next);
+  };
+
+  const handleMarkAllNeighborhoods = (active: boolean) => {
+      updateDeliveryNeighborhoods(deliveryNeighborhoods.map((item) => ({ ...item, active })));
+  };
+
+  const handleAddManualNeighborhood = () => {
+      const name = manualNeighborhoodName.trim();
+      if (!name) return;
+      const fee = Number(manualNeighborhoodFee || 0);
+      const normalized = name.toLowerCase();
+      if (deliveryNeighborhoods.some((item) => (item.name || '').toLowerCase() === normalized)) {
+          alert('Este bairro já existe.');
+          return;
+      }
+      const next = [
+          ...deliveryNeighborhoods,
+          {
+              name,
+              active: true,
+              fee: Number.isFinite(fee) ? fee : 0
+          }
+      ];
+      updateDeliveryNeighborhoods(next);
+      setManualNeighborhoodName('');
+      setManualNeighborhoodFee('');
+  };
+
+  const importNeighborhoods = async (force = false) => {
+      if (!storeId) return;
+      if (!force && deliveryNeighborhoods.length > 0) return;
+      if (!storeProfile.city) {
+          setDeliveryNeighborhoodError('Informe a cidade da loja para buscar bairros.');
+          return;
+      }
+      setDeliveryNeighborhoodLoading(true);
+      setDeliveryNeighborhoodError(null);
+      setDeliveryNeighborhoodInfo(null);
+      try {
+          const result = await importNeighborhoodsForStore(storeId, {
+              city: storeProfile.city || '',
+              state: storeProfile.state
+          });
+          const neighborhoods = Array.isArray(result.neighborhoods) ? result.neighborhoods : [];
+          if (!neighborhoods || neighborhoods.length === 0) {
+              setDeliveryNeighborhoodError('Nenhum bairro encontrado. Adicione manualmente.');
+              return;
+          }
+          if (result.meta?.partial) {
+              setDeliveryNeighborhoodError('Importação parcial por limite do Google. Você pode continuar manualmente.');
+          }
+          if (force) {
+              if (result.addedCount > 0) {
+                  setDeliveryNeighborhoodInfo(`+${result.addedCount} bairros adicionados (Total: ${result.totalCount}).`);
+              } else {
+                  setDeliveryNeighborhoodError('Nenhum bairro novo encontrado nesta rodada. Tente novamente ou adicione manualmente.');
+              }
+          }
+          setStoreProfile((prev) => ({
+              ...prev,
+              deliveryNeighborhoods: neighborhoods,
+              neighborhoodFees: neighborhoods,
+              neighborhoodFeesImportedAt: result.neighborhoodFeesImportedAt || prev.neighborhoodFeesImportedAt,
+              neighborhoodFeesSource: result.neighborhoodFeesSource || prev.neighborhoodFeesSource,
+              neighborhoodImportState: result.neighborhoodImportState || prev.neighborhoodImportState
+          }));
+      } catch (error: any) {
+          if (error?.code === 'google_api_error') {
+              setDeliveryNeighborhoodError('Google API bloqueou a consulta (verifique billing/restrições).');
+          } else {
+              setDeliveryNeighborhoodError('Erro ao buscar bairros. Adicione manualmente.');
+          }
+      } finally {
+          setDeliveryNeighborhoodLoading(false);
+      }
+  };
   const handleSaveStoreSettings = async () => {
       if (!storeId || !storeProfile) return;
       try {
+          if (storeProfile.deliveryFeeMode === 'BY_NEIGHBORHOOD') {
+              const list = Array.isArray(storeProfile.neighborhoodFees)
+                  ? storeProfile.neighborhoodFees
+                  : Array.isArray(storeProfile.deliveryNeighborhoods)
+                  ? storeProfile.deliveryNeighborhoods
+                  : [];
+              if (list.length === 0) {
+                  alert('Importe ou cadastre bairros antes de salvar.');
+                  return;
+              }
+          }
+          if (storeProfile.deliveryFeeMode === 'BY_RADIUS') {
+              const zones = Array.isArray(storeProfile.deliveryZones) ? storeProfile.deliveryZones : [];
+              const enabledZones = zones.filter((zone) => zone.enabled !== false);
+              if (zones.length === 0) {
+                  alert('Crie ao menos uma área de entrega.');
+                  return;
+              }
+              if (enabledZones.length === 0) {
+                  alert('Ative ao menos uma área de entrega.');
+                  return;
+              }
+              const invalidZone = enabledZones.find(
+                  (zone) =>
+                      !zone.name ||
+                      Number(zone.radiusMeters || 0) <= 0 ||
+                      !Number.isFinite(Number(zone.centerLat)) ||
+                      !Number.isFinite(Number(zone.centerLng))
+              );
+              if (invalidZone) {
+                  alert('Verifique os dados das áreas (nome, raio e centro).');
+                  return;
+              }
+          }
           const {
               schedule,
               autoOpenClose,
@@ -1512,6 +2310,38 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           alert("Configurações salvas com sucesso!");
       } catch (e) {
           alert("Erro ao salvar configurações.");
+      }
+  };
+
+  const handleSavePixRepasse = async () => {
+      if (!storeId) return;
+      setPixRepasseError(null);
+      setPixRepasseNotice(null);
+      if (pixRepasseConfig.pix_enabled) {
+          if (!pixRepasseConfig.pix_hash_recebedor_01.trim() || !pixRepasseConfig.pix_hash_recebedor_02.trim()) {
+              setPixRepasseError('Informe os dois hashes para habilitar o PIX.');
+              return;
+          }
+      }
+      setPixRepasseLoading(true);
+      try {
+          const response = await updatePixRepasseConfig({
+              storeId,
+              pix_enabled: pixRepasseConfig.pix_enabled,
+              pix_hash_recebedor_01: pixRepasseConfig.pix_hash_recebedor_01,
+              pix_hash_recebedor_02: pixRepasseConfig.pix_hash_recebedor_02
+          });
+          setPixRepasseConfig({
+              pix_enabled: !!response.pix_enabled,
+              pix_hash_recebedor_01: response.pix_hash_recebedor_01 || '',
+              pix_hash_recebedor_02: response.pix_hash_recebedor_02 || '',
+              pix_identificacao_pdv: response.pix_identificacao_pdv || ''
+          });
+          setPixRepasseNotice('PIX Repasse atualizado.');
+      } catch (error) {
+          setPixRepasseError('Não foi possível salvar o PIX.');
+      } finally {
+          setPixRepasseLoading(false);
       }
   };
 
@@ -1584,6 +2414,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const path = slug ? `/${slug}` : '/';
       return `${base}${path}?mesa=${tableNumber}`;
   };
+  const getMenuQrUrl = () => {
+      const slug = getStoreSlug();
+      const base = window.location.origin;
+      return slug ? `${base}/${slug}` : base;
+  };
   const downloadDataUrl = (dataUrl: string, filename: string) => {
       const link = document.createElement('a');
       link.href = dataUrl;
@@ -1623,6 +2458,42 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
       return finalCanvas.toDataURL('image/png');
   };
+
+  const buildMenuQrDataUrl = async () => {
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, getMenuQrUrl(), { width: 512, margin: 2 });
+      return qrCanvas.toDataURL('image/png');
+  };
+
+  const handleDownloadMenuQr = () => {
+      if (!menuQrDataUrl) return;
+      const safeName = (storeProfile.name || 'loja').toString().toLowerCase().replace(/\s+/g, '-');
+      downloadDataUrl(menuQrDataUrl, `menufaz-cardapio-${safeName}.png`);
+  };
+
+  const handleCopyMenuUrl = async () => {
+      try {
+          await navigator.clipboard.writeText(getMenuQrUrl());
+          alert('Link copiado.');
+      } catch {
+          alert('Nao foi possivel copiar o link.');
+      }
+  };
+
+  useEffect(() => {
+      let active = true;
+      const loadQr = async () => {
+          if (!storeProfile.name && !storeId) return;
+          try {
+              const dataUrl = await buildMenuQrDataUrl();
+              if (active) setMenuQrDataUrl(dataUrl);
+          } catch {}
+      };
+      loadQr();
+      return () => {
+          active = false;
+      };
+  }, [storeProfile.name, storeProfile.customUrl, storeProfile.id, storeId]);
   const handleDownloadTableQr = async (tableNumber: number) => {
       try {
           setDownloadingTable(tableNumber);
@@ -1878,8 +2749,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                       </p>
                                                   )}
                                               </div>
-                                              <span className={`text-xs font-bold px-2 py-1 rounded-full ${order.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' : order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                                                  {order.status === 'PENDING' ? 'Novo' : order.status}
+                                              <span className={`text-xs font-bold px-2 py-1 rounded-full ${order.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' : order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : order.status === 'CANCELLED' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                                                  {ORDER_STATUS_LABELS[order.status] || order.status}
                                               </span>
                                           </div>
                                       ))
@@ -1895,24 +2766,48 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
 
   const renderOrders = () => {
-      const getStatusIndex = (status?: string) => {
-          if (!status) return -1;
-          return ORDER_STATUS_SEQUENCE.indexOf(status as Order['status']);
+      const resolveOrderType = (order: Order) => {
+          if (order.type) return order.type;
+          if (order.pickup || order.isPickup) return 'PICKUP';
+          if (order.tableNumber || order.tableSessionId) return 'TABLE';
+          return 'DELIVERY';
       };
-      const isBackwardStatus = (current: Order['status'], next: Order['status']) => {
+      const getStatusFlow = (order: Order) =>
+          ORDER_STATUS_FLOW_BY_TYPE[resolveOrderType(order)] || ORDER_STATUS_FLOW_BY_TYPE.DEFAULT;
+      const getStatusIndex = (order: Order, status?: string) => {
+          if (!status) return -1;
+          return getStatusFlow(order).indexOf(status as Order['status']);
+      };
+      const isBackwardStatus = (order: Order, next: Order['status']) => {
+          const current = order.status;
           if (!current || !next || current === next) return false;
           if (current === 'COMPLETED' || current === 'CANCELLED') return true;
           if (next === 'CANCELLED') return false;
-          const currentIndex = getStatusIndex(current);
-          const nextIndex = getStatusIndex(next);
+          const currentIndex = getStatusIndex(order, current);
+          const nextIndex = getStatusIndex(order, next);
           if (currentIndex === -1 || nextIndex === -1) return false;
           return nextIndex < currentIndex;
       };
+      const isStatusAllowed = (order: Order, status: Order['status']) =>
+          getStatusFlow(order).includes(status);
+      const getNextStatus = (order: Order) => {
+          const flow = getStatusFlow(order);
+          const currentIndex = flow.indexOf(order.status);
+          if (currentIndex === -1) return null;
+          const nextIndex = currentIndex + 1;
+          const next = flow[nextIndex];
+          if (!next || next === 'CANCELLED') return null;
+          return next;
+      };
       const columns = [
           { id: 'PENDING', label: 'Novos', color: 'bg-yellow-500' },
+          { id: 'CONFIRMED', label: 'Confirmados', color: 'bg-slate-500' },
           { id: 'PREPARING', label: 'Em Preparo', color: 'bg-blue-500' },
+          { id: 'READY_FOR_PICKUP', label: 'Pronto p/ Retirada', color: 'bg-indigo-500' },
+          { id: 'READY', label: 'Pronto', color: 'bg-teal-500' },
           { id: 'WAITING_COURIER', label: 'Aguardando Motoboy', color: 'bg-purple-500' },
           { id: 'DELIVERING', label: 'Saiu para Entrega', color: 'bg-orange-500' },
+          { id: 'SERVED', label: 'Entregue na Mesa', color: 'bg-emerald-600' },
           { id: 'COMPLETED', label: 'Concluídos', color: 'bg-green-500' },
           { id: 'CANCELLED', label: 'Cancelados', color: 'bg-red-500' }
       ];
@@ -1958,7 +2853,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           if (!id) return;
           const current = orders.find((order) => order.id === id);
           if (!current || current.status === columnId) return;
-          if (isBackwardStatus(current.status, columnId as Order['status'])) {
+          if (!isStatusAllowed(current, columnId as Order['status'])) {
+              showToast('Status inválido para este tipo de pedido.');
+              return;
+          }
+          if (isBackwardStatus(current, columnId as Order['status'])) {
               showToast('Não é possível voltar o status do pedido. Para manter histórico e consistência, o status só pode avançar.');
               return;
           }
@@ -2143,6 +3042,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                       {order.paymentMethod}
                                                   </span>
                                               )}
+                                              {order.paymentStatus === 'PAID' && (
+                                                  <span className="px-2 py-0.5 rounded-full bg-emerald-100/70 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-200 font-semibold">
+                                                      PAGO
+                                                  </span>
+                                              )}
                                               {order.type === 'DELIVERY' && (
                                                   <span className="px-2 py-0.5 rounded-full bg-emerald-100/70 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-200 font-semibold">
                                                       Entrega {formatCurrencyBRL(order.deliveryFee || 0)}
@@ -2188,6 +3092,51 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                   )}
                                               </div>
                                               <div className="flex flex-col items-end gap-2">
+                                                  {(() => {
+                                                      const orderType = resolveOrderType(order);
+                                                      const nextStatus = getNextStatus(order);
+                                                      const advanceLabel = (() => {
+                                                          if (!nextStatus) return '';
+                                                          if (nextStatus === 'CONFIRMED') return 'Confirmar';
+                                                          if (nextStatus === 'PREPARING') return 'Iniciar preparo';
+                                                          if (nextStatus === 'READY_FOR_PICKUP') return 'Pronto p/ Retirada';
+                                                          if (nextStatus === 'READY') return 'Pronto';
+                                                          if (nextStatus === 'SERVED') return 'Entregue na Mesa';
+                                                          if (nextStatus === 'WAITING_COURIER') return 'Chamar Motoboy';
+                                                          if (nextStatus === 'DELIVERING') return 'Saiu para Entrega';
+                                                          if (nextStatus === 'COMPLETED') {
+                                                              return orderType === 'PICKUP' ? 'Confirmar Retirada' : 'Concluir';
+                                                          }
+                                                          return 'Avançar';
+                                                      })();
+
+                                                      if (!nextStatus || !advanceLabel) return null;
+                                                      return (
+                                                          <button
+                                                              onClick={(event) => {
+                                                                  event.stopPropagation();
+                                                                  if (orderType === 'TABLE' && nextStatus === 'COMPLETED') {
+                                                                      setPaymentOrderTarget(order);
+                                                                      setPaymentOrderMethod('');
+                                                                      return;
+                                                                  }
+                                                                  handleUpdateStatus(order.id, nextStatus);
+                                                              }}
+                                                              className="px-3 py-1.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap"
+                                                          >
+                                                              {advanceLabel}
+                                                          </button>
+                                                      );
+                                                  })()}
+                                                  <button
+                                                      onClick={(event) => {
+                                                          event.stopPropagation();
+                                                          handlePrintOrder(order.id);
+                                                      }}
+                                                      className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 text-xs font-bold rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
+                                                  >
+                                                      Imprimir
+                                                  </button>
                                                   {order.status !== 'COMPLETED' && order.status !== 'CANCELLED' && (
                                                       <button
                                                           onClick={(event) => {
@@ -2201,50 +3150,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                           Cancelar
                                                       </button>
                                                   )}
-                                                  {col.id !== 'COMPLETED' && col.id !== 'DELIVERING' && col.id !== 'WAITING_COURIER' && col.id !== 'CANCELLED' && (
-                                                      <button 
-                                                        onClick={(event) => {
-                                                            event.stopPropagation();
-                                                            handleUpdateStatus(
-                                                                order.id,
-                                                                col.id === 'PENDING'
-                                                                    ? 'PREPARING'
-                                                                    : order.type === 'TABLE'
-                                                                    ? 'DELIVERING'
-                                                                    : order.type === 'PICKUP'
-                                                                    ? 'DELIVERING'
-                                                                    : 'WAITING_COURIER'
-                                                            );
-                                                        }}
-                                                        className="px-3 py-1.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap"
-                                                      >
-                                                          {col.id === 'PENDING'
-                                                              ? 'Aceitar'
-                                                              : order.type === 'TABLE'
-                                                              ? 'Saiu para entrega'
-                                                              : order.type === 'PICKUP'
-                                                              ? 'Pronto p/ Retirada'
-                                                              : 'Chamar Motoboy'}
-                                                      </button>
-                                                  )}
                                                   {col.id === 'WAITING_COURIER' && (
                                                       <span className="text-xs font-bold text-purple-600 animate-pulse">Aguardando...</span>
-                                                  )}
-                                                  {col.id === 'DELIVERING' && (
-                                                      <button
-                                                          onClick={(event) => {
-                                                              event.stopPropagation();
-                                                              if (order.type === 'TABLE') {
-                                                                  setPaymentOrderTarget(order);
-                                                                  setPaymentOrderMethod('');
-                                                                  return;
-                                                              }
-                                                              handleUpdateStatus(order.id, 'COMPLETED');
-                                                          }}
-                                                          className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700"
-                                                      >
-                                                          {order.type === 'PICKUP' ? 'Confirmar Retirada' : 'Concluir'}
-                                                      </button>
                                                   )}
                                               </div>
                                           </div>
@@ -2274,7 +3181,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                                   <div>
                                       <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
-                                      <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.status}</p>
+                                      <p className="font-semibold text-slate-800 dark:text-white">
+                                          {ORDER_STATUS_LABELS[selectedOrderDetails.status] || selectedOrderDetails.status}
+                                      </p>
                                   </div>
                                   <div>
                                       <p className="text-xs font-bold text-slate-400 uppercase">Horario</p>
@@ -2288,6 +3197,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   <div>
                                       <p className="text-xs font-bold text-slate-400 uppercase">Pagamento</p>
                                       <p className="font-semibold text-slate-800 dark:text-white">{selectedOrderDetails.paymentMethod || 'Nao informado'}</p>
+                                      {selectedOrderDetails.paymentStatus === 'PAID' && (
+                                          <p className="text-xs font-bold text-emerald-600 mt-1">
+                                              {selectedOrderDetails.paymentProvider === 'PIX_REPASSE' ? 'Pago via PIX' : 'PAGO'}
+                                          </p>
+                                      )}
                                   </div>
                                   <div>
                                       <p className="text-xs font-bold text-slate-400 uppercase">Tipo</p>
@@ -2364,17 +3278,49 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       Cancelar
                                   </button>
                               )}
-                              {selectedOrderDetails.status === 'PENDING' && (
-                                  <button
-                                      onClick={() => {
-                                          handleUpdateStatus(selectedOrderDetails.id, 'PREPARING');
-                                          setSelectedOrderDetails(null);
-                                      }}
-                                      className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold hover:opacity-90"
-                                  >
-                                      Aceitar
-                                  </button>
-                              )}
+                              {(() => {
+                                  const nextStatus = getNextStatus(selectedOrderDetails);
+                                  const orderType = resolveOrderType(selectedOrderDetails);
+                                  if (!nextStatus || ['COMPLETED', 'CANCELLED'].includes(selectedOrderDetails.status)) {
+                                      return null;
+                                  }
+                                  const label =
+                                      nextStatus === 'CONFIRMED'
+                                          ? 'Confirmar'
+                                          : nextStatus === 'PREPARING'
+                                          ? 'Iniciar preparo'
+                                          : nextStatus === 'READY_FOR_PICKUP'
+                                          ? 'Pronto p/ Retirada'
+                                          : nextStatus === 'READY'
+                                          ? 'Pronto'
+                                          : nextStatus === 'SERVED'
+                                          ? 'Entregue na mesa'
+                                          : nextStatus === 'WAITING_COURIER'
+                                          ? 'Chamar Motoboy'
+                                          : nextStatus === 'DELIVERING'
+                                          ? 'Saiu para Entrega'
+                                          : nextStatus === 'COMPLETED'
+                                          ? orderType === 'PICKUP'
+                                              ? 'Confirmar Retirada'
+                                              : 'Concluir'
+                                          : 'Avançar';
+                                  return (
+                                      <button
+                                          onClick={() => {
+                                              if (orderType === 'TABLE' && nextStatus === 'COMPLETED') {
+                                                  setPaymentOrderTarget(selectedOrderDetails);
+                                                  setPaymentOrderMethod('');
+                                                  return;
+                                              }
+                                              handleUpdateStatus(selectedOrderDetails.id, nextStatus);
+                                              setSelectedOrderDetails(null);
+                                          }}
+                                          className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold hover:opacity-90"
+                                      >
+                                          {label}
+                                      </button>
+                                  );
+                              })()}
                           </div>
                       </div>
                   </div>
@@ -2656,7 +3602,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       </div>
                                       <div className="flex items-center justify-between mt-2">
                                           <p className="text-sm font-bold text-slate-800 dark:text-white">{order.customerName}</p>
-                                          <span className="text-xs font-bold text-slate-400 uppercase">{order.status}</span>
+                                          <span className="text-xs font-bold text-slate-400 uppercase">
+                                              {ORDER_STATUS_LABELS[order.status] || order.status}
+                                          </span>
                                       </div>
                                       <div className="mt-3 space-y-1 text-xs text-slate-600 dark:text-slate-300">
                                           {order.items.map((item, idx) => (
@@ -2757,6 +3705,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           .filter(Boolean)
   );
 
+  const categorySensors = useSensors(
+      useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
+  );
+
   const persistMenuCategories = async (next: string[]) => {
       if (!storeId) return;
       setIsSavingCategories(true);
@@ -2772,6 +3724,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       }
   };
 
+  useEffect(() => {
+      if (!categoryOrderDirty) return;
+      const timer = setTimeout(async () => {
+          await persistMenuCategories(menuCategories);
+          setCategoryOrderDirty(false);
+          setCategoryOrderNotice('Ordem atualizada');
+          setTimeout(() => setCategoryOrderNotice(null), 2000);
+      }, 500);
+      return () => clearTimeout(timer);
+  }, [categoryOrderDirty, menuCategories]);
+
   const handleAddMenuCategory = async () => {
       const normalized = normalizeCategoryName(newCategoryName);
       if (!normalized) return;
@@ -2786,9 +3749,135 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       setNewCategoryName('');
   };
 
+  const handleStartEditCategory = (category: string) => {
+      setEditingCategory(category);
+      setEditingCategoryName(category);
+  };
+
+  const handleCancelEditCategory = () => {
+      setEditingCategory(null);
+      setEditingCategoryName('');
+  };
+
+  const handleRenameMenuCategory = async (previousName: string, nextName: string) => {
+      if (!storeId) return;
+      const normalized = normalizeCategoryName(nextName);
+      if (!normalized) {
+          showToast('Informe um nome de categoria válido.');
+          return;
+      }
+      const duplicate = menuCategories.some(
+          (value) =>
+              normalizeCategoryValue(value) === normalizeCategoryValue(normalized) &&
+              normalizeCategoryValue(value) !== normalizeCategoryValue(previousName)
+      );
+      if (duplicate) {
+          showToast('Já existe uma categoria com esse nome.');
+          return;
+      }
+
+      const nextCategories = menuCategories.map((value) =>
+          value === previousName ? normalized : value
+      );
+      setMenuCategories(nextCategories);
+      setStoreProfile((prev) => ({ ...prev, menuCategories: nextCategories }));
+      setEditingCategory(null);
+      setEditingCategoryName('');
+
+      const affectedProducts = products.filter(
+          (product) => normalizeCategoryValue(product.category || '') === normalizeCategoryValue(previousName)
+      );
+      if (affectedProducts.length > 0) {
+          setProducts((prev) =>
+              prev.map((product) =>
+                  normalizeCategoryValue(product.category || '') === normalizeCategoryValue(previousName)
+                      ? { ...product, category: normalized }
+                      : product
+              )
+          );
+      }
+      if (normalizeCategoryValue(newProduct.category || '') === normalizeCategoryValue(previousName)) {
+          setNewProduct((prev) => ({ ...prev, category: normalized }));
+      }
+      if (normalizeCategoryValue(buildableProduct.category || '') === normalizeCategoryValue(previousName)) {
+          setBuildableProduct((prev) => ({ ...prev, category: normalized }));
+      }
+
+      const updatedTemplates = optionGroupTemplates.map((template) => {
+          if (!Array.isArray(template.linkedCategoryIds) || template.linkedCategoryIds.length === 0) {
+              return template;
+          }
+          const nextLinked = template.linkedCategoryIds.map((value) =>
+              normalizeCategoryValue(value) === normalizeCategoryValue(previousName) ? normalized : value
+          );
+          if (nextLinked.join('|') === template.linkedCategoryIds.join('|')) return template;
+          return { ...template, linkedCategoryIds: nextLinked };
+      });
+      setOptionGroupTemplates(updatedTemplates);
+      const changedTemplates = updatedTemplates.filter(
+          (template, index) => template !== optionGroupTemplates[index]
+      );
+
+      try {
+          await updateStore(storeId, { menuCategories: nextCategories });
+          if (affectedProducts.length > 0) {
+              await Promise.all(
+                  affectedProducts.map((product) =>
+                      saveProduct({ ...product, category: normalized })
+                  )
+              );
+          }
+          if (changedTemplates.length > 0) {
+              await Promise.all(changedTemplates.map((template) => saveOptionGroupTemplate(template)));
+          }
+          showToast('Categoria atualizada com sucesso.', 'success');
+      } catch (error) {
+          showToast('Erro ao atualizar categoria.');
+      }
+  };
+
   const handleRemoveMenuCategory = async (category: string) => {
       const next = menuCategories.filter((value) => value !== category);
+      if (editingCategory === category) {
+          setEditingCategory(null);
+          setEditingCategoryName('');
+      }
       await persistMenuCategories(next);
+  };
+
+  const handleToggleProductAvailability = async (product: Product) => {
+      const nextAvailable = !(product.isAvailable ?? true);
+      setProducts((prev) =>
+          prev.map((item) =>
+              item.id === product.id ? { ...item, isAvailable: nextAvailable } : item
+          )
+      );
+      try {
+          const savedProduct = await saveProduct({ ...product, isAvailable: nextAvailable });
+          setProducts((prev) =>
+              prev.map((item) => (item.id === savedProduct.id ? savedProduct : item))
+          );
+      } catch (error) {
+          setProducts((prev) =>
+              prev.map((item) =>
+                  item.id === product.id ? { ...item, isAvailable: product.isAvailable } : item
+              )
+          );
+          showToast('Erro ao atualizar disponibilidade do produto.');
+      }
+  };
+
+  const handleCategoryDragEnd = (event: any) => {
+      const { active, over } = event || {};
+      if (!active || !over || active.id === over.id) return;
+      setMenuCategories((prev) => {
+          const oldIndex = prev.findIndex((item) => item === active.id);
+          const newIndex = prev.findIndex((item) => item === over.id);
+          if (oldIndex < 0 || newIndex < 0) return prev;
+          return arrayMove(prev, oldIndex, newIndex);
+      });
+      setCategoryOrderNotice(null);
+      setCategoryOrderDirty(true);
   };
 
   const renderMenu = () => {
@@ -2813,7 +3902,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                          <button onClick={() => { setNewProduct({ isAvailable: true }); setShowProductModal(true); }} className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                          <button onClick={() => { setNewProduct({ isAvailable: true }); setSelectedTemplateIds([]); setTemplateNotice(null); setShowProductModal(true); }} className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
                               <Plus size={18} /> Novo item
                           </button>
                           <button
@@ -2821,6 +3910,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
                           >
                               <Tag size={18} /> Categorias
+                          </button>
+                          <button
+                              onClick={() => {
+                                  resetTemplateDraft(null);
+                                  setShowOptionGroupTemplateModal(true);
+                              }}
+                              className="bg-white dark:bg-slate-800 text-slate-600 dark:text-white border border-slate-200 dark:border-slate-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                          >
+                              <Layers size={18} /> Complementos prontos
                           </button>
                           <button onClick={() => { setNewFlavor({ pricesBySize: normalizeFlavorPrices() }); setShowFlavorModal(true); }} className="bg-orange-500 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors shadow-lg shadow-orange-500/20">
                               <Database size={18} /> Sabores de pizza
@@ -2864,7 +3962,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               <div className="flex justify-between items-start">
                                   <h4 className="font-bold text-slate-800 dark:text-white line-clamp-1 text-base">{product.name}</h4>
                                   <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button onClick={() => { setNewProduct(normalizePizzaProduct(product)); setShowProductModal(true); }} className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"><Edit size={16} /></button>
+                                  <button onClick={() => { setNewProduct(normalizePizzaProduct(product)); setSelectedTemplateIds([]); setTemplateNotice(null); setShowProductModal(true); }} className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"><Edit size={16} /></button>
                                       <button onClick={() => handleDeleteProduct(product.id)} className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"><Trash size={16} /></button>
                                   </div>
                               </div>
@@ -2881,13 +3979,105 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       )}
                                   </div>
                                   <label className="flex items-center cursor-pointer" title={product.isAvailable ? 'Disponível' : 'Indisponível'}>
-                                      <input type="checkbox" checked={product.isAvailable} onChange={() => saveProduct({...product, isAvailable: !product.isAvailable})} className="sr-only peer" />
-                                      <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-600"></div>
+                                      <input
+                                          type="checkbox"
+                                          checked={product.isAvailable}
+                                          onChange={() => handleToggleProductAvailability(product)}
+                                          className="sr-only peer"
+                                      />
+                                      <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500 dark:peer-checked:bg-emerald-500"></div>
                                   </label>
                               </div>
                           </div>
                       </div>
                   ))}
+              </div>
+          </div>
+      );
+  };
+
+  const renderStock = () => {
+      const filtered = stockProducts.filter((product) =>
+          (product.name || '').toLowerCase().includes(stockSearch.trim().toLowerCase())
+      );
+      return (
+          <div className="space-y-6">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                  <div>
+                      <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white">Estoque</h2>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                          Controle as quantidades disponíveis por produto.
+                      </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                      <div className="relative">
+                          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                          <input
+                              type="text"
+                              value={stockSearch}
+                              onChange={(e) => setStockSearch(e.target.value)}
+                              placeholder="Buscar produto"
+                              className="pl-9 pr-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200"
+                          />
+                      </div>
+                  </div>
+              </div>
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                  {stockLoading ? (
+                      <div className="p-6 text-sm text-gray-500">Carregando estoque...</div>
+                  ) : filtered.length === 0 ? (
+                      <div className="p-6 text-sm text-gray-500">Nenhum produto encontrado.</div>
+                  ) : (
+                      <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                              <thead className="bg-slate-50 dark:bg-slate-800 text-left">
+                                  <tr>
+                                      <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Produto</th>
+                                      <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Preço</th>
+                                      <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Estoque atual</th>
+                                      <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Editar</th>
+                                      <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">Ação</th>
+                                  </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                                  {filtered.map((product) => {
+                                      const saving = Boolean(stockSavingIds[product.id]);
+                                      return (
+                                          <tr key={product.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors">
+                                              <td className="px-6 py-4 font-semibold text-slate-800 dark:text-slate-100">
+                                                  {product.name}
+                                              </td>
+                                              <td className="px-6 py-4 text-slate-600 dark:text-slate-300">
+                                                  {formatCurrencyBRL(product.price)}
+                                              </td>
+                                              <td className="px-6 py-4 text-slate-600 dark:text-slate-300">
+                                                  {typeof product.stock_qty === 'number' ? product.stock_qty : 0}
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  <input
+                                                      type="number"
+                                                      value={stockEdits[product.id] ?? ''}
+                                                      onChange={(e) => handleStockInputChange(product.id, e.target.value)}
+                                                      className="w-28 p-2 border rounded-lg text-sm dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                                  />
+                                              </td>
+                                              <td className="px-6 py-4 text-right">
+                                                  <button
+                                                      onClick={() => handleSaveStock(product)}
+                                                      disabled={saving}
+                                                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+                                                  >
+                                                      {saving && <Loader2 size={14} className="animate-spin" />}
+                                                      {saving ? 'Salvando…' : 'Salvar'}
+                                                  </button>
+                                              </td>
+                                          </tr>
+                                      );
+                                  })}
+                              </tbody>
+                          </table>
+                      </div>
+                  )}
               </div>
           </div>
       );
@@ -3314,7 +4504,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                               order.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 
                                               order.status === 'CANCELLED' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
                                           }`}>
-                                              {order.status}
+                                              {ORDER_STATUS_LABELS[order.status] || order.status}
                                           </span>
                                       </td>
                                       <td className="px-6 py-4 text-right">
@@ -3415,7 +4605,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                         </p>
                     </div>
 
-                    <div className="grid lg:grid-cols-[220px,1fr] xl:grid-cols-[220px,1fr,260px] gap-4">
+                    <div className="grid lg:grid-cols-[220px,1fr] gap-4">
                         <div className="lg:sticky lg:top-24 h-fit">
                             <div className="hidden lg:flex flex-col gap-2 bg-white/90 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-3 shadow-sm">
                                 {tabs.map((tab) => (
@@ -3496,6 +4686,45 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                <p className="text-xs text-gray-400 mb-1">Ajuda a loja aparecer nos filtros certos.</p>
                                <input type="text" value={storeProfile.category} onChange={(e) => setStoreProfile({...storeProfile, category: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
                            </div>
+                           <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 p-4 space-y-3">
+                               <div>
+                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-2">QR Code do cardápio</label>
+                                   <p className="text-xs text-gray-400 mb-3">Compartilhe o cardápio online com clientes.</p>
+                               </div>
+                               <div className="flex flex-col items-center gap-3">
+                                   {menuQrDataUrl ? (
+                                       <img
+                                           src={menuQrDataUrl}
+                                           alt="QR Code do cardápio"
+                                           className="w-40 h-40 rounded-xl border border-slate-200 bg-white p-2"
+                                       />
+                                   ) : (
+                                       <div className="w-40 h-40 rounded-xl border border-dashed border-slate-300 flex items-center justify-center text-xs text-slate-400">
+                                           Gerando QR...
+                                       </div>
+                                   )}
+                                   <div className="text-[11px] text-slate-500 break-all text-center">
+                                       {getMenuQrUrl()}
+                                   </div>
+                               </div>
+                               <div className="flex flex-wrap gap-2">
+                                   <button
+                                       type="button"
+                                       onClick={handleCopyMenuUrl}
+                                       className="px-3 py-2 rounded-xl text-xs font-bold border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200"
+                                   >
+                                       Copiar link
+                                   </button>
+                                   <button
+                                       type="button"
+                                       onClick={handleDownloadMenuQr}
+                                       disabled={!menuQrDataUrl}
+                                       className="px-3 py-2 rounded-xl text-xs font-bold bg-slate-900 text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                                   >
+                                       Baixar PNG do QR Code
+                                   </button>
+                               </div>
+                           </div>
                        </div>
                        <div className="space-y-4">
                            <div>
@@ -3572,12 +4801,367 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <p className="text-xs text-gray-400 mb-1">Visível quando o cliente escolhe retirada.</p>
                        <input type="text" value={storeProfile.pickupTime || ''} onChange={(e) => setStoreProfile({...storeProfile, pickupTime: e.target.value})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" placeholder="Ex: 20-30 min" />
                    </div>
-                           <div>
-                               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa de Entrega (R$)</label>
-                               <p className="text-xs text-gray-400 mb-1">Deixe 0 para entrega grátis.</p>
-                               <input type="number" value={storeProfile.deliveryFee} onChange={(e) => setStoreProfile({...storeProfile, deliveryFee: parseFloat(e.target.value)})} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white" />
+                           <div className="col-span-2">
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Tipo de Frete</label>
+                               <div className="flex flex-wrap gap-3">
+                                   <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700">
+                                       <input
+                                           type="radio"
+                                           name="deliveryFeeMode"
+                                           checked={deliveryFeeMode === 'FIXED'}
+                                           onChange={() => setStoreProfile({ ...storeProfile, deliveryFeeMode: 'FIXED' })}
+                                           className="w-4 h-4 accent-red-600"
+                                       />
+                                       <span className="font-bold text-slate-700 dark:text-white">Taxa fixa</span>
+                                   </label>
+                                   <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700">
+                                       <input
+                                           type="radio"
+                                           name="deliveryFeeMode"
+                                           checked={deliveryFeeMode === 'BY_NEIGHBORHOOD'}
+                                           onChange={() => {
+                                               setStoreProfile({ ...storeProfile, deliveryFeeMode: 'BY_NEIGHBORHOOD' });
+                                               if (deliveryNeighborhoods.length === 0) {
+                                                   importNeighborhoods(false);
+                                               }
+                                           }}
+                                           className="w-4 h-4 accent-red-600"
+                                       />
+                                       <span className="font-bold text-slate-700 dark:text-white">Taxa por bairro</span>
+                                   </label>
+                                   <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-700">
+                                       <input
+                                           type="radio"
+                                           name="deliveryFeeMode"
+                                           checked={deliveryFeeMode === 'BY_RADIUS'}
+                                           onChange={() => {
+                                               setStoreProfile({ ...storeProfile, deliveryFeeMode: 'BY_RADIUS' });
+                                           }}
+                                           className="w-4 h-4 accent-red-600"
+                                       />
+                                       <span className="font-bold text-slate-700 dark:text-white">Frete por raio (mapa)</span>
+                                   </label>
+                               </div>
                            </div>
+                           {deliveryFeeMode === 'FIXED' && (
+                               <div>
+                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa de Entrega (R$)</label>
+                                   <p className="text-xs text-gray-400 mb-1">Deixe 0 para entrega grátis.</p>
+                                   <input
+                                       type="number"
+                                       value={Number.isFinite(Number(storeProfile.deliveryFee)) ? storeProfile.deliveryFee : 0}
+                                       onChange={(e) => setStoreProfile({ ...storeProfile, deliveryFee: parseFloat(e.target.value) })}
+                                       className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                   />
+                               </div>
+                           )}
                        </div>
+                       {deliveryFeeMode === 'BY_NEIGHBORHOOD' && (
+                           <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-4 space-y-4">
+                               <div className="flex flex-wrap items-center justify-between gap-3">
+                                   <div>
+                                       <p className="font-bold text-slate-700 dark:text-white">Bairros atendidos</p>
+                                       <p className="text-xs text-gray-500 dark:text-gray-400">
+                                           Buscamos bairros de {storeProfile.city || 'sua cidade'} via Google.
+                                       </p>
+                                       <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                           Bairros importados: {deliveryNeighborhoods.length}
+                                       </p>
+                                   </div>
+                                   <div className="flex items-center gap-2">
+                                       <button
+                                           type="button"
+                                           onClick={() => handleMarkAllNeighborhoods(true)}
+                                           className="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
+                                       >
+                                           Marcar todos
+                                       </button>
+                                       <button
+                                           type="button"
+                                           onClick={() => handleMarkAllNeighborhoods(false)}
+                                           className="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
+                                       >
+                                           Desmarcar
+                                       </button>
+                                   </div>
+                               </div>
+                               <input
+                                   type="text"
+                                   value={deliveryNeighborhoodSearch}
+                                   onChange={(e) => setDeliveryNeighborhoodSearch(e.target.value)}
+                                   placeholder="Buscar bairro"
+                                   className="w-full p-3 border rounded-xl bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                               />
+                               <div className="flex flex-wrap items-center gap-2 text-xs">
+                                   {deliveryNeighborhoodLoading && (
+                                       <span className="text-gray-500">Buscando mais bairros...</span>
+                                   )}
+                                   {deliveryNeighborhoodError && (
+                                       <span className="text-amber-600">{deliveryNeighborhoodError}</span>
+                                   )}
+                                   {deliveryNeighborhoodInfo && (
+                                       <span className="text-emerald-600">{deliveryNeighborhoodInfo}</span>
+                                   )}
+                                   <button
+                                       type="button"
+                                       onClick={() => importNeighborhoods(true)}
+                                       className="px-3 py-1.5 rounded-lg border border-gray-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 font-bold hover:bg-white dark:hover:bg-slate-800"
+                                   >
+                                       {deliveryNeighborhoodLoading ? 'Buscando mais bairros...' : 'Reimportar bairros'}
+                                   </button>
+                               </div>
+                               <div className="max-h-60 overflow-y-auto space-y-2">
+                                   {filteredDeliveryNeighborhoods.length === 0 && !deliveryNeighborhoodLoading && (
+                                       <p className="text-xs text-gray-500">Nenhum bairro para exibir.</p>
+                                   )}
+                                   {filteredDeliveryNeighborhoods.map(({ item, index }) => (
+                                       <div
+                                           key={`${item.name}-${index}`}
+                                           className="flex flex-wrap items-center justify-between gap-3 border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 rounded-xl px-3 py-2"
+                                       >
+                                           <label className="flex items-center gap-2">
+                                               <input
+                                                   type="checkbox"
+                                                   checked={item.active}
+                                                   onChange={(e) => handleToggleNeighborhood(index, e.target.checked)}
+                                                   className="w-4 h-4 accent-red-600"
+                                               />
+                                               <span className="text-sm font-semibold text-slate-700 dark:text-white">{item.name}</span>
+                                           </label>
+                                           <div className="flex items-center gap-2">
+                                               <span className="text-xs text-gray-500">R$</span>
+                                               <input
+                                                   type="number"
+                                                   min="0"
+                                                   disabled={!item.active}
+                                                   value={item.fee ?? 0}
+                                                   onChange={(e) => handleNeighborhoodFeeChange(index, e.target.value)}
+                                                   className="w-24 p-2 text-sm border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white disabled:opacity-60"
+                                               />
+                                           </div>
+                                       </div>
+                                   ))}
+                               </div>
+                               <div className="border-t border-gray-200 dark:border-slate-800 pt-3 space-y-2">
+                                   <p className="text-xs font-bold text-gray-500 uppercase">Adicionar bairro manualmente</p>
+                                   <div className="flex flex-wrap gap-2">
+                                       <input
+                                           type="text"
+                                           value={manualNeighborhoodName}
+                                           onChange={(e) => setManualNeighborhoodName(e.target.value)}
+                                           placeholder="Nome do bairro"
+                                           className="flex-1 min-w-[200px] p-3 border rounded-xl bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                       />
+                                       <input
+                                           type="number"
+                                           min="0"
+                                           value={manualNeighborhoodFee}
+                                           onChange={(e) => setManualNeighborhoodFee(e.target.value)}
+                                           placeholder="Taxa"
+                                           className="w-28 p-3 border rounded-xl bg-white dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                                       />
+                                       <button
+                                           type="button"
+                                           onClick={handleAddManualNeighborhood}
+                                           className="px-4 py-3 bg-slate-900 text-white rounded-xl font-bold hover:opacity-90"
+                                       >
+                                           Adicionar
+                                       </button>
+                                   </div>
+                               </div>
+                           </div>
+                       )}
+                       {deliveryFeeMode === 'BY_RADIUS' && (
+                           <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-4 space-y-4">
+                               <div className="flex flex-wrap items-center justify-between gap-3">
+                                   <div>
+                                       <p className="font-bold text-slate-700 dark:text-white">Areas de entrega (raio)</p>
+                                       <p className="text-xs text-gray-500 dark:text-gray-400">
+                                           Crie circulos no mapa para definir taxa e tempo de entrega.
+                                       </p>
+                                   </div>
+                                   <div className="flex items-center gap-2">
+                                       <button
+                                           type="button"
+                                           onClick={handleCreateDeliveryZone}
+                                           className="px-3 py-2 rounded-lg bg-red-600 text-white text-xs font-bold"
+                                       >
+                                           Criar area
+                                       </button>
+                                   </div>
+                               </div>
+                               {deliveryZoneError && (
+                                   <div className="text-xs text-amber-600">{deliveryZoneError}</div>
+                               )}
+                               {deliveryZoneNotice && (
+                                   <div className="text-xs text-emerald-600">{deliveryZoneNotice}</div>
+                               )}
+                               <div className="grid lg:grid-cols-[1.2fr_1fr] gap-4">
+                                   <div className="space-y-2">
+                                       <div
+                                           ref={deliveryZoneMapContainerRef}
+                                           className="h-72 rounded-xl border border-gray-200 dark:border-slate-800 bg-white"
+                                       />
+                                       <p className="text-[11px] text-gray-400">
+                                           Arraste o circulo para mover e ajuste o raio no controle ao lado.
+                                       </p>
+                                   </div>
+                                   <div className="space-y-4">
+                                       {selectedDeliveryZone ? (
+                                           <div className="space-y-3 rounded-xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+                                               <div>
+                                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Descricao</label>
+                                                   <input
+                                                       type="text"
+                                                       value={selectedDeliveryZone.name}
+                                                       onChange={(e) => handleUpdateDeliveryZone(selectedDeliveryZone.id, { name: e.target.value })}
+                                                       className="w-full p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                   />
+                                               </div>
+                                               <div className="grid grid-cols-2 gap-2">
+                                                   <div>
+                                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa (R$)</label>
+                                                       <input
+                                                           type="number"
+                                                           min="0"
+                                                           value={selectedDeliveryZone.fee ?? 0}
+                                                           onChange={(e) =>
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   fee: Number(e.target.value || 0)
+                                                               })
+                                                           }
+                                                           className="w-full p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                       />
+                                                   </div>
+                                                   <div>
+                                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tempo (min)</label>
+                                                       <input
+                                                           type="number"
+                                                           min="0"
+                                                           value={selectedDeliveryZone.etaMinutes ?? 0}
+                                                           onChange={(e) =>
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   etaMinutes: Number(e.target.value || 0)
+                                                               })
+                                                           }
+                                                           className="w-full p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                       />
+                                                   </div>
+                                               </div>
+                                               <div>
+                                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
+                                                       Raio (m)
+                                                   </label>
+                                                   <input
+                                                       type="range"
+                                                       min="500"
+                                                       max="20000"
+                                                       step="100"
+                                                       value={selectedDeliveryZone.radiusMeters}
+                                                       onChange={(e) => {
+                                                           const nextRadius = Number(e.target.value || 0);
+                                                           handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                               radiusMeters: nextRadius
+                                                           });
+                                                           if (deliveryZoneCircleRef.current) {
+                                                               deliveryZoneCircleRef.current.setRadius(nextRadius);
+                                                           }
+                                                       }}
+                                                       className="w-full"
+                                                   />
+                                                   <input
+                                                       type="number"
+                                                       min="0"
+                                                       value={selectedDeliveryZone.radiusMeters}
+                                                       onChange={(e) => {
+                                                           const nextRadius = Number(e.target.value || 0);
+                                                           handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                               radiusMeters: nextRadius
+                                                           });
+                                                           if (deliveryZoneCircleRef.current) {
+                                                               deliveryZoneCircleRef.current.setRadius(nextRadius);
+                                                           }
+                                                       }}
+                                                       className="w-full mt-2 p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                   />
+                                               </div>
+                                               <div className="grid grid-cols-2 gap-2">
+                                                   <div>
+                                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Prioridade</label>
+                                                       <input
+                                                           type="number"
+                                                           min="0"
+                                                           value={selectedDeliveryZone.priority ?? 0}
+                                                           onChange={(e) =>
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   priority: Number(e.target.value || 0)
+                                                               })
+                                                           }
+                                                           className="w-full p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                       />
+                                                   </div>
+                                                   <label className="flex items-center gap-2 text-xs text-slate-500 mt-6">
+                                                       <input
+                                                           type="checkbox"
+                                                           checked={selectedDeliveryZone.enabled !== false}
+                                                           onChange={(e) =>
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   enabled: e.target.checked
+                                                               })
+                                                           }
+                                                           className="w-4 h-4 accent-red-600 rounded"
+                                                       />
+                                                       Area ativa
+                                                   </label>
+                                               </div>
+                                           </div>
+                                       ) : (
+                                           <div className="text-xs text-gray-500">Selecione ou crie uma area.</div>
+                                       )}
+
+                                       <div className="space-y-2">
+                                           {deliveryZones.length === 0 ? (
+                                               <p className="text-xs text-gray-400">Nenhuma area criada.</p>
+                                           ) : (
+                                               deliveryZones.map((zone) => (
+                                                   <div
+                                                       key={zone.id}
+                                                       className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border ${
+                                                           selectedDeliveryZoneId === zone.id
+                                                               ? 'border-red-400 bg-red-50/60 dark:bg-red-900/20'
+                                                               : 'border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+                                                       }`}
+                                                   >
+                                                       <div>
+                                                           <p className="text-sm font-semibold text-slate-700 dark:text-white">{zone.name}</p>
+                                                           <p className="text-[11px] text-slate-400">
+                                                               R$ {Number(zone.fee || 0).toFixed(2)} · {Math.round(zone.radiusMeters)} m
+                                                           </p>
+                                                       </div>
+                                                       <div className="flex items-center gap-2">
+                                                           <button
+                                                               type="button"
+                                                               onClick={() => setSelectedDeliveryZoneId(zone.id)}
+                                                               className="text-xs font-bold text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-2 py-1 rounded-lg"
+                                                           >
+                                                               Editar
+                                                           </button>
+                                                           <button
+                                                               type="button"
+                                                               onClick={() => handleDeleteDeliveryZone(zone.id)}
+                                                               className="text-xs font-bold text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 px-2 py-1 rounded-lg"
+                                                           >
+                                                               Apagar
+                                                           </button>
+                                                       </div>
+                                                   </div>
+                                               ))
+                                           )}
+                                       </div>
+                                   </div>
+                               </div>
+                           </div>
+                       )}
                        <div className="flex flex-wrap items-center gap-3">
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsDelivery} onChange={(e) => setStoreProfile({...storeProfile, acceptsDelivery: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Delivery</span></label>
                            <label className="flex items-center gap-2 cursor-pointer bg-gray-50 dark:bg-slate-800 px-4 py-3 rounded-xl border border-gray-200 dark:border-slate-700"><input type="checkbox" checked={storeProfile.acceptsPickup} onChange={(e) => setStoreProfile({...storeProfile, acceptsPickup: e.target.checked})} className="w-5 h-5 accent-red-600" /><span className="font-bold text-slate-700 dark:text-white">Aceita Retirada</span></label>
@@ -3860,6 +5444,81 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               </div>
                           </label>
                        </div>
+                       <div className="mt-4 pt-4 border-t border-gray-100 dark:border-slate-800 space-y-4">
+                           <div className="flex items-center justify-between">
+                               <div>
+                                   <p className="font-bold text-slate-800 dark:text-white">PIX Repasse (Online)</p>
+                                   <p className="text-xs text-gray-500">Gera QR Code automático e confirma pagamento.</p>
+                               </div>
+                               <label className="relative inline-flex items-center cursor-pointer">
+                                   <input
+                                       type="checkbox"
+                                       checked={pixRepasseConfig.pix_enabled}
+                                       onChange={(e) =>
+                                           setPixRepasseConfig((prev) => ({
+                                               ...prev,
+                                               pix_enabled: e.target.checked
+                                           }))
+                                       }
+                                       className="sr-only peer"
+                                   />
+                                   <div className="w-10 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+                               </label>
+                           </div>
+                           {pixRepasseConfig.pix_enabled && (
+                               <div className="grid md:grid-cols-2 gap-4">
+                                   <div>
+                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Hash Recebedor 01</label>
+                                       <input
+                                           type="text"
+                                           value={pixRepasseConfig.pix_hash_recebedor_01}
+                                           onChange={(e) =>
+                                               setPixRepasseConfig((prev) => ({
+                                                   ...prev,
+                                                   pix_hash_recebedor_01: e.target.value
+                                               }))
+                                           }
+                                           className="w-full p-3 border rounded-xl bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           placeholder="Informe o hash"
+                                       />
+                                   </div>
+                                   <div>
+                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Hash Recebedor 02</label>
+                                       <input
+                                           type="text"
+                                           value={pixRepasseConfig.pix_hash_recebedor_02}
+                                           onChange={(e) =>
+                                               setPixRepasseConfig((prev) => ({
+                                                   ...prev,
+                                                   pix_hash_recebedor_02: e.target.value
+                                               }))
+                                           }
+                                           className="w-full p-3 border rounded-xl bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                           placeholder="Informe o hash"
+                                       />
+                                   </div>
+                               </div>
+                           )}
+                           {pixRepasseConfig.pix_identificacao_pdv && (
+                               <div className="text-xs text-gray-500">
+                                   Identificação PDV: <span className="font-mono">{pixRepasseConfig.pix_identificacao_pdv}</span>
+                               </div>
+                           )}
+                           {pixRepasseError && (
+                               <div className="text-xs text-red-600">{pixRepasseError}</div>
+                           )}
+                           {pixRepasseNotice && (
+                               <div className="text-xs text-green-600">{pixRepasseNotice}</div>
+                           )}
+                           <button
+                               type="button"
+                               onClick={handleSavePixRepasse}
+                               disabled={pixRepasseLoading}
+                               className="w-full md:w-auto bg-slate-900 text-white px-5 py-2 rounded-xl font-bold hover:opacity-90 disabled:opacity-60"
+                           >
+                               {pixRepasseLoading ? 'Salvando...' : 'Salvar PIX Repasse'}
+                           </button>
+                       </div>
                    </div>
                )}
 
@@ -4009,89 +5668,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                             </div>
                         </div>
 
-                        <div className="hidden xl:block">
-                            <div className="sticky top-24 space-y-4">
-                                <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/80 p-5 shadow-sm">
-                                    <p className="text-xs font-bold uppercase text-slate-400 mb-2">Resumo</p>
-                                    <p className="text-base font-extrabold text-slate-900 dark:text-white">{storeProfile.name || 'Sua loja'}</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">{storeProfile.city || addressForm.city || 'Cidade não informada'}</p>
-                                    <div className="mt-4 grid gap-2">
-                                        <div className="flex items-center justify-between text-sm">
-                                            <span className="text-slate-500">Delivery</span>
-                                            <span className={`font-bold ${storeProfile.acceptsDelivery ? 'text-green-600' : 'text-slate-400'}`}>
-                                                {storeProfile.acceptsDelivery ? 'Ativo' : 'Inativo'}
-                                            </span>
-                                        </div>
-                                        <div className="flex items-center justify-between text-sm">
-                                            <span className="text-slate-500">Retirada</span>
-                                            <span className={`font-bold ${storeProfile.acceptsPickup ? 'text-green-600' : 'text-slate-400'}`}>
-                                                {storeProfile.acceptsPickup ? 'Ativo' : 'Inativo'}
-                                            </span>
-                                        </div>
-                                        <div className="flex items-center justify-between text-sm">
-                                            <span className="text-slate-500">Cartao na entrega</span>
-                                            <span className={`font-bold ${storeProfile.acceptsCardOnDelivery ? 'text-green-600' : 'text-slate-400'}`}>
-                                                {storeProfile.acceptsCardOnDelivery ? 'Ativo' : 'Inativo'}
-                                            </span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="rounded-2xl border border-red-200/60 dark:border-red-900/40 bg-red-50/70 dark:bg-red-900/10 p-5">
-                                    <p className="text-xs font-bold uppercase text-red-400 mb-2">Acoes rapidas</p>
-                                    <p className="text-sm text-red-600 dark:text-red-300 mb-4">
-                                        Revise as alteracoes e salve quando terminar.
-                                    </p>
-                                    <button
-                                        onClick={handleSaveStoreSettings}
-                                        className="w-full bg-red-600 text-white px-5 py-3 rounded-xl font-bold hover:bg-red-700 shadow-lg shadow-red-600/20 flex items-center justify-center gap-2"
-                                    >
-                                        <Save size={18} /> Salvar alteracoes
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="hidden xl:flex flex-col gap-4">
-                            <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
-                                <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Resumo da loja</p>
-                                <p className="text-lg font-extrabold text-slate-900 dark:text-white mt-2 font-display">
-                                    {storeProfile.name || 'Sua loja'}
-                                </p>
-                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{storeProfile.category || 'Categoria'}</p>
-                                <div className="mt-4 space-y-2 text-sm text-slate-600 dark:text-slate-300">
-                                    <div className="flex items-center justify-between">
-                                        <span>Delivery</span>
-                                        <span className="font-bold">{storeProfile.acceptsDelivery ? 'Ativo' : 'Off'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span>Retirada</span>
-                                        <span className="font-bold">{storeProfile.acceptsPickup ? 'Ativo' : 'Off'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span>Mesa</span>
-                                        <span className="font-bold">{storeProfile.acceptsTableOrders ? 'Ativo' : 'Off'}</span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="bg-white/90 dark:bg-slate-900/80 rounded-3xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-sm">
-                                <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Checklist rapido</p>
-                                <div className="mt-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        Logo e capa atualizados
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        Taxas e tempos revisados
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        Metodos de pagamento ativos
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </div>
            </div>
@@ -4144,6 +5720,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                     { id: 'SALES', icon: Receipt, label: 'Vendas' }, 
                     { id: 'FINANCE', icon: DollarSign, label: 'Financeiro' }, 
                     { id: 'EXPENSES', icon: Wallet, label: 'Retirada / Entrada' }, 
+                    { id: 'STOCK', icon: Database, label: 'Estoque' },
                     { id: 'MENU', icon: UtensilsCrossed, label: 'Cardápio' },
                     { id: 'BUILDABLE_PRODUCTS', icon: Layers, label: 'Cadastro Produto Montável' },
                     { id: 'COUPONS', icon: Ticket, label: 'Cupons' },
@@ -4191,6 +5768,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        activeSection === 'COURIERS' ? 'Frota de Entregas' :
                        activeSection === 'FINANCE' ? 'Financeiro' :
                        activeSection === 'EXPENSES' ? 'Retirada / Entrada' :
+                       activeSection === 'STOCK' ? 'Estoque' :
                        activeSection === 'SALES' ? 'Relatório de Vendas' :
                        activeSection === 'SETTINGS' ? 'Configurações' :
                        activeSection === 'TABLES' ? 'Mesas' : activeSection}
@@ -4201,11 +5779,45 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       {isDarkMode ? <Banknote size={20} /> : <Banknote size={20} />}
                   </button>
                   
-                  <div className={`px-3 py-1 rounded-full border text-xs font-bold flex items-center gap-2 ${storeProfile.isActive ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-400' : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-400'}`}>
-                      <div className={`w-2 h-2 rounded-full ${storeProfile.isActive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                      {storeProfile.isActive ? 'LOJA ABERTA' : 'LOJA FECHADA'}
-                  </div>
-                  <button onClick={handleToggleOpenStore} className="text-xs underline text-gray-500 hover:text-slate-800 dark:hover:text-white">(Toggle)</button>
+                  {(() => {
+                      const isManualClosed = availability?.pause?.active === true;
+                      const scheduleOpen = availability?.scheduleOpen === true;
+                      const manualOpenOutsideSchedule =
+                          storeProfile.isActive === true && availability?.scheduleOpen === false && !isManualClosed;
+                      const isOpenNow = (availability?.isOpen ?? false) || manualOpenOutsideSchedule;
+                      const statusLabel = isOpenNow ? 'Loja aberta' : 'Loja fechada';
+                      const reasonLabel = (() => {
+                          if (isManualClosed) return 'Fechada manualmente';
+                          if (manualOpenOutsideSchedule) return 'Aberta manualmente';
+                          if (availability?.reason === 'OPEN_SCHEDULE') return 'Por horário';
+                          if (availability?.reason === 'CLOSED_SCHEDULE') return 'Fora do horário';
+                          if (availability?.reason === 'NO_SCHEDULE') return 'Sem horário configurado';
+                          return 'Status indefinido';
+                      })();
+
+                      return (
+                          <div className="flex items-center gap-3">
+                              <div className={`px-3 py-1 rounded-full border text-xs font-bold flex items-center gap-2 ${isOpenNow ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-400' : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'}`}>
+                                  <div className={`w-2 h-2 rounded-full ${isOpenNow ? 'bg-green-500 animate-pulse' : 'bg-slate-500'}`}></div>
+                                  {statusLabel}
+                              </div>
+                              <span className="text-xs text-gray-500 dark:text-gray-400">{reasonLabel}</span>
+                              <button
+                                  onClick={handleToggleOpenStore}
+                                  disabled={manualStatusUpdating}
+                                  className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 border transition-colors ${
+                                      isOpenNow
+                                          ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                                          : 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700'
+                                  } ${manualStatusUpdating ? 'opacity-70 cursor-not-allowed' : ''}`}
+                                  aria-label={isOpenNow ? 'Fechar loja' : 'Abrir loja'}
+                              >
+                                  {manualStatusUpdating && <Loader2 size={14} className="animate-spin" />}
+                                  {manualStatusUpdating ? 'Alterando status…' : isOpenNow ? 'Fechar loja' : 'Abrir loja'}
+                              </button>
+                          </div>
+                      );
+                  })()}
               </div>
           </header>
 
@@ -4213,6 +5825,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               {activeSection === 'OVERVIEW' && renderOverview()}
               {activeSection === 'SETTINGS' && renderSettings()}
               {activeSection === 'MENU' && renderMenu()}
+              {activeSection === 'STOCK' && renderStock()}
               {activeSection === 'BUILDABLE_PRODUCTS' && renderBuildableProducts()}
               {activeSection === 'ORDERS' && renderOrders()}
               {activeSection === 'COUPONS' && renderCoupons()}
@@ -4538,6 +6151,105 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       </div>
                       
                       <div className="border-t border-gray-100 dark:border-slate-800 pt-6">
+                          <div className="mb-4 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/60 p-4">
+                              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                                  <div>
+                                      <h4 className="text-sm font-bold text-slate-800 dark:text-white">Adicionar complementos prontos</h4>
+                                      <p className="text-xs text-slate-500 dark:text-slate-400">Aplique grupos prontos para acelerar o cadastro.</p>
+                                  </div>
+                                  <button
+                                      type="button"
+                                      onClick={() => {
+                                          resetTemplateDraft(null);
+                                          setShowOptionGroupTemplateModal(true);
+                                      }}
+                                      className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-200"
+                                  >
+                                      Gerenciar templates
+                                  </button>
+                              </div>
+                              {optionGroupTemplates.length === 0 ? (
+                                  <p className="text-xs text-slate-400">Nenhum template cadastrado.</p>
+                              ) : (
+                                  <div className="space-y-3">
+                                      {suggestedTemplates.length > 0 && (
+                                          <div className="space-y-2">
+                                              <p className="text-[11px] font-bold text-slate-500 uppercase">
+                                                  Complementos sugeridos para esta categoria
+                                              </p>
+                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                                  {suggestedTemplates.map((template) => {
+                                                      const applied = isTemplateApplied(template);
+                                                      return (
+                                                          <label
+                                                              key={template.id}
+                                                              className={`flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-600 dark:text-slate-200 ${applied ? 'opacity-70' : ''}`}
+                                                          >
+                                                              <input
+                                                                  type="checkbox"
+                                                                  checked={selectedTemplateIds.includes(template.id)}
+                                                                  disabled={applied}
+                                                                  onChange={(e) => handleToggleTemplateSelection(template.id, e.target.checked)}
+                                                                  className="w-4 h-4 accent-red-500"
+                                                              />
+                                                              <span className="font-semibold">{template.name}</span>
+                                                              <div className="ml-auto flex items-center gap-2 text-[11px]">
+                                                                  <span className="text-slate-400">{(template.options || []).length} itens</span>
+                                                                  {applied && <span className="font-semibold text-emerald-600">Já aplicado</span>}
+                                                              </div>
+                                                          </label>
+                                                      );
+                                                  })}
+                                              </div>
+                                          </div>
+                                      )}
+
+                                      {availableTemplates.length > 0 && (
+                                          <div className="space-y-2">
+                                              <p className="text-[11px] font-bold text-slate-500 uppercase">
+                                                  {suggestedTemplates.length > 0 ? 'Outros complementos' : 'Complementos disponíveis'}
+                                              </p>
+                                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                                  {availableTemplates.map((template) => {
+                                                      const applied = isTemplateApplied(template);
+                                                      return (
+                                                          <label
+                                                              key={template.id}
+                                                              className={`flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-600 dark:text-slate-200 ${applied ? 'opacity-70' : ''}`}
+                                                          >
+                                                              <input
+                                                                  type="checkbox"
+                                                                  checked={selectedTemplateIds.includes(template.id)}
+                                                                  disabled={applied}
+                                                                  onChange={(e) => handleToggleTemplateSelection(template.id, e.target.checked)}
+                                                                  className="w-4 h-4 accent-red-500"
+                                                              />
+                                                              <span className="font-semibold">{template.name}</span>
+                                                              <div className="ml-auto flex items-center gap-2 text-[11px]">
+                                                                  <span className="text-slate-400">{(template.options || []).length} itens</span>
+                                                                  {applied && <span className="font-semibold text-emerald-600">Já aplicado</span>}
+                                                              </div>
+                                                          </label>
+                                                      );
+                                                  })}
+                                              </div>
+                                          </div>
+                                      )}
+
+                                      <div className="flex flex-wrap items-center gap-3">
+                                          <button
+                                              type="button"
+                                              onClick={handleApplySelectedTemplates}
+                                              disabled={selectedTemplateIds.length === 0}
+                                              className="px-4 py-2 rounded-lg bg-red-600 text-white text-xs font-bold disabled:opacity-60"
+                                          >
+                                              Aplicar selecionados
+                                          </button>
+                                          {templateNotice && <span className="text-xs text-emerald-600">{templateNotice}</span>}
+                                      </div>
+                                  </div>
+                              )}
+                          </div>
                           <div className="flex justify-between items-center mb-4">
                               <h4 className="font-bold text-slate-800 dark:text-white flex items-center gap-2"><Layers size={18}/> Complementos e Opções</h4>
                               <button onClick={handleAddOptionGroup} className="text-sm font-bold text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 px-3 py-1.5 rounded-lg transition-colors">+ Adicionar Grupo</button>
@@ -4860,22 +6572,304 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                       </div>
 
                       <div className="space-y-2">
-                          <p className="text-xs font-bold text-gray-400 uppercase">Cadastradas</p>
+                          <div className="flex items-center justify-between">
+                              <p className="text-xs font-bold text-gray-400 uppercase">Cadastradas</p>
+                              {categoryOrderNotice && (
+                                  <div className="text-xs text-emerald-600">{categoryOrderNotice}</div>
+                              )}
+                          </div>
                           {menuCategories.length === 0 ? (
                               <p className="text-sm text-gray-400">Nenhuma categoria cadastrada.</p>
                           ) : (
-                              menuCategories.map((category) => (
-                                  <div key={category} className="flex items-center justify-between p-3 rounded-xl border border-gray-100 dark:border-slate-800">
-                                      <span className="text-sm font-semibold text-slate-700 dark:text-gray-200">{category}</span>
+                              <DndContext
+                                  sensors={categorySensors}
+                                  collisionDetection={closestCenter}
+                                  onDragEnd={handleCategoryDragEnd}
+                              >
+                                  <SortableContext
+                                      items={menuCategories}
+                                      strategy={verticalListSortingStrategy}
+                                  >
+                                      <div className="space-y-2">
+                                          {menuCategories.map((category) => (
+                                              <SortableCategoryItem
+                                                  key={category}
+                                                  id={category}
+                                                  label={category}
+                                                  onRemove={() => handleRemoveMenuCategory(category)}
+                                                  onEdit={() => handleStartEditCategory(category)}
+                                                  isEditing={editingCategory === category}
+                                                  editValue={editingCategory === category ? editingCategoryName : category}
+                                                  onEditChange={setEditingCategoryName}
+                                                  onEditSave={() => handleRenameMenuCategory(category, editingCategoryName)}
+                                                  onEditCancel={handleCancelEditCategory}
+                                              />
+                                          ))}
+                                      </div>
+                                  </SortableContext>
+                              </DndContext>
+                          )}
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* OPTION GROUP TEMPLATE MODAL */}
+      {showOptionGroupTemplateModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-scale-in">
+                  <div className="p-6 border-b border-gray-200 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-800">
+                      <h3 className="font-bold text-lg text-slate-800 dark:text-white flex items-center gap-2">
+                          <Layers size={20} className="text-red-500" /> Complementos prontos
+                      </h3>
+                      <button
+                          onClick={() => setShowOptionGroupTemplateModal(false)}
+                          className="p-2 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-full transition-colors"
+                      >
+                          <X size={20} />
+                      </button>
+                  </div>
+
+                  <div className="p-6 flex-1 overflow-y-auto bg-white dark:bg-slate-900 space-y-6">
+                      <div className="bg-gray-50 dark:bg-slate-800/50 p-4 rounded-xl border border-gray-200 dark:border-slate-700">
+                          <div className="flex items-center justify-between gap-4 mb-4">
+                              <h4 className="text-sm font-bold text-gray-600 dark:text-gray-300 uppercase">
+                                  {templateDraft.id ? 'Editar template' : 'Criar novo template'}
+                              </h4>
+                              {templateDraft.id && (
+                                  <button
+                                      onClick={() => resetTemplateDraft(null)}
+                                      className="text-xs font-bold text-slate-500 hover:text-red-600"
+                                  >
+                                      Cancelar edicao
+                                  </button>
+                              )}
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                              <input
+                                  type="text"
+                                  placeholder="Nome do grupo"
+                                  value={templateDraft.name || ''}
+                                  onChange={(e) => setTemplateDraft((prev) => ({ ...prev, name: e.target.value }))}
+                                  className="md:col-span-2 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm font-bold"
+                              />
+                              <div className="flex items-center gap-2 text-xs text-gray-500">
+                                  Min
+                                  <input
+                                      type="number"
+                                      value={templateDraft.min ?? 0}
+                                      onChange={(e) => setTemplateDraft((prev) => ({ ...prev, min: parseInt(e.target.value, 10) }))}
+                                      className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                  />
+                                  Max
+                                  <input
+                                      type="number"
+                                      value={templateDraft.max ?? 1}
+                                      onChange={(e) => setTemplateDraft((prev) => ({ ...prev, max: parseInt(e.target.value, 10) }))}
+                                      className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                  />
+                              </div>
+                          </div>
+
+                          <div className="grid md:grid-cols-3 gap-3 mb-4 text-xs text-gray-500">
+                              <label className="flex items-center gap-2">
+                                  Obrigatorio
+                                  <input
+                                      type="checkbox"
+                                      checked={templateDraft.isRequired || false}
+                                      onChange={(e) => {
+                                          const isRequired = e.target.checked;
+                                          const nextMin = isRequired ? Math.max(1, Number(templateDraft.min || 0)) : 0;
+                                          setTemplateDraft((prev) => ({ ...prev, isRequired, min: nextMin }));
+                                      }}
+                                      className="w-4 h-4 accent-red-600 rounded"
+                                  />
+                              </label>
+                              <label className="flex items-center gap-2">
+                                  Tipo
+                                  <select
+                                      value={templateDraft.selectionType || (Number(templateDraft.max || 1) === 1 ? 'SINGLE' : 'MULTIPLE')}
+                                      onChange={(e) => setTemplateDraft((prev) => ({ ...prev, selectionType: e.target.value as any }))}
+                                      className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-xs font-bold"
+                                  >
+                                      <option value="SINGLE">Escolha unica</option>
+                                      <option value="MULTIPLE">Multipla</option>
+                                  </select>
+                              </label>
+                              <div className="flex items-center gap-2">
+                                  Extra apos
+                                  <input
+                                      type="number"
+                                      value={templateDraft.extraChargeAfter ?? 0}
+                                      onChange={(e) => setTemplateDraft((prev) => ({ ...prev, extraChargeAfter: parseInt(e.target.value, 10) }))}
+                                      className="w-16 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                  />
+                                  Valor
+                                  <input
+                                      type="number"
+                                      value={templateDraft.extraChargeAmount ?? 0}
+                                      onChange={(e) => setTemplateDraft((prev) => ({ ...prev, extraChargeAmount: parseFloat(e.target.value) }))}
+                                      className="w-20 p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                  />
+                              </div>
+                          </div>
+
+                          <div className="mb-4">
+                              <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+                                  <input
+                                      type="checkbox"
+                                      checked={Array.isArray(templateDraft.linkedCategoryIds)}
+                                      onChange={(e) =>
+                                          setTemplateDraft((prev) => ({
+                                              ...prev,
+                                              linkedCategoryIds: e.target.checked ? [] : undefined
+                                          }))
+                                      }
+                                      className="w-4 h-4 accent-red-500"
+                                  />
+                                  Vincular a categorias (opcional)
+                              </label>
+                              {Array.isArray(templateDraft.linkedCategoryIds) && (
+                                  <div className="mt-2 space-y-2">
+                                      {menuCategories.length === 0 ? (
+                                          <p className="text-xs text-slate-400">
+                                              Nenhuma categoria cadastrada.
+                                          </p>
+                                      ) : (
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                              {menuCategories.map((category) => {
+                                                  const isChecked = templateDraft.linkedCategoryIds?.includes(category);
+                                                  return (
+                                                      <label
+                                                          key={category}
+                                                          className="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs text-slate-600 dark:text-slate-200"
+                                                      >
+                                                          <input
+                                                              type="checkbox"
+                                                              checked={!!isChecked}
+                                                              onChange={(e) => {
+                                                                  setTemplateDraft((prev) => {
+                                                                      const current = Array.isArray(prev.linkedCategoryIds)
+                                                                          ? prev.linkedCategoryIds
+                                                                          : [];
+                                                                      const next = e.target.checked
+                                                                          ? [...current, category]
+                                                                          : current.filter((value) => value !== category);
+                                                                      return { ...prev, linkedCategoryIds: next };
+                                                                  });
+                                                              }}
+                                                              className="w-4 h-4 accent-red-500"
+                                                          />
+                                                          <span className="font-semibold">{category}</span>
+                                                      </label>
+                                                  );
+                                              })}
+                                          </div>
+                                      )}
+                                  </div>
+                              )}
+                          </div>
+
+                          <div className="pl-4 border-l-2 border-gray-200 dark:border-slate-600 space-y-2">
+                              {(templateDraft.options || []).map((opt) => (
+                                  <div key={opt.id} className="grid md:grid-cols-[1.2fr_0.5fr_0.5fr_auto] gap-2 items-center">
+                                      <input
+                                          type="text"
+                                          value={opt.name}
+                                          onChange={(e) => handleUpdateTemplateOption(opt.id, 'name', e.target.value)}
+                                          className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                          placeholder="Nome da opcao"
+                                      />
+                                      <input
+                                          type="number"
+                                          value={opt.price}
+                                          onChange={(e) => handleUpdateTemplateOption(opt.id, 'price', parseFloat(e.target.value))}
+                                          className="p-2 border rounded bg-white dark:bg-slate-900 dark:border-slate-600 dark:text-white text-sm"
+                                          placeholder="R$ 0.00"
+                                      />
+                                      <label className="flex items-center gap-2 text-xs text-slate-500">
+                                          <input
+                                              type="checkbox"
+                                              checked={opt.isAvailable !== false}
+                                              onChange={(e) => handleUpdateTemplateOption(opt.id, 'isAvailable', e.target.checked)}
+                                              className="w-4 h-4 accent-red-500 rounded"
+                                          />
+                                          Ativo
+                                      </label>
                                       <button
-                                          onClick={() => handleRemoveMenuCategory(category)}
-                                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-slate-800 rounded-full"
-                                          title="Remover categoria"
+                                          onClick={() => handleRemoveTemplateOption(opt.id)}
+                                          className="text-gray-300 hover:text-red-500"
                                       >
-                                          <Trash2 size={16} />
+                                          <X size={16} />
                                       </button>
                                   </div>
-                              ))
+                              ))}
+                              <button
+                                  onClick={handleAddTemplateOption}
+                                  className="text-xs font-bold text-blue-600 mt-2 flex items-center gap-1 hover:underline"
+                              >
+                                  <Plus size={12} /> Adicionar opcao
+                              </button>
+                          </div>
+
+                          {templateError && (
+                              <div className="mt-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg font-bold">
+                                  {templateError}
+                              </div>
+                          )}
+                          <div className="mt-4 flex items-center gap-3">
+                              <button
+                                  onClick={handleSaveTemplate}
+                                  className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-red-700 flex items-center gap-1"
+                              >
+                                  <Save size={16} /> {templateDraft.id ? 'Salvar' : 'Criar'}
+                              </button>
+                              {templateNotice && <span className="text-xs text-emerald-600">{templateNotice}</span>}
+                          </div>
+                      </div>
+
+                      <div className="space-y-2">
+                          <p className="text-xs font-bold text-gray-400 uppercase">Templates cadastrados</p>
+                          {optionGroupTemplates.length === 0 ? (
+                              <p className="text-sm text-gray-400">Nenhum template cadastrado.</p>
+                          ) : (
+                              <div className="space-y-2">
+                                  {optionGroupTemplates.map((template) => (
+                                      <div
+                                          key={template.id}
+                                          className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl border border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900"
+                                      >
+                                          <div>
+                                              <div className="text-sm font-bold text-slate-800 dark:text-white">{template.name}</div>
+                                              <div className="text-xs text-slate-400">
+                                                  {(template.options || []).length} itens · min {template.min} / max {template.max}
+                                              </div>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                              <button
+                                                  onClick={() => handleEditTemplate(template)}
+                                                  className="px-3 py-1.5 rounded-lg text-xs font-bold text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                                              >
+                                                  Editar
+                                              </button>
+                                              <button
+                                                  onClick={() => handleDuplicateTemplate(template)}
+                                                  className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                              >
+                                                  Duplicar
+                                              </button>
+                                              <button
+                                                  onClick={() => handleDeleteTemplate(template.id)}
+                                                  className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                                              >
+                                                  Excluir
+                                              </button>
+                                          </div>
+                                      </div>
+                                  ))}
+                              </div>
                           )}
                       </div>
                   </div>
