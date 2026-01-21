@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils } from 'lucide-react';
-import { CartItem, Store, Address } from '../types';
-import { createOrder } from '../services/db';
+import React, { useState, useEffect, useMemo } from 'react';
+import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils, Lock } from 'lucide-react';
+import { CartItem, Store, Address, Coupon } from '../types';
+import { createOrder, getCouponsByStore } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCurrencyBRL } from '../utils/format';
 import { imageKitUrl } from '../utils/imagekit';
-import { searchAddress } from '../utils/geo';
+import { searchAddress, calculateDistance } from '../utils/geo';
 
 interface CheckoutProps {
   store: Store;
@@ -14,6 +14,7 @@ interface CheckoutProps {
   onBack: () => void;
   onOrderPlaced: () => void;
   onChangeAddress: () => void;
+  onPixPayment?: (orderId: string) => void;
   tableContext?: {
     tableNumber: string;
     sessionId: string;
@@ -38,6 +39,23 @@ const isValidCPF = (cpf: string) => {
     return true;
 };
 
+const normalizeNeighborhoodName = (value: string) =>
+    (value || '')
+        .toString()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+
+const extractNeighborhoodName = (district?: string) => {
+    const raw = (district || '').toString().trim();
+    if (!raw) return '';
+    const dashSplit = raw.split(' - ');
+    const commaSplit = raw.split(',');
+    return (dashSplit[0] || commaSplit[0] || raw).trim();
+};
+
 const Checkout: React.FC<CheckoutProps> = ({ 
   store, 
   cartItems, 
@@ -45,13 +63,21 @@ const Checkout: React.FC<CheckoutProps> = ({
   onBack, 
   onOrderPlaced,
   onChangeAddress,
+  onPixPayment,
   tableContext
 }) => {
   const { user } = useAuth();
   const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(
-    tableContext ? 'MONEY' : store.acceptsCardOnDelivery ? 'CREDIT' : 'PIX'
+    tableContext ? 'MONEY' : store.acceptsCardOnDelivery ? 'CREDIT' : 'MONEY'
   );
-  const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(tableContext ? 'TABLE' : 'DELIVERY');
+  const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(() => {
+    if (tableContext) return 'TABLE';
+    if (store.acceptsDelivery === false) {
+      if (store.acceptsPickup) return 'PICKUP';
+      if (store.acceptsTableOrders) return 'TABLE';
+    }
+    return 'DELIVERY';
+  });
   const [tableNumber, setTableNumber] = useState(tableContext?.tableNumber || '');
   const [customerName, setCustomerName] = useState('');
   const [customerNameError, setCustomerNameError] = useState('');
@@ -60,39 +86,74 @@ const Checkout: React.FC<CheckoutProps> = ({
   const [cpfError, setCpfError] = useState('');
   const [phone, setPhone] = useState('');
   const [phoneError, setPhoneError] = useState('');
+  const [neighborhoodError, setNeighborhoodError] = useState('');
+  const [deliveryZoneError, setDeliveryZoneError] = useState('');
   const isTableFlow = !!tableContext;
-  const canUseCard = store.acceptsCardOnDelivery && orderType === 'DELIVERY';
+  const canUseCard = store.acceptsCardOnDelivery;
+  const pixOnlineEnabled =
+      store.pix_enabled === true && store.pix_hashes_configured === true;
+  const deliveryFeeMode =
+      store.deliveryFeeMode === 'BY_NEIGHBORHOOD'
+          ? 'BY_NEIGHBORHOOD'
+          : store.deliveryFeeMode === 'BY_RADIUS'
+          ? 'BY_RADIUS'
+          : 'FIXED';
+  const deliveryNeighborhoods = Array.isArray(store.neighborhoodFees)
+      ? store.neighborhoodFees
+      : Array.isArray(store.deliveryNeighborhoods)
+      ? store.deliveryNeighborhoods
+      : [];
+  const deliveryZones = Array.isArray(store.deliveryZones) ? store.deliveryZones : [];
   
   // Discount & Processing
   const [couponCode, setCouponCode] = useState('');
+  const [couponInput, setCouponInput] = useState('');
+  const [couponMessage, setCouponMessage] = useState('');
+  const [allCoupons, setAllCoupons] = useState<Coupon[]>([]);
+  const [selectedCoupon, setSelectedCoupon] = useState<Coupon | null>(null);
   const [discount, setDiscount] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [moneyChange, setMoneyChange] = useState('');
+  const isStoreClosed = store.isOpenNow === false;
 
   // --- EFFECTS ---
 
   useEffect(() => {
       if (user) {
-          if((user as any).cpf) {
+          if ((user as any).cpf && !cpf) {
               setCpf((user as any).cpf);
               setShowCpf(true);
           }
-          if ((user as any).phone) {
+          if ((user as any).phone && !phone) {
               setPhone((user as any).phone);
           }
-          if ((user as any).name) {
+          if ((user as any).name && !customerName) {
               setCustomerName((user as any).name);
           }
       }
-  }, [user]);
+  }, [user, cpf, phone, customerName]);
+
+  useEffect(() => {
+      if (!pixOnlineEnabled && paymentMethod === 'PIX') {
+          const fallbackMethod = canUseCard ? 'CREDIT' : 'MONEY';
+          setPaymentMethod(fallbackMethod);
+          alert('PIX online não está disponível para esta loja.');
+      }
+  }, [paymentMethod, pixOnlineEnabled, canUseCard]);
 
   useEffect(() => {
       if (isTableFlow) return;
-      if (!store.acceptsTableOrders && orderType === 'TABLE') {
-          setOrderType(store.acceptsPickup ? 'PICKUP' : 'DELIVERY');
+      if (store.acceptsDelivery === false && orderType === 'DELIVERY') {
+          setOrderType(store.acceptsPickup ? 'PICKUP' : store.acceptsTableOrders ? 'TABLE' : 'DELIVERY');
       }
-  }, [store.acceptsPickup, store.acceptsTableOrders, orderType, isTableFlow]);
+      if (!store.acceptsPickup && orderType === 'PICKUP') {
+          setOrderType(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsTableOrders ? 'TABLE' : 'PICKUP');
+      }
+      if (!store.acceptsTableOrders && orderType === 'TABLE') {
+          setOrderType(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsPickup ? 'PICKUP' : 'DELIVERY');
+      }
+  }, [store.acceptsDelivery, store.acceptsPickup, store.acceptsTableOrders, orderType, isTableFlow]);
 
   useEffect(() => {
       if (tableContext) {
@@ -102,21 +163,248 @@ const Checkout: React.FC<CheckoutProps> = ({
   }, [tableContext]);
 
   useEffect(() => {
-      if (isTableFlow) {
-          setPaymentMethod('MONEY');
-      } else if (!canUseCard && paymentMethod === 'CREDIT') {
+      if (!canUseCard && paymentMethod === 'CREDIT') {
           setPaymentMethod('PIX');
       }
-  }, [canUseCard, isTableFlow, paymentMethod]);
+  }, [canUseCard, paymentMethod]);
+
+  useEffect(() => {
+      if (orderType !== 'DELIVERY' || deliveryFeeMode !== 'BY_NEIGHBORHOOD') {
+          setNeighborhoodError('');
+          return;
+      }
+      const district = extractNeighborhoodName(address?.district);
+      if (!district) {
+          setNeighborhoodError('Informe o endereço completo com bairro.');
+          return;
+      }
+      const normalized = normalizeNeighborhoodName(district);
+      const match = deliveryNeighborhoods.find(
+          (item) => normalizeNeighborhoodName(item.name) === normalized
+      );
+      if (!match || match.active === false) {
+          setNeighborhoodError(`Esta empresa não entrega no seu bairro: ${district}.`);
+          return;
+      }
+      setNeighborhoodError('');
+  }, [
+      orderType,
+      deliveryFeeMode,
+      address?.district,
+      deliveryNeighborhoods
+  ]);
+
+  const resolvedZone = useMemo(() => {
+      if (orderType !== 'DELIVERY' || deliveryFeeMode !== 'BY_RADIUS') return null;
+      if (!address?.coordinates) {
+          return { error: 'Informe um endereço válido para calcular o frete.' };
+      }
+      const activeZones = deliveryZones.filter((zone) => zone && zone.enabled !== false);
+      if (activeZones.length === 0) {
+          return { error: 'Nenhuma área de entrega configurada.' };
+      }
+      const matches = activeZones
+          .map((zone) => {
+              const distanceKm = calculateDistance(
+                  { lat: zone.centerLat, lng: zone.centerLng },
+                  address.coordinates
+              );
+              return { zone, distanceMeters: distanceKm * 1000 };
+          })
+          .filter((item) => item.distanceMeters <= Number(item.zone.radiusMeters || 0));
+      if (matches.length === 0) {
+          return { error: 'Esta loja não entrega no seu endereço.' };
+      }
+      matches.sort((a, b) => {
+          const priorityA = Number(a.zone.priority || 0);
+          const priorityB = Number(b.zone.priority || 0);
+          if (priorityA !== priorityB) return priorityB - priorityA;
+          const radiusA = Number(a.zone.radiusMeters || 0);
+          const radiusB = Number(b.zone.radiusMeters || 0);
+          if (radiusA !== radiusB) return radiusA - radiusB;
+          return a.distanceMeters - b.distanceMeters;
+      });
+      const best = matches[0].zone;
+      return {
+          zone: best,
+          fee: Number(best.fee || 0),
+          etaMinutes: Number(best.etaMinutes || 0)
+      };
+  }, [orderType, deliveryFeeMode, address?.coordinates, deliveryZones]);
+
+  useEffect(() => {
+      if (deliveryFeeMode !== 'BY_RADIUS') {
+          setDeliveryZoneError('');
+          return;
+      }
+      if (resolvedZone?.error) {
+          setDeliveryZoneError(resolvedZone.error);
+      } else {
+          setDeliveryZoneError('');
+      }
+  }, [deliveryFeeMode, resolvedZone]);
+
+  useEffect(() => {
+      let active = true;
+      const loadCoupons = async () => {
+          try {
+              const couponsData = await getCouponsByStore(store.id);
+              if (!active) return;
+              setAllCoupons(couponsData || []);
+          } catch (error) {
+              if (!active) return;
+              setAllCoupons([]);
+          }
+      };
+      loadCoupons();
+      return () => {
+          active = false;
+      };
+  }, [store.id]);
 
   // Calculations
   const subtotal = cartItems.reduce((acc, item) => acc + item.totalPrice, 0);
-  const deliveryFee = Number(store.deliveryFee) || 0;
+  const deliveryMinValue =
+      typeof store.delivery_min_order_value === 'number' && store.delivery_min_order_value > 0
+          ? store.delivery_min_order_value
+          : 0;
   const pickupTime = store.pickupTime || store.deliveryTime;
-  const finalDeliveryFee = orderType === 'DELIVERY' ? deliveryFee : 0;
-  const total = subtotal + finalDeliveryFee - discount;
+  const resolvedNeighborhood = useMemo(() => {
+      if (deliveryFeeMode !== 'BY_NEIGHBORHOOD') return null;
+      const candidate = extractNeighborhoodName(address?.district);
+      if (!candidate) return null;
+      const normalized = normalizeNeighborhoodName(candidate);
+      return (
+          deliveryNeighborhoods.find(
+              (item) => normalizeNeighborhoodName(item.name) === normalized
+          ) || null
+      );
+  }, [deliveryFeeMode, address?.district, deliveryNeighborhoods]);
+  const isNeighborhoodBlocked =
+      orderType === 'DELIVERY' &&
+      deliveryFeeMode === 'BY_NEIGHBORHOOD' &&
+      (!!neighborhoodError || !resolvedNeighborhood || !resolvedNeighborhood.active);
+  const isZoneBlocked =
+      orderType === 'DELIVERY' &&
+      deliveryFeeMode === 'BY_RADIUS' &&
+      !!resolvedZone?.error;
+  const deliveryFee =
+      orderType === 'DELIVERY'
+          ? deliveryFeeMode === 'BY_NEIGHBORHOOD'
+              ? resolvedNeighborhood && resolvedNeighborhood.active && !neighborhoodError
+                  ? Number(resolvedNeighborhood.fee) || 0
+                  : 0
+              : deliveryFeeMode === 'BY_RADIUS'
+              ? Number(resolvedZone?.fee || 0)
+              : Number(store.deliveryFee) || 0
+          : 0;
+  const total = subtotal + deliveryFee - discount;
+  const deliverySubtotal = Math.max(0, subtotal - discount);
+  const isBelowDeliveryMin =
+      orderType === 'DELIVERY' && deliveryMinValue > 0 && deliverySubtotal < deliveryMinValue;
+  const canPlaceOrder =
+      !isProcessing &&
+      !isStoreClosed &&
+      !isBelowDeliveryMin &&
+      !(
+          orderType === 'DELIVERY' &&
+          ((deliveryFeeMode === 'BY_NEIGHBORHOOD' && isNeighborhoodBlocked) ||
+              (deliveryFeeMode === 'BY_RADIUS' && isZoneBlocked))
+      );
+
+  const couponStatus = (coupon: Coupon) => {
+      if (!coupon.isActive) {
+          return { eligible: false, reason: 'Cupom inativo.' };
+      }
+      if (coupon.expiresAt && new Date(coupon.expiresAt).getTime() < Date.now()) {
+          return { eligible: false, reason: 'Cupom expirado.' };
+      }
+      if (coupon.usageLimit && coupon.usageCount >= coupon.usageLimit) {
+          return { eligible: false, reason: 'Cupom esgotado.' };
+      }
+      if (coupon.minOrderValue > 0 && subtotal < coupon.minOrderValue) {
+          return { eligible: false, reason: `Pedido minimo R$ ${coupon.minOrderValue}.` };
+      }
+      return { eligible: true, reason: '' };
+  };
+
+  const activeCoupons = useMemo(() => allCoupons.filter((coupon) => coupon.isActive), [allCoupons]);
+  const eligibleCoupons = useMemo(
+      () => activeCoupons.filter((coupon) => couponStatus(coupon).eligible),
+      [activeCoupons, subtotal]
+  );
+  useEffect(() => {
+      if (!selectedCoupon) {
+          setDiscount(0);
+          setCouponCode('');
+          return;
+      }
+      const status = couponStatus(selectedCoupon);
+      if (!status.eligible) {
+          setDiscount(0);
+          setCouponCode('');
+          setCouponMessage(status.reason);
+          return;
+      }
+      const baseDiscount =
+          selectedCoupon.discountType === 'PERCENTAGE'
+              ? (subtotal * selectedCoupon.discountValue) / 100
+              : selectedCoupon.discountValue;
+      const applied = Math.min(baseDiscount, subtotal);
+      setDiscount(applied);
+      setCouponCode(selectedCoupon.code);
+  }, [selectedCoupon, subtotal]);
+
+  const handleApplyCoupon = (coupon: Coupon) => {
+      const status = couponStatus(coupon);
+      if (!status.eligible) {
+          setCouponMessage(status.reason);
+          setSelectedCoupon(null);
+          return;
+      }
+      setSelectedCoupon(coupon);
+      setCouponInput(coupon.code);
+      setCouponMessage(`Cupom ${coupon.code} aplicado.`);
+  };
+
+  const handleApplyCouponCode = () => {
+      const code = couponInput.trim().toUpperCase();
+      if (!code) {
+          setCouponMessage('Informe um cupom.');
+          return;
+      }
+      const match = allCoupons.find((coupon) => coupon.code.toUpperCase() === code);
+      if (!match) {
+          setCouponMessage('Cupom não encontrado.');
+          setSelectedCoupon(null);
+          return;
+      }
+      handleApplyCoupon(match);
+  };
+
+  const handleRemoveCoupon = () => {
+      setSelectedCoupon(null);
+      setCouponCode('');
+      setCouponMessage('Cupom removido.');
+  };
 
   const handlePlaceOrder = async () => {
+    if (orderType === 'DELIVERY' && store.acceptsDelivery === false) {
+      alert('Esta loja não aceita pedidos para entrega.');
+      return;
+    }
+    if (orderType === 'DELIVERY' && deliveryFeeMode === 'BY_NEIGHBORHOOD') {
+      if (isNeighborhoodBlocked) {
+        alert(neighborhoodError || 'Esta empresa não entrega no seu bairro.');
+        return;
+      }
+    }
+    if (orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS') {
+      if (resolvedZone?.error) {
+        alert(resolvedZone.error);
+        return;
+      }
+    }
     if (orderType === 'DELIVERY' && !address) {
       onChangeAddress();
       return;
@@ -173,15 +461,15 @@ const Checkout: React.FC<CheckoutProps> = ({
             return `${item.quantity}x ${item.product.name} ${opts ? `(${opts})` : ''} ${item.notes ? `[Obs: ${item.notes}]` : ''}`;
         });
 
+        const paymentContext =
+            orderType === 'DELIVERY' ? 'na entrega' : orderType === 'PICKUP' ? 'na retirada' : 'na mesa';
         let paymentDescription = '';
-        if (orderType === 'TABLE') {
-            paymentDescription = 'Pagamento na mesa';
-        } else if (paymentMethod === 'CREDIT') {
-            paymentDescription = 'Cartão na Entrega (Maquininha)';
+        if (paymentMethod === 'CREDIT') {
+            paymentDescription = `Cartão ${paymentContext}`;
         } else if (paymentMethod === 'PIX') {
-            paymentDescription = 'Pix';
+            paymentDescription = pixOnlineEnabled ? 'PIX (Online)' : 'Pix';
         } else {
-            paymentDescription = `Dinheiro${moneyChange ? ` (Troco p/ ${moneyChange})` : ''}`;
+            paymentDescription = `Dinheiro ${paymentContext}${moneyChange ? ` (Troco p/ ${moneyChange})` : ''}`;
         }
 
         const tableValue = tableNumber.trim();
@@ -217,10 +505,30 @@ const Checkout: React.FC<CheckoutProps> = ({
             items: itemsDescription,
             lineItems,
             total: total,
-            deliveryFee: orderType === 'DELIVERY' ? Number(store.deliveryFee) || 0 : 0,
+            deliveryFee: orderType === 'DELIVERY' ? deliveryFee : 0,
+            deliveryNeighborhood:
+                orderType === 'DELIVERY' && deliveryFeeMode === 'BY_NEIGHBORHOOD'
+                    ? resolvedNeighborhood?.name
+                    : undefined,
+            deliveryZoneId:
+                orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS'
+                    ? resolvedZone?.zone?.id
+                    : undefined,
+            deliveryZoneName:
+                orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS'
+                    ? resolvedZone?.zone?.name
+                    : undefined,
+            deliveryEtaMinutes:
+                orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS'
+                    ? resolvedZone?.etaMinutes
+                    : undefined,
             time: new Date().toLocaleTimeString(),
             notes: orderType === 'PICKUP' ? 'RETIRADA NO BALCÃO' : orderType === 'TABLE' ? `MESA ${tableValue}` : '', 
             paymentMethod: paymentDescription,
+            paymentProvider:
+                paymentMethod === 'PIX' && pixOnlineEnabled
+                    ? 'PIX_REPASSE'
+                    : undefined,
             refundStatus: 'NONE',
             storeCity: store.city, 
             storeCoordinates: store.coordinates,
@@ -241,7 +549,10 @@ const Checkout: React.FC<CheckoutProps> = ({
             tableNumber: orderType === 'TABLE' ? tableValue : undefined,
             tableSessionId: orderType === 'TABLE' ? tableContext?.sessionId : undefined,
             cpf: showCpf ? cpf : '',
-            customerPhone: phoneDigits
+            customerPhone: phoneDigits,
+            couponCode: selectedCoupon?.code,
+            couponId: selectedCoupon?.id,
+            couponDiscount: discount > 0 ? discount : undefined
         });
         if (createdOrder?.customerId) {
             localStorage.setItem('customerId', createdOrder.customerId);
@@ -253,6 +564,12 @@ const Checkout: React.FC<CheckoutProps> = ({
             localStorage.setItem('lastOrderId', createdOrder.id);
         }
 
+        if (createdOrder?.payment?.provider === 'PIX_REPASSE' && createdOrder?.id && onPixPayment) {
+            onPixPayment(createdOrder.id);
+            setIsProcessing(false);
+            return;
+        }
+
         setIsSuccess(true);
         setTimeout(() => {
             onOrderPlaced();
@@ -260,7 +577,11 @@ const Checkout: React.FC<CheckoutProps> = ({
 
     } catch (error) {
         console.error("Error placing order:", error);
-        alert("Erro ao realizar pedido. Tente novamente.");
+        const message =
+            error instanceof Error && error.message
+                ? error.message
+                : "Erro ao realizar pedido. Tente novamente.";
+        alert(message);
     } finally {
         setIsProcessing(false);
     }
@@ -313,16 +634,29 @@ const Checkout: React.FC<CheckoutProps> = ({
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+        {isStoreClosed && (
+          <section className="bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-2xl flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-100 flex items-center justify-center">
+              <Lock size={18} />
+            </div>
+            <div>
+              <p className="font-bold">Loja fechada no momento</p>
+              <p className="text-sm">Verifique os horários de funcionamento para fazer seu pedido.</p>
+            </div>
+          </section>
+        )}
         
         {/* DELIVERY TYPE TOGGLE */}
         {!isTableFlow && (
           <section className="bg-white dark:bg-slate-900 p-1.5 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 flex">
-              <button 
-                  onClick={() => setOrderType('DELIVERY')}
-                  className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'DELIVERY' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
-              >
-                  <Bike size={18} /> Entrega
-              </button>
+              {store.acceptsDelivery !== false && (
+                  <button 
+                      onClick={() => setOrderType('DELIVERY')}
+                      className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'DELIVERY' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
+                  >
+                      <Bike size={18} /> Entrega
+                  </button>
+              )}
               <button 
                   onClick={() => store.acceptsPickup && setOrderType('PICKUP')}
                   disabled={!store.acceptsPickup}
@@ -382,6 +716,43 @@ const Checkout: React.FC<CheckoutProps> = ({
                     </button>
                 )}
             </div>
+            {orderType === 'DELIVERY' && deliveryFeeMode === 'BY_NEIGHBORHOOD' && (
+                <div className="mt-4 space-y-2">
+                    {neighborhoodError ? (
+                        <p className="text-xs text-red-600">{neighborhoodError}</p>
+                    ) : resolvedNeighborhood ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Bairro identificado: <span className="font-semibold">{resolvedNeighborhood.name}</span>
+                        </p>
+                    ) : (
+                        <p className="text-xs text-amber-600">
+                            Informe um endereço completo para identificar o bairro.
+                        </p>
+                    )}
+                </div>
+            )}
+            {orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS' && (
+                <div className="mt-4 space-y-2">
+                    <div className="rounded-xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+                        {resolvedZone?.zone ? (
+                            <div className="space-y-1 text-sm text-slate-700 dark:text-slate-200">
+                                <div className="flex items-center justify-between font-semibold">
+                                    <span>{resolvedZone.zone.name}</span>
+                                    <span>{resolvedZone.fee && resolvedZone.fee > 0 ? formatCurrencyBRL(resolvedZone.fee) : 'Grátis'}</span>
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                    Tempo estimado: {resolvedZone.etaMinutes ? `${resolvedZone.etaMinutes} min` : store.deliveryTime}
+                                </div>
+                            </div>
+                        ) : (
+                            <p className="text-xs text-slate-500">Informe um endereço para calcular o frete.</p>
+                        )}
+                    </div>
+                    {deliveryZoneError && (
+                        <p className="text-xs text-red-600">{deliveryZoneError}</p>
+                    )}
+                </div>
+            )}
             {orderType === 'TABLE' && (
                 <div className="mt-4">
                     <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-2">Número da Mesa</label>
@@ -428,10 +799,30 @@ const Checkout: React.FC<CheckoutProps> = ({
                         <span>Subtotal</span>
                         <span>{formatCurrencyBRL(subtotal)}</span>
                     </div>
+                    {orderType === 'DELIVERY' && deliveryMinValue > 0 && (
+                        <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                            <span>Pedido mínimo entrega</span>
+                            <span>{formatCurrencyBRL(deliveryMinValue)}</span>
+                        </div>
+                    )}
                     <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                         <span>Taxa de Entrega</span>
                         {orderType === 'DELIVERY' ? (
-                            <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                            deliveryFeeMode === 'BY_NEIGHBORHOOD' ? (
+                                isNeighborhoodBlocked ? (
+                                    <span className="text-red-600 font-semibold">Indisponível</span>
+                                ) : (
+                                    <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                                )
+                            ) : deliveryFeeMode === 'BY_RADIUS' ? (
+                                deliveryZoneError ? (
+                                    <span className="text-red-600 font-semibold">Indisponível</span>
+                                ) : (
+                                    <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                                )
+                            ) : (
+                                <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                            )
                         ) : (
                             <span className="text-green-600 font-bold">Grátis (Retirada)</span>
                         )}
@@ -442,11 +833,102 @@ const Checkout: React.FC<CheckoutProps> = ({
                             <span>- {formatCurrencyBRL(discount)}</span>
                         </div>
                     )}
+                    {isBelowDeliveryMin && (
+                        <div className="text-xs text-rose-600 font-bold">
+                            Pedido mínimo para entrega: {formatCurrencyBRL(deliveryMinValue)}. Falta{' '}
+                            {formatCurrencyBRL(Math.max(0, deliveryMinValue - deliverySubtotal))} para concluir.
+                        </div>
+                    )}
                     <div className="flex justify-between text-xl font-extrabold text-slate-800 dark:text-white pt-3 mt-2 border-t border-gray-100 dark:border-slate-800">
                         <span>Total</span>
                         <span>{formatCurrencyBRL(total)}</span>
                     </div>
                 </div>
+            </div>
+        </section>
+
+        {/* Coupons */}
+        <section>
+            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                Cupom
+            </h3>
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                        type="text"
+                        value={couponInput}
+                        onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                        placeholder="Digite o cupom"
+                        className="flex-1 p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                    />
+                    <button
+                        type="button"
+                        onClick={handleApplyCouponCode}
+                        className="px-4 py-3 rounded-xl font-bold text-sm bg-slate-900 text-white hover:opacity-90"
+                    >
+                        Aplicar
+                    </button>
+                    {selectedCoupon && (
+                        <button
+                            type="button"
+                            onClick={handleRemoveCoupon}
+                            className="px-4 py-3 rounded-xl font-bold text-sm border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200"
+                        >
+                            Remover
+                        </button>
+                    )}
+                </div>
+                {couponMessage && (
+                    <p className="text-sm text-slate-600 dark:text-slate-300">{couponMessage}</p>
+                )}
+                {eligibleCoupons.length === 0 && (
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Nenhum cupom disponível.</p>
+                )}
+                {activeCoupons.length > 0 && (
+                    <div className="space-y-2">
+                        {activeCoupons.map((coupon) => {
+                            const status = couponStatus(coupon);
+                            return (
+                                <div
+                                    key={coupon.id}
+                                    className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-xl border ${
+                                        status.eligible
+                                            ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
+                                            : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50'
+                                    }`}
+                                >
+                                    <div>
+                                        <p className="font-bold text-slate-800 dark:text-white">{coupon.code}</p>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            {coupon.description || 'Cupom disponível'}
+                                        </p>
+                                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1 flex flex-wrap gap-2">
+                                            <span>
+                                                {coupon.discountType === 'PERCENTAGE'
+                                                    ? `${coupon.discountValue}% OFF`
+                                                    : `R$ ${coupon.discountValue} OFF`}
+                                            </span>
+                                            {coupon.minOrderValue > 0 && (
+                                                <span>Pedido mínimo R$ {coupon.minOrderValue}</span>
+                                            )}
+                                            {coupon.expiresAt && (
+                                                <span>Válido até {new Date(coupon.expiresAt).toLocaleDateString()}</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        disabled={!status.eligible}
+                                        onClick={() => handleApplyCoupon(coupon)}
+                                        className="px-4 py-2 rounded-xl text-sm font-bold bg-white border border-slate-200 text-slate-700 hover:border-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        Aplicar
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
         </section>
 
@@ -539,8 +1021,6 @@ const Checkout: React.FC<CheckoutProps> = ({
             )}
         </section>
 
-        {/* Payment Methods UI */}
-        {!isTableFlow && (
         <section>
              <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <Banknote size={16} /> Pagamento
@@ -550,13 +1030,15 @@ const Checkout: React.FC<CheckoutProps> = ({
                     {canUseCard && (
                         <button onClick={() => setPaymentMethod('CREDIT')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'CREDIT' ? 'text-red-600 bg-red-50 dark:bg-red-900/10 border-b-2 border-red-600' : 'text-gray-500'}`}><CreditCard size={18} /> Cartão</button>
                     )}
-                    <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><div className="w-4 h-4 rounded rotate-45 border-2 border-current"></div> Pix</button>
+                    {pixOnlineEnabled && (
+                        <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><div className="w-4 h-4 rounded rotate-45 border-2 border-current"></div> Pix</button>
+                    )}
                     <button onClick={() => setPaymentMethod('MONEY')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'MONEY' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/10 border-b-2 border-blue-600' : 'text-gray-500'}`}><Banknote size={18} /> Dinheiro</button>
                 </div>
                 <div className="p-6">
                     {paymentMethod === 'CREDIT' && (
                         <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 p-4 text-sm text-gray-600 dark:text-gray-300">
-                            Pagamento com cartão será realizado na entrega, direto na maquininha.
+                            Pagamento com cartão será realizado {orderType === 'DELIVERY' ? 'na entrega' : orderType === 'PICKUP' ? 'na retirada' : 'na mesa'}, direto na maquininha.
                         </div>
                     )}
                     {paymentMethod === 'MONEY' && (
@@ -565,24 +1047,17 @@ const Checkout: React.FC<CheckoutProps> = ({
                             <input type="number" value={moneyChange} onChange={e => setMoneyChange(e.target.value)} className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:text-white" placeholder="R$ 0,00" />
                         </div>
                     )}
-                    {paymentMethod === 'PIX' && (
+                    {paymentMethod === 'PIX' && pixOnlineEnabled && (
                         <div className="text-center p-4">
-                            <p className="font-bold text-slate-800 dark:text-white">Chave Pix</p>
-                            <p className="text-sm text-gray-500">Copie e pague no seu banco</p>
+                            <p className="font-bold text-slate-800 dark:text-white">Pix</p>
+                            <p className="text-sm text-gray-500">
+                                Pagamento online com QR Code e copia e cola.
+                            </p>
                         </div>
                     )}
                 </div>
             </div>
         </section>
-        )}
-        {isTableFlow && (
-            <section className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5">
-                <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-2 flex items-center gap-2">
-                    <Banknote size={16} /> Pagamento
-                </h3>
-                <p className="text-sm text-gray-600 dark:text-gray-300">Pagamento será realizado na mesa, direto com a equipe.</p>
-            </section>
-        )}
 
       </main>
 
@@ -595,7 +1070,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             </div>
             <button 
                 onClick={handlePlaceOrder}
-                disabled={isProcessing}
+                disabled={!canPlaceOrder}
                 className="w-full sm:w-auto sm:min-w-[250px] bg-red-600 hover:bg-red-700 text-white py-4 rounded-xl font-bold text-lg shadow-xl shadow-red-600/20 transition-all hover:scale-[1.02] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
                 {isProcessing ? (

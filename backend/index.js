@@ -4814,6 +4814,13 @@ app.post('/api/orders', async (req, res) => {
         error: 'Loja fechada no momento. Verifique os horários de funcionamento.'
       });
     }
+    if (orderType === 'DELIVERY') {
+      const deliveryMin = Number(storeData.delivery_min_order_value || 0);
+      const effectiveSubtotal = Math.max(0, lineItemsSubtotal - Number(payload.couponDiscount || 0));
+      if (Number.isFinite(deliveryMin) && deliveryMin > 0 && effectiveSubtotal < deliveryMin) {
+        return res.status(400).json({ error: `Pedido mínimo para entrega: R$ ${deliveryMin}.` });
+      }
+    }
     if (storeData.autoAcceptOrders && status === 'PENDING' && !isPixRepasse) {
       status = 'PREPARING';
       payload.autoAccepted = true;

@@ -87,6 +87,7 @@ export interface Store {
   pickupTime?: string;
   deliveryFee: number;
   deliveryFeeMode?: 'FIXED' | 'BY_NEIGHBORHOOD' | 'BY_RADIUS';
+  delivery_min_order_value?: number;
   deliveryNeighborhoods?: DeliveryNeighborhood[];
   neighborhoodFees?: DeliveryNeighborhood[];
   deliveryZones?: DeliveryZone[];

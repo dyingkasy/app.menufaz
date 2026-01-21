@@ -2292,6 +2292,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   return;
               }
           }
+          if (
+              storeProfile.delivery_min_order_value !== undefined &&
+              Number(storeProfile.delivery_min_order_value) < 0
+          ) {
+              alert('O valor mínimo para entrega deve ser zero ou maior.');
+              return;
+          }
           const {
               schedule,
               autoOpenClose,
@@ -4843,6 +4850,25 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    </label>
                                </div>
                            </div>
+                           <div>
+                               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Valor mínimo para entrega (opcional)</label>
+                               <p className="text-xs text-gray-400 mb-1">Pedidos para entrega só serão aceitos a partir desse valor.</p>
+                               <input
+                                   type="text"
+                                   value={storeProfile.delivery_min_order_value ?? ''}
+                                   onChange={(e) => {
+                                       const raw = e.target.value.replace(',', '.').trim();
+                                       if (!raw) {
+                                           setStoreProfile({ ...storeProfile, delivery_min_order_value: undefined });
+                                           return;
+                                       }
+                                       const parsed = Number(raw);
+                                       setStoreProfile({ ...storeProfile, delivery_min_order_value: Number.isFinite(parsed) ? parsed : undefined });
+                                   }}
+                                   placeholder="Ex.: 30,00"
+                                   className="w-full p-3 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                               />
+                           </div>
                            {deliveryFeeMode === 'FIXED' && (
                                <div>
                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Taxa de Entrega (R$)</label>
@@ -5720,8 +5746,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                     { id: 'SALES', icon: Receipt, label: 'Vendas' }, 
                     { id: 'FINANCE', icon: DollarSign, label: 'Financeiro' }, 
                     { id: 'EXPENSES', icon: Wallet, label: 'Retirada / Entrada' }, 
-                    { id: 'STOCK', icon: Database, label: 'Estoque' },
                     { id: 'MENU', icon: UtensilsCrossed, label: 'Cardápio' },
+                    { id: 'STOCK', icon: Database, label: 'Estoque' },
                     { id: 'BUILDABLE_PRODUCTS', icon: Layers, label: 'Cadastro Produto Montável' },
                     { id: 'COUPONS', icon: Ticket, label: 'Cupons' },
                     { id: 'COURIERS', icon: Bike, label: 'Entregadores' },
