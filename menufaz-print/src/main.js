@@ -38,6 +38,10 @@ let processingQueue = false;
 const jobQueue = [];
 const inFlightJobIds = new Set();
 let currentConfig = null;
+let trayState = null;
+
+const TRAY_ICON_OK = 'tray-green.png';
+const TRAY_ICON_ERROR = 'tray-red.png';
 
 const state = {
   storeName: '',
@@ -159,6 +163,7 @@ const updateStatus = (updates) => {
   if (mainWindow) {
     mainWindow.webContents.send('status-update', state);
   }
+  updateTrayIcon(state);
 };
 
 const apiRequest = async (config, endpoint, options = {}) => {
@@ -509,8 +514,26 @@ const applyAutoLaunchSetting = (enabled) => {
   });
 };
 
-const resolveTrayIconPath = () => {
-  return path.join(app.getAppPath(), 'src', 'assets', 'tray.ico');
+const resolveTrayIconPath = (fileName) => {
+  return path.join(app.getAppPath(), 'src', 'assets', fileName);
+};
+
+const loadTrayIcon = (hasError) => {
+  const preferred = resolveTrayIconPath(hasError ? TRAY_ICON_ERROR : TRAY_ICON_OK);
+  let icon = nativeImage.createFromPath(preferred);
+  if (icon.isEmpty()) {
+    icon = nativeImage.createFromPath(resolveTrayIconPath('tray.ico'));
+  }
+  return icon;
+};
+
+const updateTrayIcon = (nextState = state) => {
+  if (!tray) return;
+  const hasError = Boolean(nextState.lastError || nextState.currentStatus === 'Error');
+  const nextTrayState = hasError ? 'error' : 'ok';
+  if (trayState === nextTrayState) return;
+  tray.setImage(loadTrayIcon(hasError));
+  trayState = nextTrayState;
 };
 
 const showMainWindow = () => {
@@ -523,9 +546,8 @@ const showMainWindow = () => {
 };
 
 const setupTray = () => {
-  const iconPath = resolveTrayIconPath();
-  const icon = nativeImage.createFromPath(iconPath);
-  tray = new Tray(icon);
+  tray = new Tray(loadTrayIcon(false));
+  trayState = 'ok';
   tray.setToolTip('Menufaz Print');
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Abrir', click: () => showMainWindow() },
@@ -539,6 +561,7 @@ const setupTray = () => {
   ]);
   tray.setContextMenu(contextMenu);
   tray.on('double-click', () => showMainWindow());
+  updateTrayIcon(state);
 };
 
 const createWindow = () => {
