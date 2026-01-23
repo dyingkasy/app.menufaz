@@ -7,5 +7,7 @@ contextBridge.exposeInMainWorld('menufazPrint', {
   refreshPrinters: () => ipcRenderer.invoke('refresh-printers'),
   setPrinter: (printerName) => ipcRenderer.invoke('set-printer', { printerName }),
   testPrint: () => ipcRenderer.invoke('test-print'),
+  getAutoLaunchEnabled: () => ipcRenderer.invoke('get-auto-launch'),
+  setAutoLaunchEnabled: (enabled) => ipcRenderer.invoke('set-auto-launch', { enabled }),
   onStatusUpdate: (callback) => ipcRenderer.on('status-update', (_event, data) => callback(data))
 });

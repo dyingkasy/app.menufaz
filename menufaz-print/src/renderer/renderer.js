@@ -23,7 +23,8 @@ const elements = {
   currentStatus: document.getElementById('currentStatus'),
   lastPrinted: document.getElementById('lastPrinted'),
   lastError: document.getElementById('lastError'),
-  logFilePath: document.getElementById('logFilePath')
+  logFilePath: document.getElementById('logFilePath'),
+  autoLaunchToggle: document.getElementById('autoLaunchToggle')
 };
 
 const formatDate = (value) => {
@@ -47,6 +48,7 @@ const renderConfig = () => {
     elements.apiUrlReadOnly.textContent = '';
     elements.apiUrlInput.value = state.config.apiUrl || '';
   }
+  elements.autoLaunchToggle.checked = Boolean(state.config.autoLaunchEnabled);
 };
 
 const renderStatus = () => {
@@ -91,6 +93,10 @@ const loadState = async () => {
   state.printers = data.printers || [];
   state.status = data.status || {};
   state.isPackaged = Boolean(data.isPackaged);
+  try {
+    const autoLaunch = await window.menufazPrint.getAutoLaunchEnabled();
+    state.config.autoLaunchEnabled = Boolean(autoLaunch?.enabled);
+  } catch {}
   renderConfig();
   renderPrinters();
   renderStatus();
@@ -129,6 +135,13 @@ elements.testPrint.addEventListener('click', async () => {
     state.status.lastError = String(error.message || error);
   }
   renderStatus();
+});
+
+elements.autoLaunchToggle.addEventListener('change', async (event) => {
+  const enabled = Boolean(event.target.checked);
+  const result = await window.menufazPrint.setAutoLaunchEnabled(enabled);
+  state.config = result.config || state.config;
+  renderConfig();
 });
 
 window.menufazPrint.onStatusUpdate((status) => {
