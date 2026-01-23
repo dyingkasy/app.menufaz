@@ -29,6 +29,7 @@ const PRINT_WRAP_COLUMNS = 48;
 
 let mainWindow = null;
 let tray = null;
+let isQuitting = false;
 let pollingTimer = null;
 let pollingInFlight = false;
 let lastPrinterMissing = false;
@@ -487,6 +488,9 @@ const ensureConfig = () => {
     nextConfig.machineId = randomUUID();
   }
   if (!nextConfig.apiUrl) nextConfig.apiUrl = getDefaultApiUrl();
+  if (typeof nextConfig.autoLaunchEnabled !== 'boolean') {
+    nextConfig.autoLaunchEnabled = false;
+  }
   if (app.isPackaged && apiUrlSource === 'default' && isLocalhostUrl(rawConfig?.apiUrl || '')) {
     logInfo('overrode localhost apiUrl with production default', {
       previousApiUrl: rawConfig.apiUrl,
@@ -497,18 +501,44 @@ const ensureConfig = () => {
   return nextConfig;
 };
 
+const applyAutoLaunchSetting = (enabled) => {
+  if (process.platform !== 'win32') return;
+  app.setLoginItemSettings({
+    openAtLogin: Boolean(enabled),
+    path: app.getPath('exe')
+  });
+};
+
+const resolveTrayIconPath = () => {
+  return path.join(app.getAppPath(), 'src', 'assets', 'tray.ico');
+};
+
+const showMainWindow = () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+};
+
 const setupTray = () => {
-  const icon = nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAJXbL/8AAAAASUVORK5CYII='
-  );
+  const iconPath = resolveTrayIconPath();
+  const icon = nativeImage.createFromPath(iconPath);
   tray = new Tray(icon);
   tray.setToolTip('Menufaz Print');
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Mostrar', click: () => mainWindow && mainWindow.show() },
-    { label: 'Sair', click: () => app.quit() }
+    { label: 'Abrir', click: () => showMainWindow() },
+    {
+      label: 'Sair',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
   ]);
   tray.setContextMenu(contextMenu);
-  tray.on('double-click', () => mainWindow && mainWindow.show());
+  tray.on('double-click', () => showMainWindow());
 };
 
 const createWindow = () => {
@@ -518,6 +548,7 @@ const createWindow = () => {
     resizable: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -527,10 +558,9 @@ const createWindow = () => {
 
   mainWindow.on('close', (event) => {
     if (process.platform === 'darwin') return;
-    if (tray) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow.hide();
   });
 };
 
@@ -596,7 +626,8 @@ ipcMain.handle('reset-config', async () => {
   const nextConfig = {
     merchantId: current.merchantId || '',
     machineId: current.machineId || randomUUID(),
-    apiUrl: getDefaultApiUrl()
+    apiUrl: getDefaultApiUrl(),
+    autoLaunchEnabled: Boolean(current.autoLaunchEnabled)
   };
   saveConfig(nextConfig);
   logInfo('config reset', { merchantId: nextConfig.merchantId, apiUrl: nextConfig.apiUrl });
@@ -613,6 +644,20 @@ ipcMain.handle('set-printer', (_event, payload) => {
   const nextConfig = { ...config, printerName: payload.printerName || '' };
   saveConfig(nextConfig);
   logInfo('printer selected', { printerName: nextConfig.printerName });
+  return { success: true, config: nextConfig };
+});
+
+ipcMain.handle('get-auto-launch', () => {
+  const config = ensureConfig();
+  return { enabled: Boolean(config.autoLaunchEnabled) };
+});
+
+ipcMain.handle('set-auto-launch', (_event, payload) => {
+  const config = ensureConfig();
+  const enabled = Boolean(payload?.enabled);
+  const nextConfig = { ...config, autoLaunchEnabled: enabled };
+  saveConfig(nextConfig);
+  applyAutoLaunchSetting(enabled);
   return { success: true, config: nextConfig };
 });
 
@@ -659,17 +704,31 @@ ipcMain.handle('test-print', async () => {
   return { success: true };
 });
 
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showMainWindow();
+  });
+}
+
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
 app.whenReady().then(() => {
   ensureLogFile();
   logInfo('app started');
   createWindow();
   setupTray();
+  const config = ensureConfig();
+  applyAutoLaunchSetting(config.autoLaunchEnabled);
   initialize();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    stopPolling();
+  if (process.platform === 'darwin') {
     app.quit();
   }
 });
