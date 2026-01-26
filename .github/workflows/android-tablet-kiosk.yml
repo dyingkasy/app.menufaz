@@ -154,7 +154,7 @@ jobs:
           scp -P "${VPS_PORT}" "$APK_LOCAL" "${VPS_USER}@${VPS_HOST}:${TMP_APK}"
           scp -P "${VPS_PORT}" "$META_LOCAL" "${VPS_USER}@${VPS_HOST}:${TMP_META}"
 
-          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "sha256sum ${TMP_APK} | awk '{print \\$1}'" > /tmp/remote_sha.txt
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "sha256sum ${TMP_APK} | cut -d ' ' -f1" > /tmp/remote_sha.txt
           SHA_REMOTE=$(cat /tmp/remote_sha.txt | tr -d '\n')
           if [ "$SHA_LOCAL" != "$SHA_REMOTE" ]; then
             echo "SHA256 mismatch after upload"
