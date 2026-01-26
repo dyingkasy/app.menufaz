@@ -20,7 +20,6 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
     env:
-      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
       ANDROID_VERSION_NAME: ${{ github.event.inputs.versionName }}
       ANDROID_VERSION_CODE: ${{ github.run_number }}
     steps:
@@ -165,11 +164,14 @@ jobs:
           ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "mv ${TMP_APK} ${APK_REMOTE} && mv ${TMP_META} ${META_REMOTE}"
 
       - name: Restart API if needed
-        if: ${{ secrets.VPS_COMPOSE_PATH != '' }}
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
           VPS_COMPOSE_PATH: ${{ secrets.VPS_COMPOSE_PATH }}
         run: |
+          if [ -z "${VPS_COMPOSE_PATH}" ]; then
+            echo "VPS_COMPOSE_PATH not set. Skipping restart."
+            exit 0
+          fi
           ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "cd ${VPS_COMPOSE_PATH} && docker compose restart api"
