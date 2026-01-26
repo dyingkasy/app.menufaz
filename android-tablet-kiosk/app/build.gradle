@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.menufaz.tablet'
+    compileSdk 34
+
+    def versionNameEnv = System.getenv("ANDROID_VERSION_NAME")
+    def versionCodeEnv = System.getenv("ANDROID_VERSION_CODE")
+    def startUrlEnv = System.getenv("ANDROID_START_URL")
+    def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    def keystoreAlias = System.getenv("ANDROID_KEYSTORE_ALIAS")
+    def keystoreKeyPassword = System.getenv("ANDROID_KEYSTORE_KEY_PASSWORD")
+
+    defaultConfig {
+        applicationId "com.menufaz.tablet"
+        minSdk 24
+        targetSdk 34
+        versionCode versionCodeEnv ? Integer.parseInt(versionCodeEnv) : 1
+        versionName versionNameEnv ?: "1.0.0"
+
+        buildConfigField "String", "START_URL", "\"${startUrlEnv ?: 'https://app.menufaz.com/?tablet=1'}\""
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePath) {
+                storeFile file(keystorePath)
+                storePassword keystorePassword
+                keyAlias keystoreAlias
+                keyPassword keystoreKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig keystorePath ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            applicationIdSuffix ".debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}
