@@ -174,4 +174,4 @@ jobs:
             echo "VPS_COMPOSE_PATH not set. Skipping restart."
             exit 0
           fi
-          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "cd ${VPS_COMPOSE_PATH} && docker compose restart api"
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "sudo /usr/bin/docker compose -f ${VPS_COMPOSE_PATH}/docker-compose.yml restart api"
