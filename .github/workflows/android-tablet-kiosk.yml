@@ -1,0 +1,175 @@
+name: Android Tablet Kiosk APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      versionName:
+        description: 'Override versionName (ex: 1.2.3)'
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'android-tablet-kiosk/**'
+      - '.github/workflows/android-tablet-kiosk.yml'
+    tags:
+      - 'kiosk-v*'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+      ANDROID_VERSION_NAME: ${{ github.event.inputs.versionName }}
+      ANDROID_VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Ensure release signing secrets exist
+        run: |
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${ANDROID_KEYSTORE_ALIAS}" ] || [ -z "${ANDROID_KEYSTORE_KEY_PASSWORD}" ]; then
+            echo "Missing Android keystore secrets. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEYSTORE_ALIAS, ANDROID_KEYSTORE_KEY_PASSWORD."
+            exit 1
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          ANDROID_KEYSTORE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_KEY_PASSWORD }}
+
+      - name: Resolve versionName
+        run: |
+          if [ -n "${ANDROID_VERSION_NAME}" ]; then
+            echo "ANDROID_VERSION_NAME=${ANDROID_VERSION_NAME}" >> $GITHUB_ENV
+            exit 0
+          fi
+          REF_NAME="${GITHUB_REF_NAME}"
+          if [[ "$REF_NAME" == kiosk-v* ]]; then
+            ANDROID_VERSION_NAME="${REF_NAME#kiosk-v}"
+          else
+            ANDROID_VERSION_NAME="1.0.0"
+          fi
+          echo "ANDROID_VERSION_NAME=$ANDROID_VERSION_NAME" >> $GITHUB_ENV
+
+      - name: Decode keystore
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-tablet-kiosk/keystore.jks
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: Build release APK
+        working-directory: android-tablet-kiosk
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android-tablet-kiosk/keystore.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          ANDROID_KEYSTORE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_KEY_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+          ANDROID_VERSION_NAME: ${{ env.ANDROID_VERSION_NAME }}
+        run: ./gradlew assembleRelease
+
+      - name: Prepare artifacts (apk + metadata)
+        working-directory: android-tablet-kiosk
+        run: |
+          APK_PATH="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "Release APK not found at $APK_PATH"
+            exit 1
+          fi
+          cp "$APK_PATH" ../android-tablet-kiosk-latest.apk
+          SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          UPDATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          cat <<EOF > ../android-tablet-kiosk.json
+          {
+            "version": "${ANDROID_VERSION_NAME}",
+            "versionCode": ${ANDROID_VERSION_CODE},
+            "updatedAt": "${UPDATED_AT}",
+            "sha256": "${SHA256}"
+          }
+          EOF
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: menufaz-tablet-kiosk-release
+          path: |
+            android-tablet-kiosk-latest.apk
+            android-tablet-kiosk.json
+
+  deploy-apk-to-vps:
+    needs: build-apk
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/kiosk-v') }}
+    steps:
+      - name: Ensure VPS secrets exist
+        run: |
+          if [ -z "${VPS_HOST}" ] || [ -z "${VPS_USER}" ] || [ -z "${VPS_SSH_PRIVATE_KEY}" ]; then
+            echo "Missing VPS secrets. Configure VPS_HOST, VPS_USER, VPS_SSH_PRIVATE_KEY (and optionally VPS_PORT, VPS_DOWNLOADS_PATH, VPS_COMPOSE_PATH)."
+            exit 1
+          fi
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: menufaz-tablet-kiosk-release
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${VPS_SSH_PRIVATE_KEY}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "${VPS_PORT}" "${VPS_HOST}" >> ~/.ssh/known_hosts
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+
+      - name: Upload and publish APK + metadata (atomic)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_DOWNLOADS_PATH: ${{ secrets.VPS_DOWNLOADS_PATH || '/opt/menufaz/downloads' }}
+        run: |
+          set -e
+          APK_LOCAL="android-tablet-kiosk-latest.apk"
+          META_LOCAL="android-tablet-kiosk.json"
+          APK_REMOTE="${VPS_DOWNLOADS_PATH}/android-tablet-kiosk-latest.apk"
+          META_REMOTE="${VPS_DOWNLOADS_PATH}/android-tablet-kiosk.json"
+          TMP_APK="${APK_REMOTE}.tmp"
+          TMP_META="${META_REMOTE}.tmp"
+          SHA_LOCAL=$(sha256sum "$APK_LOCAL" | awk '{print $1}')
+
+          scp -P "${VPS_PORT}" "$APK_LOCAL" "${VPS_USER}@${VPS_HOST}:${TMP_APK}"
+          scp -P "${VPS_PORT}" "$META_LOCAL" "${VPS_USER}@${VPS_HOST}:${TMP_META}"
+
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "sha256sum ${TMP_APK} | awk '{print \\$1}'" > /tmp/remote_sha.txt
+          SHA_REMOTE=$(cat /tmp/remote_sha.txt | tr -d '\n')
+          if [ "$SHA_LOCAL" != "$SHA_REMOTE" ]; then
+            echo "SHA256 mismatch after upload"
+            exit 1
+          fi
+
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "mv ${TMP_APK} ${APK_REMOTE} && mv ${TMP_META} ${META_REMOTE}"
+
+      - name: Restart API if needed
+        if: ${{ secrets.VPS_COMPOSE_PATH != '' }}
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          VPS_COMPOSE_PATH: ${{ secrets.VPS_COMPOSE_PATH }}
+        run: |
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" "cd ${VPS_COMPOSE_PATH} && docker compose restart api"
