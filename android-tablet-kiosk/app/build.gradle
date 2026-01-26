@@ -25,6 +25,10 @@ android {
         buildConfigField "String", "START_URL", "\"${startUrlEnv ?: 'https://app.menufaz.com/?tablet=1'}\""
     }
 
+    buildFeatures {
+        buildConfig true
+    }
+
     signingConfigs {
         release {
             if (keystorePath) {
