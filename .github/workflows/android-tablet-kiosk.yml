@@ -72,12 +72,12 @@ jobs:
       - name: Build embedded frontend (Vite)
         env:
           NODE_ENV: development
+          NPM_CONFIG_OMIT: ""
+          NPM_CONFIG_INCLUDE: "dev"
           VITE_API_BASE_URL: https://app.menufaz.com
           VITE_APP_BASE: /assets/app/
         run: |
-          npm install
-          npm install --no-save vite-plugin-pwa@^1.2.0
-          npm install --no-save @dnd-kit/core@^6.3.1 @dnd-kit/sortable@^10.0.0 @dnd-kit/utilities@^3.2.2
+          npm install --include=dev
           npm run build
           mkdir -p android-tablet-kiosk/app/src/main/assets/app
           rsync -a --delete dist/ android-tablet-kiosk/app/src/main/assets/app/
