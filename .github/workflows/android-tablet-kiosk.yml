@@ -76,6 +76,7 @@ jobs:
           VITE_API_BASE_URL: https://app.menufaz.com
           VITE_APP_BASE: /assets/app/
         run: |
+          npm config set production false
           npm install
           npm run build
           mkdir -p android-tablet-kiosk/app/src/main/assets/app
