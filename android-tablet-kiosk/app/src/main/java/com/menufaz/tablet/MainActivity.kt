@@ -1,22 +1,63 @@
 package com.menufaz.tablet
 
+import android.Manifest
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private val allowedHost: String? by lazy {
         Uri.parse(BuildConfig.START_URL).host
+    }
+    private var pendingPermissionRequest: PermissionRequest? = null
+    private var pendingPermissionResources: Array<String> = emptyArray()
+    private var pendingGeolocationOrigin: String? = null
+    private var pendingGeolocationCallback: GeolocationPermissions.Callback? = null
+
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val request = pendingPermissionRequest
+        val resources = pendingPermissionResources
+        pendingPermissionRequest = null
+        pendingPermissionResources = emptyArray()
+        if (granted && request != null) {
+            request.grant(resources)
+        } else {
+            request?.deny()
+            showToast("Permita camera para escanear o QR.")
+        }
+    }
+
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val origin = pendingGeolocationOrigin
+        val callback = pendingGeolocationCallback
+        pendingGeolocationOrigin = null
+        pendingGeolocationCallback = null
+        if (origin != null && callback != null) {
+            callback.invoke(origin, granted, false)
+            if (!granted) {
+                showToast("Permita localizacao para usar sua posicao.")
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +68,22 @@ class MainActivity : AppCompatActivity() {
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.mediaPlaybackRequiresUserGesture = false
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onPermissionRequest(request: PermissionRequest) {
+                runOnUiThread {
+                    handleWebPermissionRequest(request)
+                }
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String,
+                callback: GeolocationPermissions.Callback
+            ) {
+                runOnUiThread {
+                    handleGeolocationRequest(origin, callback)
+                }
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val targetHost = request.url.host
@@ -84,5 +140,45 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun handleWebPermissionRequest(request: PermissionRequest) {
+        val resources = request.resources
+        val wantsVideo = resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+        if (!wantsVideo) {
+            request.deny()
+            return
+        }
+
+        if (hasPermission(Manifest.permission.CAMERA)) {
+            request.grant(resources)
+            return
+        }
+
+        pendingPermissionRequest?.deny()
+        pendingPermissionRequest = request
+        pendingPermissionResources = resources
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    private fun handleGeolocationRequest(
+        origin: String,
+        callback: GeolocationPermissions.Callback
+    ) {
+        if (hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
+            callback.invoke(origin, true, false)
+            return
+        }
+        pendingGeolocationOrigin = origin
+        pendingGeolocationCallback = callback
+        locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    private fun hasPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun showToast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 }
