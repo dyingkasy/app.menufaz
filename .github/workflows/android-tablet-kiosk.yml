@@ -32,6 +32,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Ensure release signing secrets exist
         run: |
           if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${ANDROID_KEYSTORE_ALIAS}" ] || [ -z "${ANDROID_KEYSTORE_KEY_PASSWORD}" ]; then
@@ -63,6 +68,16 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-tablet-kiosk/keystore.jks
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: Build embedded frontend (Vite)
+        env:
+          VITE_API_BASE_URL: https://app.menufaz.com
+          VITE_APP_BASE: /assets/app/
+        run: |
+          npm ci
+          npm run build
+          mkdir -p android-tablet-kiosk/app/src/main/assets/app
+          rsync -a --delete dist/ android-tablet-kiosk/app/src/main/assets/app/
 
       - name: Build release APK
         working-directory: android-tablet-kiosk

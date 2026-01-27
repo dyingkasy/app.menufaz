@@ -18,6 +18,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.ValueCallback
+import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -26,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -34,9 +36,21 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
-    private val allowedHost: String? by lazy {
-        Uri.parse(BuildConfig.START_URL).host
+    private val localStartUrl = "https://appassets.androidplatform.net/assets/app/index.html"
+    private val localHost = "appassets.androidplatform.net"
+    private val remoteStartUrl: String by lazy {
+        BuildConfig.START_URL
     }
+    private val startUrl: String by lazy {
+        if (BuildConfig.DEBUG && remoteStartUrl.isNotBlank()) remoteStartUrl else localStartUrl
+    }
+    private val allowedHosts: Set<String> by lazy {
+        listOfNotNull(
+            Uri.parse(localStartUrl).host,
+            Uri.parse(remoteStartUrl).host
+        ).toSet()
+    }
+    private lateinit var assetLoader: WebViewAssetLoader
     private enum class CameraPermissionReason { WEB, FILE_CHOOSER, NATIVE_SCANNER }
     private var pendingPermissionRequest: PermissionRequest? = null
     private var pendingPermissionResources: Array<String> = emptyArray()
@@ -143,6 +157,10 @@ class MainActivity : AppCompatActivity() {
         webView.settings.domStorageEnabled = true
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webView.settings.allowFileAccess = true
+        assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/res/", WebViewAssetLoader.ResourcesPathHandler(this))
+            .build()
         webView.addJavascriptInterface(MenufazAndroidBridge(), "MenufazAndroid")
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
@@ -181,16 +199,32 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val targetHost = request.url.host
-                return if (targetHost != null && allowedHost != null && targetHost == allowedHost) {
+                return if (targetHost != null && allowedHosts.contains(targetHost)) {
                     false
                 } else {
                     true
                 }
             }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): WebResourceResponse? {
+                val url = request.url
+                if (url.host == localHost) {
+                    val path = url.path ?: "/"
+                    if (path.startsWith("/assets/") || path.startsWith("/res/")) {
+                        return assetLoader.shouldInterceptRequest(url)
+                    }
+                    return assetLoader.shouldInterceptRequest(Uri.parse(localStartUrl))
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
         }
 
         if (savedInstanceState == null) {
-            webView.loadUrl(BuildConfig.START_URL)
+            clearCacheIfNeeded()
+            webView.loadUrl(startUrl)
         }
 
         enterImmersiveMode()
@@ -233,6 +267,16 @@ class MainActivity : AppCompatActivity() {
                     startLockTask()
                 }
             }
+        }
+    }
+
+    private fun clearCacheIfNeeded() {
+        val prefs = getSharedPreferences("menufaz_kiosk", Context.MODE_PRIVATE)
+        val lastVersion = prefs.getInt("last_version_code", -1)
+        val currentVersion = BuildConfig.VERSION_CODE
+        if (currentVersion != lastVersion) {
+            webView.clearCache(true)
+            prefs.edit().putInt("last_version_code", currentVersion).apply()
         }
     }
 

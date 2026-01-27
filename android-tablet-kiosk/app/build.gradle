@@ -19,8 +19,8 @@ android {
         applicationId "com.menufaz.tablet"
         minSdk 24
         targetSdk 34
-        versionCode versionCodeEnv ? Integer.parseInt(versionCodeEnv) : 1
-        versionName versionNameEnv ?: "1.0.0"
+        versionCode versionCodeEnv ? Integer.parseInt(versionCodeEnv) : 2
+        versionName versionNameEnv ?: "1.0.1"
 
         buildConfigField "String", "START_URL", "\"${startUrlEnv ?: 'https://app.menufaz.com/?tablet=1'}\""
     }
@@ -65,6 +65,7 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.activity:activity-ktx:1.8.2'
+    implementation 'androidx.webkit:webkit:1.10.0'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
     implementation 'com.google.zxing:core:3.5.3'
