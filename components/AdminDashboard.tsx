@@ -3,7 +3,7 @@ import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from 
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, Legend, ComposedChart
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, Legend, ComposedChart
 } from 'recharts';
 import { 
     DollarSign, Users, ClipboardList, AlertTriangle, 
@@ -218,9 +218,12 @@ const ensurePizzaSizeGroup = (optionGroups?: ProductOptionGroup[]) => {
     return groups;
 };
 
-const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }> = ({ className, children }) => {
+const ChartContainer: React.FC<{
+    className?: string;
+    children: (size: { width: number; height: number }) => React.ReactNode;
+}> = ({ className, children }) => {
     const containerRef = useRef<HTMLDivElement | null>(null);
-    const [isReady, setIsReady] = useState(false);
+    const [size, setSize] = useState<{ width: number; height: number } | null>(null);
     const mergedClassName = ['w-full', className].filter(Boolean).join(' ');
 
     useEffect(() => {
@@ -230,9 +233,9 @@ const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }
         const observer = new ResizeObserver((entries) => {
             const rect = entries[0]?.contentRect;
             if (rect && rect.width > 0 && rect.height > 0) {
-                setIsReady(true);
+                setSize({ width: rect.width, height: rect.height });
             } else {
-                setIsReady(false);
+                setSize(null);
             }
         });
 
@@ -242,7 +245,7 @@ const ChartContainer: React.FC<{ className?: string; children: React.ReactNode }
 
     return (
         <div ref={containerRef} className={mergedClassName} style={{ minWidth: 1, minHeight: 1 }}>
-            {isReady ? children : null}
+            {size ? children(size) : null}
         </div>
     );
 };
@@ -2773,8 +2776,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   <span className="text-xs font-bold text-emerald-600">Atualizando</span>
                               </div>
                               <ChartContainer className="h-64">
-                                  <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                                      <AreaChart data={weeklyRevenueData}>
+                                  {({ width, height }) => (
+                                      <AreaChart width={width} height={height} data={weeklyRevenueData}>
                                           <defs>
                                               <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
                                                   <stop offset="5%" stopColor="#EF4444" stopOpacity={0.35} />
@@ -2791,7 +2794,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           />
                                           <Area type="monotone" dataKey="value" stroke="#EF4444" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
                                       </AreaChart>
-                                  </ResponsiveContainer>
+                                  )}
                               </ChartContainer>
                           </div>
 
@@ -4402,8 +4405,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <span className="text-xs font-bold text-slate-400 uppercase">Resumo</span>
                    </div>
                    <ChartContainer className="h-80">
-                       <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                           <BarChart data={barData}>
+                       {({ width, height }) => (
+                           <BarChart width={width} height={height} data={barData}>
                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
                                <XAxis dataKey="name" axisLine={false} tickLine={false} />
                                <YAxis axisLine={false} tickLine={false} />
@@ -4417,7 +4420,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    ))}
                                </Bar>
                            </BarChart>
-                       </ResponsiveContainer>
+                       )}
                    </ChartContainer>
                </div>
           </div>
