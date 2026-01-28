@@ -36,7 +36,7 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
-    private val localStartUrl = "https://appassets.androidplatform.net/assets/app/index.html"
+    private val localStartUrl = "https://appassets.androidplatform.net/assets/app/index.html?tablet=1"
     private val localHost = "appassets.androidplatform.net"
     private val remoteStartUrl: String by lazy {
         BuildConfig.START_URL
@@ -198,12 +198,17 @@ class MainActivity : AppCompatActivity() {
         }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val targetHost = request.url.host
-                return if (targetHost != null && allowedHosts.contains(targetHost)) {
-                    false
-                } else {
-                    true
+                val uri = request.url
+                val targetHost = uri.host
+                if (targetHost != null && allowedHosts.contains(targetHost)) {
+                    if (targetHost == localHost && !uri.queryParameterNames.contains("tablet")) {
+                        val newUri = uri.buildUpon().appendQueryParameter("tablet", "1").build()
+                        view.loadUrl(newUri.toString())
+                        return true
+                    }
+                    return false
                 }
+                return true
             }
 
             override fun shouldInterceptRequest(
