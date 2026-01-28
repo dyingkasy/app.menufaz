@@ -359,9 +359,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const productInfoInputRef = useRef<HTMLInputElement>(null);
   const buildableProductInputRef = useRef<HTMLInputElement>(null);
   const deliveryZoneMapRef = useRef<any>(null);
-  const deliveryZoneCircleRef = useRef<any>(null);
   const deliveryZoneMapContainerRef = useRef<HTMLDivElement>(null);
-  const deliveryZoneUpdateTimerRef = useRef<any>(null);
+  const deliveryZoneCircleRefs = useRef<Map<string, any>>(new Map());
+  const deliveryZoneUpdateTimersRef = useRef<Map<string, any>>(new Map());
+  const deliveryZoneSyncGuardRef = useRef<Set<string>>(new Set());
+  const lastZoneIdsRef = useRef<string>('');
   const hasSyncedDerivedCategoriesRef = useRef(false);
 
   // --- STORE SETTINGS STATE ---
@@ -823,47 +825,104 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   useEffect(() => {
       if (deliveryFeeMode !== 'BY_RADIUS') return;
       if (!deliveryZoneMapRef.current || !window.google) return;
-      if (deliveryZoneCircleRef.current) {
-          window.google.maps.event.clearInstanceListeners(deliveryZoneCircleRef.current);
-          deliveryZoneCircleRef.current.setMap(null);
-          deliveryZoneCircleRef.current = null;
-      }
-      if (!selectedDeliveryZone) return;
-      const circle = new window.google.maps.Circle({
-          map: deliveryZoneMapRef.current,
-          center: { lat: selectedDeliveryZone.centerLat, lng: selectedDeliveryZone.centerLng },
-          radius: Number(selectedDeliveryZone.radiusMeters || 0),
-          editable: true,
-          draggable: true,
-          fillColor: '#ef4444',
-          fillOpacity: 0.2,
-          strokeColor: '#ef4444',
-          strokeWeight: 2
-      });
-      deliveryZoneCircleRef.current = circle;
-      deliveryZoneMapRef.current.panTo(circle.getCenter());
+      const map = deliveryZoneMapRef.current;
+      const circleMap = deliveryZoneCircleRefs.current;
+      const guard = deliveryZoneSyncGuardRef.current;
+      const timers = deliveryZoneUpdateTimersRef.current;
 
-      const scheduleSync = () => {
-          if (!selectedDeliveryZoneId || !deliveryZoneCircleRef.current) return;
-          if (deliveryZoneUpdateTimerRef.current) {
-              clearTimeout(deliveryZoneUpdateTimerRef.current);
+      const activeIds = new Set(deliveryZones.map((zone) => zone.id));
+      for (const [zoneId, circle] of circleMap.entries()) {
+          if (!activeIds.has(zoneId)) {
+              window.google.maps.event.clearInstanceListeners(circle);
+              circle.setMap(null);
+              circleMap.delete(zoneId);
+              const timer = timers.get(zoneId);
+              if (timer) clearTimeout(timer);
+              timers.delete(zoneId);
+              guard.delete(zoneId);
           }
-          deliveryZoneUpdateTimerRef.current = setTimeout(() => {
-              const center = deliveryZoneCircleRef.current.getCenter();
-              if (!center) return;
-              const radius = Math.round(deliveryZoneCircleRef.current.getRadius());
-              handleUpdateDeliveryZone(selectedDeliveryZoneId, {
-                  centerLat: center.lat(),
-                  centerLng: center.lng(),
-                  radiusMeters: radius
-              });
-          }, 150);
-      };
+      }
 
-      circle.addListener('center_changed', scheduleSync);
-      circle.addListener('radius_changed', scheduleSync);
-      circle.addListener('dragend', scheduleSync);
-  }, [deliveryFeeMode, selectedDeliveryZoneId, selectedDeliveryZone, deliveryZones]);
+      deliveryZones.forEach((zone) => {
+          if (!zone) return;
+          const center = { lat: Number(zone.centerLat), lng: Number(zone.centerLng) };
+          const radius = Number(zone.radiusMeters || 0);
+          let circle = circleMap.get(zone.id);
+
+          if (!circle) {
+              circle = new window.google.maps.Circle({
+                  map,
+                  center,
+                  radius,
+                  editable: true,
+                  draggable: true,
+                  fillColor: '#ef4444',
+                  fillOpacity: 0.2,
+                  strokeColor: '#ef4444',
+                  strokeWeight: 2
+              });
+              circleMap.set(zone.id, circle);
+
+              const scheduleSync = () => {
+                  if (guard.has(zone.id)) return;
+                  const timer = timers.get(zone.id);
+                  if (timer) clearTimeout(timer);
+                  timers.set(
+                      zone.id,
+                      setTimeout(() => {
+                          const nextCenter = circle.getCenter();
+                          if (!nextCenter) return;
+                          const nextRadius = Math.round(circle.getRadius());
+                          handleUpdateDeliveryZone(zone.id, {
+                              centerLat: nextCenter.lat(),
+                              centerLng: nextCenter.lng(),
+                              radiusMeters: nextRadius
+                          });
+                      }, 150)
+                  );
+              };
+
+              circle.addListener('center_changed', scheduleSync);
+              circle.addListener('radius_changed', scheduleSync);
+              circle.addListener('dragend', scheduleSync);
+              return;
+          }
+
+          const currentCenter = circle.getCenter();
+          const currentRadius = circle.getRadius();
+          const needsCenter =
+              !currentCenter ||
+              Math.abs(currentCenter.lat() - center.lat) > 0.000001 ||
+              Math.abs(currentCenter.lng() - center.lng) > 0.000001;
+          const needsRadius = Math.abs(currentRadius - radius) > 0.5;
+
+          if (needsCenter || needsRadius) {
+              guard.add(zone.id);
+              if (needsCenter) circle.setCenter(center);
+              if (needsRadius) circle.setRadius(radius);
+              setTimeout(() => guard.delete(zone.id), 0);
+          }
+      });
+
+      const zoneIdsKey = deliveryZones.map((zone) => zone.id).join('|');
+      if (zoneIdsKey !== lastZoneIdsRef.current) {
+          lastZoneIdsRef.current = zoneIdsKey;
+          if (deliveryZones.length > 0) {
+              const bounds = new window.google.maps.LatLngBounds();
+              deliveryZones.forEach((zone) => {
+                  const lat = Number(zone.centerLat);
+                  const lng = Number(zone.centerLng);
+                  const radiusMeters = Number(zone.radiusMeters || 0);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng) || radiusMeters <= 0) return;
+                  const latDelta = radiusMeters / 111320;
+                  const lngDelta = radiusMeters / (111320 * Math.cos((lat * Math.PI) / 180) || 1);
+                  bounds.extend({ lat: lat + latDelta, lng: lng + lngDelta });
+                  bounds.extend({ lat: lat - latDelta, lng: lng - lngDelta });
+              });
+              map.fitBounds(bounds);
+          }
+      }
+  }, [deliveryFeeMode, deliveryZones]);
 
   // --- CALCULATED METRICS ---
   

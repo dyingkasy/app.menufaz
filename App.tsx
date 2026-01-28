@@ -812,6 +812,7 @@ const MenuFazApp: React.FC = () => {
                 onRemoveFromCart={handleRemoveFromCart}
                 onClearCart={handleClearCart}
                 onOpenCart={() => setIsCartOpen(true)}
+                address={currentAddressObj}
                 tableNumber={tableContext?.storeId === selectedStore.id ? tableContext.tableNumber : undefined}
                 onTrackTable={() => setCurrentView(ViewState.TABLE_TRACKING)}
                 isFavorited={favoriteStoreIds.includes(selectedStore.id)}

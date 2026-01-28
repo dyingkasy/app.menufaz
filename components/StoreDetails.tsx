@@ -1,12 +1,13 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, ChevronDown, Heart, Share2, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
-import { Store, Product, CartItem, Review, PizzaFlavor } from '../types';
+import { Store, Product, CartItem, Review, PizzaFlavor, Address, Coordinates } from '../types';
 import { getProductsByStore, getPizzaFlavorsByStore, getReviewsByStore, addReview } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
 import { imageKitUrl } from '../utils/imagekit';
 import StoreReviews from './StoreReviews';
 import { useAuth } from '../contexts/AuthContext';
+import { calculateDistance } from '../utils/geo';
 
 const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'] as const;
 const PIZZA_SIZE_ID_MAP: Record<string, string> = {
@@ -22,6 +23,23 @@ const PRICING_STRATEGIES = [
     { id: 'MAX', label: 'Maior sabor' }
 ] as const;
 
+const normalizeCoords = (coords?: Coordinates | null): Coordinates | null => {
+    if (!coords) return null;
+    const lat = Number(coords.lat);
+    const lng = Number(coords.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+};
+
+const normalizeText = (value: string) =>
+    value
+        .toString()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
 interface StoreDetailsProps {
   store: Store;
   onBack: () => void;
@@ -30,6 +48,7 @@ interface StoreDetailsProps {
   onRemoveFromCart: (id: string) => void;
   onClearCart: () => void;
   onOpenCart: () => void; 
+  address?: Address | null;
   tableNumber?: string;
   onTrackTable?: () => void;
   isFavorited?: boolean;
@@ -44,6 +63,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     onAddToCart, 
     cartItems, 
     onOpenCart,
+    address,
     tableNumber,
     onTrackTable,
     isFavorited = false,
@@ -686,8 +706,85 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       handleCloseProduct();
       onOpenCart(); 
   };
+  const deliveryFeeMode =
+      store.deliveryFeeMode === 'BY_NEIGHBORHOOD'
+          ? 'BY_NEIGHBORHOOD'
+          : store.deliveryFeeMode === 'BY_RADIUS'
+          ? 'BY_RADIUS'
+          : 'FIXED';
+  const deliveryZones = Array.isArray(store.deliveryZones) ? store.deliveryZones : [];
+  const deliveryNeighborhoods = Array.isArray(store.neighborhoodFees)
+      ? store.neighborhoodFees
+      : Array.isArray(store.deliveryNeighborhoods)
+      ? store.deliveryNeighborhoods
+      : [];
+  const deliveryFeeInfo = useMemo(() => {
+      const fallbackFee = Number(store.deliveryFee) || 0;
+      if (deliveryFeeMode === 'BY_RADIUS') {
+          const activeZones = deliveryZones.filter((zone) => zone && zone.enabled !== false);
+          if (activeZones.length === 0) {
+              return { fee: fallbackFee, label: fallbackFee > 0 ? formatCurrencyBRL(fallbackFee) : 'Consultar loja' };
+          }
+          const coords = normalizeCoords(address?.coordinates);
+          if (!coords) {
+              const minFee = Math.min(...activeZones.map((zone) => Number(zone.fee || 0)));
+              if (Number.isFinite(minFee) && minFee > 0) {
+                  return { fee: minFee, label: `A partir de ${formatCurrencyBRL(minFee)}` };
+              }
+              return { fee: 0, label: 'Informe endereço' };
+          }
+          const matches = activeZones
+              .map((zone) => {
+                  const distanceKm = calculateDistance(
+                      { lat: Number(zone.centerLat), lng: Number(zone.centerLng) },
+                      coords
+                  );
+                  return { zone, distanceMeters: distanceKm * 1000 };
+              })
+              .filter((item) => item.distanceMeters <= Number(item.zone.radiusMeters || 0));
+          if (matches.length === 0) {
+              return { fee: 0, label: 'Fora da área' };
+          }
+          matches.sort((a, b) => {
+              const priorityA = Number(a.zone.priority || 0);
+              const priorityB = Number(b.zone.priority || 0);
+              if (priorityA !== priorityB) return priorityB - priorityA;
+              const radiusA = Number(a.zone.radiusMeters || 0);
+              const radiusB = Number(b.zone.radiusMeters || 0);
+              if (radiusA !== radiusB) return radiusA - radiusB;
+              return a.distanceMeters - b.distanceMeters;
+          });
+          const best = matches[0].zone;
+          const fee = Number(best.fee || 0);
+          return { fee: Number.isFinite(fee) ? fee : 0, label: fee > 0 ? formatCurrencyBRL(fee) : 'Grátis' };
+      }
+      if (deliveryFeeMode === 'BY_NEIGHBORHOOD') {
+          const district = (address?.district || '').toString().trim();
+          if (!district) {
+              return { fee: 0, label: 'Informe endereço' };
+          }
+          const normalized = normalizeText(district);
+          const match = deliveryNeighborhoods.find(
+              (item) => item?.name && normalizeText(item.name) === normalized && item.active !== false
+          );
+          if (!match) {
+              return { fee: 0, label: 'Fora da área' };
+          }
+          const fee = Number(match.fee || 0);
+          return { fee: Number.isFinite(fee) ? fee : 0, label: fee > 0 ? formatCurrencyBRL(fee) : 'Grátis' };
+      }
+      return { fee: fallbackFee, label: fallbackFee > 0 ? formatCurrencyBRL(fallbackFee) : 'Grátis' };
+  }, [
+      address?.coordinates?.lat,
+      address?.coordinates?.lng,
+      address?.district,
+      deliveryFeeMode,
+      deliveryNeighborhoods,
+      deliveryZones,
+      store.deliveryFee
+  ]);
 
-  const deliveryFee = Number(store.deliveryFee) || 0;
+  const deliveryFee = deliveryFeeInfo.fee;
   const cartSubtotal = cartItems.reduce((sum, item) => sum + item.totalPrice, 0);
   const cartTotal = cartSubtotal + deliveryFee;
 
@@ -914,7 +1011,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                         <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
                             <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Taxa</p>
                             <div className="font-bold text-green-600">
-                                {deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}
+                                {deliveryFeeInfo.label}
                             </div>
                         </div>
                     </div>
@@ -1288,10 +1385,10 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                                      <span>Previsão</span>
                                                      <span className="font-bold">{store.deliveryTime || store.pickupTime || 'Consultar loja'}</span>
                                                  </div>
-                                                 <div className="flex items-center justify-between">
-                                                     <span>Entrega</span>
-                                                     <span className="font-bold">{deliveryFee > 0 ? formatCurrencyBRL(deliveryFee) : 'Grátis'}</span>
-                                                 </div>
+                                                <div className="flex items-center justify-between">
+                                                    <span>Entrega</span>
+                                                    <span className="font-bold">{deliveryFeeInfo.label}</span>
+                                                </div>
                                                  {store.minOrderValue ? (
                                                      <div className="flex items-center justify-between">
                                                          <span>Pedido mínimo</span>
