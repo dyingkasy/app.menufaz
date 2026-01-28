@@ -33,6 +33,11 @@ const MenuFazApp: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   const [globalSearchTerm, setGlobalSearchTerm] = useState<string>('');
   const [searchLoading, setSearchLoading] = useState(false);
+  const [tabletModeRequested, setTabletModeRequested] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('tablet') === '1' || window.location.hostname === 'appassets.androidplatform.net';
+  });
   const [searchResults, setSearchResults] = useState<{
     stores: Array<{
       id: string;
@@ -72,6 +77,78 @@ const MenuFazApp: React.FC = () => {
     return () => {
       cancelAnimationFrame(rafId);
       lenis.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const html = document.documentElement;
+    if (tabletModeRequested) {
+      html.classList.add('tablet-mode');
+    } else {
+      html.classList.remove('tablet-mode');
+    }
+    return () => {
+      html.classList.remove('tablet-mode');
+    };
+  }, [tabletModeRequested]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const shouldForceTablet = () => {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('tablet') === '1' || window.location.hostname === 'appassets.androidplatform.net';
+    };
+
+    const ensureTabletParam = () => {
+      if (!shouldForceTablet()) return;
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('tablet') !== '1') {
+        url.searchParams.set('tablet', '1');
+        window.history.replaceState(window.history.state, document.title, url.toString());
+      }
+    };
+
+    const syncTabletMode = () => {
+      const requested = shouldForceTablet();
+      setTabletModeRequested(requested);
+      if (requested) {
+        ensureTabletParam();
+      }
+    };
+
+    const wrapHistory = (method: History['pushState'] | History['replaceState']) =>
+      (state: any, title: string, url?: string | URL | null) => {
+        let nextUrl = url;
+        if (url) {
+          const candidate = new URL(url.toString(), window.location.href);
+          if (shouldForceTablet() && candidate.searchParams.get('tablet') !== '1') {
+            candidate.searchParams.set('tablet', '1');
+          }
+          nextUrl = candidate.toString();
+        }
+        const result = method.call(window.history, state, title, nextUrl as any);
+        syncTabletMode();
+        return result;
+      };
+
+    syncTabletMode();
+
+    const originalPush = window.history.pushState;
+    const originalReplace = window.history.replaceState;
+    window.history.pushState = wrapHistory(originalPush);
+    window.history.replaceState = wrapHistory(originalReplace);
+
+    const handlePopState = () => {
+      syncTabletMode();
+    };
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.history.pushState = originalPush;
+      window.history.replaceState = originalReplace;
+      window.removeEventListener('popstate', handlePopState);
     };
   }, []);
 

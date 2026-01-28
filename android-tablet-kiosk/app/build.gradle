@@ -19,8 +19,8 @@ android {
         applicationId "com.menufaz.tablet"
         minSdk 24
         targetSdk 34
-        versionCode versionCodeEnv ? Integer.parseInt(versionCodeEnv) : 2
-        versionName versionNameEnv ?: "1.0.1"
+        versionCode versionCodeEnv ? Integer.parseInt(versionCodeEnv) : 6
+        versionName versionNameEnv ?: "1.0.5"
 
         buildConfigField "String", "START_URL", "\"${startUrlEnv ?: 'https://app.menufaz.com/?tablet=1'}\""
     }
