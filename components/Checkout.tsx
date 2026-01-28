@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils, Lock } from 'lucide-react';
-import { CartItem, Store, Address, Coupon } from '../types';
+import { CartItem, Store, Address, Coupon, Coordinates } from '../types';
 import { createOrder, getCouponsByStore } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCurrencyBRL } from '../utils/format';
@@ -37,6 +37,14 @@ const isValidCPF = (cpf: string) => {
     if ((remainder === 10) || (remainder === 11)) remainder = 0;
     if (remainder !== parseInt(cpf.substring(10, 11))) return false;
     return true;
+};
+
+const normalizeCoords = (coords?: Coordinates | null): Coordinates | null => {
+    if (!coords) return null;
+    const lat = Number(coords.lat);
+    const lng = Number(coords.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
 };
 
 const normalizeNeighborhoodName = (value: string) =>
@@ -104,6 +112,10 @@ const Checkout: React.FC<CheckoutProps> = ({
       ? store.deliveryNeighborhoods
       : [];
   const deliveryZones = Array.isArray(store.deliveryZones) ? store.deliveryZones : [];
+  const [resolvedDeliveryCoords, setResolvedDeliveryCoords] = useState<Coordinates | null>(() =>
+      normalizeCoords(address?.coordinates)
+  );
+  const lastGeocodeKeyRef = useRef('');
   
   // Discount & Processing
   const [couponCode, setCouponCode] = useState('');
@@ -169,6 +181,49 @@ const Checkout: React.FC<CheckoutProps> = ({
   }, [canUseCard, paymentMethod]);
 
   useEffect(() => {
+      const normalized = normalizeCoords(address?.coordinates);
+      if (normalized) {
+          setResolvedDeliveryCoords(normalized);
+          return;
+      }
+      setResolvedDeliveryCoords(null);
+      if (orderType !== 'DELIVERY' || !address) return;
+
+      const parts = [address.street, address.number, address.district, address.city, address.state]
+          .map((value) => String(value || '').trim())
+          .filter(Boolean);
+      const query = parts.join(', ');
+      if (!query) return;
+
+      const key = query.toLowerCase();
+      if (lastGeocodeKeyRef.current === key) return;
+      lastGeocodeKeyRef.current = key;
+
+      let cancelled = false;
+      searchAddress(query)
+          .then((results) => {
+              if (cancelled) return;
+              const coords = normalizeCoords(results?.[0]?.coordinates);
+              if (coords) {
+                  setResolvedDeliveryCoords(coords);
+              }
+          })
+          .catch(() => {});
+      return () => {
+          cancelled = true;
+      };
+  }, [
+      orderType,
+      address?.street,
+      address?.number,
+      address?.district,
+      address?.city,
+      address?.state,
+      address?.coordinates?.lat,
+      address?.coordinates?.lng
+  ]);
+
+  useEffect(() => {
       if (orderType !== 'DELIVERY' || deliveryFeeMode !== 'BY_NEIGHBORHOOD') {
           setNeighborhoodError('');
           return;
@@ -196,7 +251,7 @@ const Checkout: React.FC<CheckoutProps> = ({
 
   const resolvedZone = useMemo(() => {
       if (orderType !== 'DELIVERY' || deliveryFeeMode !== 'BY_RADIUS') return null;
-      if (!address?.coordinates) {
+      if (!resolvedDeliveryCoords) {
           return { error: 'Informe um endereço válido para calcular o frete.' };
       }
       const activeZones = deliveryZones.filter((zone) => zone && zone.enabled !== false);
@@ -207,7 +262,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           .map((zone) => {
               const distanceKm = calculateDistance(
                   { lat: zone.centerLat, lng: zone.centerLng },
-                  address.coordinates
+                  resolvedDeliveryCoords
               );
               return { zone, distanceMeters: distanceKm * 1000 };
           })
@@ -230,7 +285,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           fee: Number(best.fee || 0),
           etaMinutes: Number(best.etaMinutes || 0)
       };
-  }, [orderType, deliveryFeeMode, address?.coordinates, deliveryZones]);
+  }, [orderType, deliveryFeeMode, resolvedDeliveryCoords, deliveryZones]);
 
   useEffect(() => {
       if (deliveryFeeMode !== 'BY_RADIUS') {
@@ -436,8 +491,8 @@ const Checkout: React.FC<CheckoutProps> = ({
     setIsProcessing(true);
     
     try {
-        let deliveryCoords = address?.coordinates;
-        if (orderType === 'DELIVERY' && address && (!deliveryCoords || !Number.isFinite(deliveryCoords.lat) || !Number.isFinite(deliveryCoords.lng))) {
+        let deliveryCoords = resolvedDeliveryCoords || normalizeCoords(address?.coordinates);
+        if (orderType === 'DELIVERY' && address && !deliveryCoords) {
             const queryParts = [address.street, address.number, address.district, address.city, address.state]
                 .map((value) => String(value || '').trim())
                 .filter(Boolean);
@@ -453,7 +508,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                 setIsProcessing(false);
                 return;
             }
-            deliveryCoords = results[0].coordinates;
+            deliveryCoords = normalizeCoords(results[0].coordinates);
         }
 
         const itemsDescription = cartItems.map(item => {

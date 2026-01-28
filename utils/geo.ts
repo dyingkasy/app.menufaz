@@ -91,6 +91,7 @@ const reverseGeocodeServer = async (lat: number, lng: number): Promise<AddressCo
 };
 
 let googleMapsLoading: Promise<boolean> | null = null;
+const GOOGLE_MAPS_CALLBACK = '__menufazGoogleMapsInit';
 
 export const ensureGoogleMapsLoaded = async (): Promise<boolean> => {
   if (typeof window === 'undefined') return false;
@@ -98,12 +99,40 @@ export const ensureGoogleMapsLoaded = async (): Promise<boolean> => {
   if (!GOOGLE_MAPS_API_KEY) return false;
   if (!googleMapsLoading) {
     googleMapsLoading = new Promise((resolve) => {
+      if (window.google && window.google.maps) {
+        resolve(true);
+        return;
+      }
+
+      const existing = document.querySelector<HTMLScriptElement>(
+        'script[src*="maps.googleapis.com/maps/api/js"]'
+      );
+      if (existing) {
+        existing.addEventListener('load', () => resolve(true), { once: true });
+        existing.addEventListener('error', () => resolve(false), { once: true });
+        return;
+      }
+
+      (window as any)[GOOGLE_MAPS_CALLBACK] = () => {
+        resolve(true);
+        delete (window as any)[GOOGLE_MAPS_CALLBACK];
+      };
+
       const script = document.createElement('script');
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=places`;
+      const params = new URLSearchParams({
+        key: GOOGLE_MAPS_API_KEY,
+        libraries: 'places',
+        callback: GOOGLE_MAPS_CALLBACK,
+        loading: 'async'
+      });
+      script.src = `https://maps.googleapis.com/maps/api/js?${params.toString()}`;
       script.async = true;
       script.defer = true;
-      script.onload = () => resolve(true);
-      script.onerror = () => resolve(false);
+      script.setAttribute('loading', 'async');
+      script.onerror = () => {
+        resolve(false);
+        delete (window as any)[GOOGLE_MAPS_CALLBACK];
+      };
       document.head.appendChild(script);
     });
   }
