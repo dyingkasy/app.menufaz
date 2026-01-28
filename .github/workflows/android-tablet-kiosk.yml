@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANDROID_VERSION_NAME: ${{ github.event.inputs.versionName }}
-      ANDROID_VERSION_CODE: ${{ github.run_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,10 +57,8 @@ jobs:
           REF_NAME="${GITHUB_REF_NAME}"
           if [[ "$REF_NAME" == kiosk-v* ]]; then
             ANDROID_VERSION_NAME="${REF_NAME#kiosk-v}"
-          else
-            ANDROID_VERSION_NAME="1.0.0"
+            echo "ANDROID_VERSION_NAME=$ANDROID_VERSION_NAME" >> $GITHUB_ENV
           fi
-          echo "ANDROID_VERSION_NAME=$ANDROID_VERSION_NAME" >> $GITHUB_ENV
 
       - name: Decode keystore
         run: |
@@ -79,6 +76,11 @@ jobs:
         run: |
           npm install --include=dev
           npm run build
+          GIT_SHA=$(git rev-parse --short HEAD)
+          BUILT_AT=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+          cat > dist/build-info.json <<EOF
+          {"gitSha":"$GIT_SHA","builtAt":"$BUILT_AT"}
+          EOF
           mkdir -p android-tablet-kiosk/app/src/main/assets/app
           rsync -a --delete dist/ android-tablet-kiosk/app/src/main/assets/app/
 
@@ -89,7 +91,6 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
           ANDROID_KEYSTORE_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_KEY_PASSWORD }}
-          ANDROID_VERSION_CODE: ${{ github.run_number }}
           ANDROID_VERSION_NAME: ${{ env.ANDROID_VERSION_NAME }}
         run: ./gradlew assembleRelease
 
@@ -97,19 +98,37 @@ jobs:
         working-directory: android-tablet-kiosk
         run: |
           APK_PATH="app/build/outputs/apk/release/app-release.apk"
+          OUTPUT_META="app/build/outputs/apk/release/output-metadata.json"
           if [ ! -f "$APK_PATH" ]; then
             echo "Release APK not found at $APK_PATH"
             exit 1
           fi
           cp "$APK_PATH" ../android-tablet-kiosk-latest.apk
           SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
-          UPDATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          GIT_SHA=$(git rev-parse --short HEAD)
+          BUILT_AT=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+          VERSION_NAME=""
+          VERSION_CODE=""
+          if [ -f "$OUTPUT_META" ]; then
+            read VERSION_NAME VERSION_CODE <<EOF
+          $(python - <<'PY'
+          import json
+          with open("app/build/outputs/apk/release/output-metadata.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          element = (data.get("elements") or [{}])[0]
+          print(element.get("versionName", ""), element.get("versionCode", ""))
+          PY
+          )
+          EOF
+          fi
           cat <<EOF > ../android-tablet-kiosk.json
           {
-            "version": "${ANDROID_VERSION_NAME}",
-            "versionCode": ${ANDROID_VERSION_CODE},
-            "updatedAt": "${UPDATED_AT}",
-            "sha256": "${SHA256}"
+            "version": "${VERSION_NAME}",
+            "versionName": "${VERSION_NAME}",
+            "versionCode": ${VERSION_CODE},
+            "sha256": "${SHA256}",
+            "builtAt": "${BUILT_AT}",
+            "gitSha": "${GIT_SHA}"
           }
           EOF
 

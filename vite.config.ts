@@ -17,6 +17,7 @@ export default defineConfig(() => {
           strategies: 'injectManifest',
           srcDir: 'src',
           filename: 'sw.ts',
+          injectRegister: null,
           injectManifest: {
             maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
             globIgnores: ['**/tablet-kiosk-instructions.html'],
