@@ -1399,12 +1399,19 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       );
   };
 
-  const handleDeleteDeliveryZone = (zoneId: string) => {
+  const handleDeleteDeliveryZone = async (zoneId: string) => {
       if (!confirm('Deseja remover esta area de entrega?')) return;
       const next = deliveryZones.filter((zone) => zone.id !== zoneId);
       updateDeliveryZones(next);
       if (selectedDeliveryZoneId === zoneId) {
           setSelectedDeliveryZoneId(next[0]?.id || null);
+      }
+      if (!storeId) return;
+      try {
+          await updateStore(storeId, { deliveryZones: next });
+          setDeliveryZoneNotice('Area removida e salva.');
+      } catch (error) {
+          setDeliveryZoneError('Não foi possível salvar a remoção da área.');
       }
   };
 
