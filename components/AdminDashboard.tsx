@@ -802,21 +802,23 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               return;
           }
           setDeliveryZoneError(null);
-          if (!deliveryZoneMapContainerRef.current) return;
-          if (!deliveryZoneMapRef.current) {
-              const center = storeProfile.coordinates || { lat: -23.561684, lng: -46.655981 };
-              deliveryZoneMapRef.current = new window.google.maps.Map(
-                  deliveryZoneMapContainerRef.current,
-                  {
-                      center,
-                      zoom: 13,
-                      mapTypeControl: false,
-                      streetViewControl: false,
-                      fullscreenControl: false
-                  }
-              );
+          const container = deliveryZoneMapContainerRef.current;
+          if (!container) return;
+          const center = storeProfile.coordinates || { lat: -23.561684, lng: -46.655981 };
+          if (!deliveryZoneMapRef.current || deliveryZoneMapRef.current.getDiv() !== container) {
+              deliveryZoneMapRef.current = new window.google.maps.Map(container, {
+                  center,
+                  zoom: 13,
+                  mapTypeControl: false,
+                  streetViewControl: false,
+                  fullscreenControl: false
+              });
+              deliveryZoneCircleRefs.current.forEach((circle) => {
+                  circle.setMap(deliveryZoneMapRef.current);
+              });
           } else if (storeProfile.coordinates) {
               deliveryZoneMapRef.current.setCenter(storeProfile.coordinates);
+              window.google.maps.event.trigger(deliveryZoneMapRef.current, 'resize');
           }
       };
       initMap();
@@ -889,6 +891,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               circle.addListener('radius_changed', scheduleSync);
               circle.addListener('dragend', scheduleSync);
               return;
+          }
+
+          if (circle.getMap() !== map) {
+              circle.setMap(map);
           }
 
           const currentCenter = circle.getCenter();
