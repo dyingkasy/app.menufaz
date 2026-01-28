@@ -126,6 +126,13 @@ export const initClientErrorLogging = () => {
 
   const originalConsoleWarn = console.warn.bind(console);
   console.warn = (...args: unknown[]) => {
+    const firstArg = args[0];
+    if (typeof firstArg === 'string') {
+      const normalized = firstArg.replace(/\s+/g, ' ').trim();
+      if (/The width\(-?\d+\) and height\(-?\d+\) of chart should be greater than 0/.test(normalized)) {
+        return;
+      }
+    }
     logClientError({
       level: 'warning',
       message: typeof args[0] === 'string' ? String(args[0]) : 'Console warning',
