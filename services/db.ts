@@ -951,18 +951,3 @@ export const clearErrorLogs = async () => {
   ensureApi();
   await apiFetch('/logs', { method: 'DELETE' });
 };
-
-export interface AndroidTabletKioskMetadata {
-  versionName?: string;
-  versionCode?: number;
-  sha256?: string;
-  builtAt?: string;
-  gitSha?: string;
-}
-
-export const getAndroidTabletKioskMetadata = async () => {
-  ensureApi();
-  return apiFetch<AndroidTabletKioskMetadata>('/downloads/android-tablet-kiosk/metadata', {
-    cache: 'no-store'
-  });
-};

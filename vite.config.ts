@@ -20,7 +20,7 @@ export default defineConfig(() => {
           injectRegister: null,
           injectManifest: {
             maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-            globIgnores: ['**/tablet-kiosk-instructions.html'],
+            globIgnores: [],
           },
           registerType: 'autoUpdate',
           devOptions: {

@@ -1,9 +1,12 @@
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import path from 'path';
+import Busboy from 'busboy';
+import ImageKit from '@imagekit/nodejs';
+import { readFile } from 'fs/promises';
 import { query, withClient } from './db.js';
 import { initErrorLogTable, logError } from './logger.js';
 import {
@@ -17,13 +20,117 @@ const port = process.env.PORT || 3001;
 const jwtSecret = process.env.JWT_SECRET || 'change-me';
 const corsOrigin = process.env.CORS_ORIGIN || '*';
 const imagekitPrivateKey = process.env.IMAGEKIT_PRIVATE_KEY || '';
+const imagekitPublicKey = process.env.IMAGEKIT_PUBLIC_KEY || '';
+const imagekitUrlEndpoint = process.env.IMAGEKIT_URL_ENDPOINT || '';
+
+const imageKitClient = () => new ImageKit({
+  publicKey: imagekitPublicKey,
+  privateKey: imagekitPrivateKey,
+  urlEndpoint: imagekitUrlEndpoint
+});
 const geminiApiKey = process.env.GEMINI_API_KEY || '';
 const pixRepasseBaseUrl = process.env.PIXREPASSE_BASE_URL || 'https://meinobolso.com';
 const pixRepasseToken = process.env.PIXREPASSE_TOKEN_API_EXTERNA || '';
 const pixRepasseTtlMinutes = Math.max(1, Number(process.env.PIXREPASSE_TTL_MINUTES || 60));
+const CORE_SCHEMA_URL = new URL('./db/init.sql', import.meta.url);
 
-app.use(cors({ origin: corsOrigin, credentials: true }));
+const isValidUuid = (value) => {
+  if (typeof value !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+};
+
+const allowedOrigins = new Set([
+  'https://app.menufaz.com'
+]);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (origin && corsOrigin !== '*') {
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
 app.use(express.json({ limit: '50mb' }));
+
+const registerUuidParam = (paramName) => {
+  app.param(paramName, (req, res, next, value) => {
+    if (!isValidUuid(String(value || ''))) {
+      return res.status(400).json({ error: 'invalid_id' });
+    }
+    return next();
+  });
+};
+
+[
+  'id',
+  'orderId',
+  'storeId',
+  'userId',
+  'courierId',
+  'requestId',
+  'templateId',
+  'flavorId',
+  'couponId',
+  'expenseId',
+  'cardId',
+  'logId'
+].forEach(registerUuidParam);
+
+const ensureCoreTables = async () => {
+  const schemaSql = await readFile(CORE_SCHEMA_URL, 'utf8');
+  try {
+    await query(schemaSql);
+  } catch (error) {
+    console.error('Failed to apply core schema file', error);
+  }
+  const safeQuery = async (sql) => {
+    try {
+      await query(sql);
+    } catch (error) {
+      console.error('Failed to ensure schema', error);
+    }
+  };
+
+  await safeQuery(
+    `
+    CREATE TABLE IF NOT EXISTS customers (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT,
+      phone TEXT NOT NULL,
+      street TEXT NOT NULL,
+      number TEXT NOT NULL,
+      district TEXT,
+      city TEXT,
+      state TEXT,
+      complement TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+    `
+  );
+  await safeQuery('CREATE UNIQUE INDEX IF NOT EXISTS customers_phone_address ON customers (phone, street, number)');
+  await safeQuery('ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT');
+  await safeQuery('ALTER TABLE customers ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE store_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+};
 
 const ensurePrintTables = async () => {
   await query(
@@ -119,6 +226,10 @@ initErrorLogTable().catch((error) => {
   console.error('Failed to initialize error log table', error);
 });
 
+ensureCoreTables().catch((error) => {
+  console.error('Failed to initialize core tables', error);
+});
+
 ensurePrintTables().catch((error) => {
   console.error('Failed to initialize print tables', error);
 });
@@ -132,15 +243,15 @@ app.use((req, res, next) => {
   res.on('finish', () => {
     if (res.statusCode < 400) return;
     const durationMs = Date.now() - startedAt;
+    const safePath = req.originalUrl.split('?')[0];
     logError({
       source: 'server',
       level: res.statusCode >= 500 ? 'error' : 'warning',
-      message: `${req.method} ${req.originalUrl} -> ${res.statusCode}`,
+      message: `${req.method} ${safePath} -> ${res.statusCode}`,
       context: {
         status: res.statusCode,
         durationMs,
-        ip: req.ip,
-        userAgent: req.headers['user-agent'] || ''
+        path: safePath
       }
     }).catch(() => {});
   });
@@ -197,6 +308,14 @@ const requireAuth = (req, res, next) => {
     return res.status(401).json({ error: 'unauthorized' });
   }
   req.user = payload;
+  return next();
+};
+
+const requireBusinessOrAdmin = (req, res, next) => {
+  const role = req.user?.role || '';
+  if (role !== 'ADMIN' && role !== 'BUSINESS') {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   return next();
 };
 
@@ -423,6 +542,8 @@ const ORDER_STATUS_FLOW_BY_TYPE = {
   PICKUP: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'COMPLETED', 'CANCELLED'],
   TABLE: ['PENDING', 'PREPARING', 'READY', 'SERVED', 'COMPLETED', 'CANCELLED']
 };
+
+const CLIENT_CANCEL_WINDOW_MS = 10 * 60 * 1000;
 
 const getOrderStatusFlow = (orderType = 'DELIVERY') =>
   ORDER_STATUS_FLOW_BY_TYPE[orderType] || ORDER_STATUS_FLOW_BY_TYPE.DELIVERY;
@@ -1539,8 +1660,14 @@ const ensureUserExists = async (userId) => {
   return rows.length > 0;
 };
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
+app.get('/api/health', async (_req, res) => {
+  try {
+    await query('SELECT 1');
+    res.json({ ok: true });
+  } catch (error) {
+    console.warn('Healthcheck failed', error?.message || error);
+    res.status(503).json({ ok: false, error: 'db_unavailable' });
+  }
 });
 
 // --- Print ---
@@ -2158,10 +2285,19 @@ app.post('/api/stores/:id/neighborhoods/import', async (req, res) => {
   });
 
   if (error && error.status && error.status !== 'ZERO_RESULTS') {
-    return res.status(502).json({
-      error: 'google_api_error',
-      googleStatus: error.status,
-      message: error.message || 'Google API error'
+    return res.json({
+      neighborhoods: [],
+      addedCount: 0,
+      totalCount: existingList.length,
+      meta: {
+        partial: true,
+        error: 'google_api_error',
+        googleStatus: error.status,
+        message: error.message || 'Google API error'
+      },
+      neighborhoodImportState: storeData.neighborhoodImportState || {},
+      neighborhoodFeesImportedAt: storeData.neighborhoodFeesImportedAt || null,
+      neighborhoodFeesSource: storeData.neighborhoodFeesSource || null
     });
   }
 
@@ -2599,13 +2735,103 @@ app.get('/api/imagekit/auth', requireAuth, (req, res) => {
   return res.json({ token, expire, signature });
 });
 
+const isImageKitReady = () =>
+  Boolean(imagekitPrivateKey && imagekitPublicKey && imagekitUrlEndpoint);
+
+app.post('/api/imagekit/upload', requireAuth, async (req, res) => {
+  const role = req.user?.role || '';
+  if (role !== 'ADMIN' && role !== 'BUSINESS') {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  if (!isImageKitReady()) {
+    return res.status(500).json({ error: 'imagekit_not_configured' });
+  }
+
+  const MAX_BYTES = 10 * 1024 * 1024;
+  const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+
+  const busboy = Busboy({ headers: req.headers, limits: { fileSize: MAX_BYTES, files: 1 } });
+  let fileBuffer = [];
+  let fileMime = '';
+  let fileName = '';
+  let hasFile = false;
+  let invalidType = false;
+  let tooLarge = false;
+  let fileHandled = false;
+
+  busboy.on('file', (field, file, info) => {
+    if (field !== 'file' || fileHandled) {
+      file.resume();
+      return;
+    }
+    fileHandled = true;
+    hasFile = true;
+    fileMime = info?.mimeType || '';
+    fileName = path.basename(info?.filename || 'upload');
+
+    if (!allowedTypes.has(fileMime)) {
+      invalidType = true;
+      file.resume();
+      return;
+    }
+
+    file.on('data', (data) => {
+      fileBuffer.push(data);
+    });
+    file.on('limit', () => {
+      tooLarge = true;
+      file.resume();
+    });
+  });
+
+  busboy.on('error', () => {
+    return res.status(400).json({ error: 'invalid_multipart' });
+  });
+
+  busboy.on('finish', async () => {
+    if (!hasFile) {
+      return res.status(400).json({ error: 'file_required' });
+    }
+    if (invalidType) {
+      return res.status(400).json({ error: 'invalid_file_type' });
+    }
+    if (tooLarge) {
+      return res.status(413).json({ error: 'file_too_large' });
+    }
+
+    const buffer = Buffer.concat(fileBuffer);
+    try {
+      const data = await imageKitClient().files.upload({
+        file: buffer.toString('base64'),
+        fileName
+      });
+      const normalizedEndpoint = imagekitUrlEndpoint.replace(/\/+$/, '');
+      const normalizedPath = String(data.filePath || '').startsWith('/')
+        ? data.filePath
+        : `/${data.filePath}`;
+      return res.json({
+        ok: true,
+        url: data.url || `${normalizedEndpoint}${normalizedPath}`,
+        fileId: data.fileId,
+        name: data.name,
+        filePath: data.filePath
+      });
+    } catch (error) {
+      console.error('Failed to upload ImageKit file', error);
+      return res.status(500).json({ error: 'imagekit_upload_failed' });
+    }
+  });
+
+  req.pipe(busboy);
+});
+
 app.delete('/api/imagekit/files/:fileId', requireAuth, async (req, res) => {
   if (!imagekitPrivateKey) {
     return res.status(500).json({ error: 'imagekit not configured' });
   }
   const fileId = String(req.params.fileId || '');
-  if (!fileId) {
-    return res.status(400).json({ error: 'file id required' });
+  if (!fileId || fileId === 'undefined' || fileId === 'null') {
+    return res.json({ ok: true, alreadyMissing: true });
   }
 
   try {
@@ -2614,6 +2840,9 @@ app.delete('/api/imagekit/files/:fileId', requireAuth, async (req, res) => {
       method: 'DELETE',
       headers: { Authorization: `Basic ${auth}` }
     });
+    if (response.status === 404) {
+      return res.json({ ok: true, alreadyMissing: true });
+    }
     if (!response.ok) {
       const text = await response.text();
       return res.status(response.status).json({ error: 'imagekit delete failed', details: text });
@@ -2624,6 +2853,7 @@ app.delete('/api/imagekit/files/:fileId', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'imagekit delete failed' });
   }
 });
+
 
 app.get('/api/logs', requireAdmin, async (req, res) => {
   try {
@@ -2782,7 +3012,8 @@ ${JSON.stringify(products)}
     );
 
     if (!response.ok) {
-      return res.status(502).json({
+      console.warn('Gemini recommendation failed', response.status);
+      return res.json({
         suggestion: 'As lojas ainda estão trabalhando para atender a esse pedido.',
         recommendedProducts: []
       });
@@ -3919,8 +4150,12 @@ const geocodeAddressCoordinates = async (address = {}) => {
 
 const resolveCoordinatesForAddress = async (address = {}, coords) => {
   if (isValidCoords(coords) && !isFallbackCoords(coords)) return coords;
-  if (!hasAddressFields(address)) return null;
-  return geocodeAddressCoordinates(address);
+  if (!hasAddressFields(address)) {
+    return isValidCoords(coords) ? coords : null;
+  }
+  const resolved = await geocodeAddressCoordinates(address);
+  if (resolved) return resolved;
+  return isValidCoords(coords) ? coords : null;
 };
 
 const fetchNominatimSearch = async ({ queryText, postalcode } = {}) => {
@@ -4065,8 +4300,8 @@ app.get('/api/geocode/search', async (req, res) => {
 
     res.json(results);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'failed to geocode search' });
+    console.warn('Geocode search failed', error);
+    res.json([]);
   }
 });
 
@@ -4077,10 +4312,14 @@ app.get('/api/geocode/neighborhoods', async (req, res) => {
   try {
     const { neighborhoods, error, meta } = await fetchGoogleNeighborhoods(city, state);
     if (error && error.status && error.status !== 'ZERO_RESULTS') {
-      return res.status(502).json({
-        error: 'google_api_error',
-        googleStatus: error.status,
-        message: error.message || 'Google API error'
+      return res.json({
+        neighborhoods: [],
+        meta: {
+          partial: true,
+          error: 'google_api_error',
+          googleStatus: error.status,
+          message: error.message || 'Google API error'
+        }
       });
     }
     res.json({
@@ -4088,8 +4327,8 @@ app.get('/api/geocode/neighborhoods', async (req, res) => {
       meta: meta || { partial: false, requestCount: 0 }
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'failed to fetch neighborhoods' });
+    console.warn('Failed to fetch neighborhoods', error);
+    res.json({ neighborhoods: [], meta: { partial: true, requestCount: 0 } });
   }
 });
 
@@ -4441,6 +4680,10 @@ app.post('/api/orders', async (req, res) => {
     payload.autoAcceptedAt = new Date().toISOString();
   }
 
+  if (payload.storeId && !isValidUuid(String(payload.storeId))) {
+    return res.status(400).json({ error: 'invalid_store_id' });
+  }
+
   if (payload.storeId) {
     const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [payload.storeId]);
     storeData = storeRows[0]?.data || {};
@@ -4573,7 +4816,7 @@ app.post('/api/orders', async (req, res) => {
   if (lineItems.length > 0) {
     try {
       const productIds = Array.from(
-        new Set(lineItems.map((item) => item?.productId).filter(Boolean))
+        new Set(lineItems.map((item) => item?.productId).filter((id) => isValidUuid(String(id || ''))))
       );
       const productMap = new Map();
       if (productIds.length > 0) {
@@ -4589,7 +4832,7 @@ app.post('/api/orders', async (req, res) => {
           lineItems
             .flatMap((item) => item?.pizza?.flavors || [])
             .map((entry) => entry?.flavorId)
-            .filter(Boolean)
+            .filter((id) => isValidUuid(String(id || '')))
         )
       );
       const flavorMap = new Map();
@@ -4916,7 +5159,7 @@ app.post('/api/orders', async (req, res) => {
             (payload.lineItems || [])
               .flatMap((item) => item?.pizza?.flavors || [])
               .map((entry) => entry?.flavorId)
-              .filter(Boolean)
+              .filter((id) => isValidUuid(String(id || '')))
           )
         );
         const flavorMap = new Map();
@@ -5243,7 +5486,7 @@ app.post('/api/orders/:id/print', async (req, res) => {
       (orderPayload.lineItems || [])
         .flatMap((item) => item?.pizza?.flavors || [])
         .map((entry) => entry?.flavorId)
-        .filter(Boolean)
+        .filter((id) => isValidUuid(String(id || '')))
     )
   );
   const flavorMap = new Map();
@@ -5306,6 +5549,9 @@ app.put('/api/orders/:id/status', async (req, res) => {
   );
   if (currentRows.length === 0) return res.status(404).json({ error: 'not found' });
   const orderRow = currentRows[0];
+  const authPayload = getAuthPayload(req);
+  const isStoreOrAdmin = authPayload?.role === 'ADMIN' || authPayload?.role === 'BUSINESS';
+  const isClientRequest = !isStoreOrAdmin;
   const orderData = orderRow.data || {};
   const orderType = resolveOrderTypeFromData(orderData);
   const currentStatus = normalizeStoredStatusForType(orderRow.status, orderType);
@@ -5321,6 +5567,12 @@ app.put('/api/orders/:id/status', async (req, res) => {
     });
   }
   if (resolvedStatus === 'CANCELLED') {
+    if (isClientRequest) {
+      const createdAtMs = orderRow.created_at ? new Date(orderRow.created_at).getTime() : NaN;
+      if (Number.isFinite(createdAtMs) && Date.now() - createdAtMs > CLIENT_CANCEL_WINDOW_MS) {
+        return res.status(403).json({ error: 'cancel_window_expired' });
+      }
+    }
     const data = {
       ...(orderRow.data || {}),
       cancelReason: reason ? String(reason) : (orderRow.data || {}).cancelReason
@@ -5381,7 +5633,7 @@ app.put('/api/orders/:id/status', async (req, res) => {
                 (orderPayload.lineItems || [])
                   .flatMap((item) => item?.pizza?.flavors || [])
                   .map((entry) => entry?.flavorId)
-                  .filter(Boolean)
+                  .filter((id) => isValidUuid(String(id || '')))
               )
             );
             const flavorMap = new Map();
