@@ -121,7 +121,7 @@ const PRICING_STRATEGIES = [
     { id: 'MAX', label: 'Maior sabor' }
 ];
 
-const normalizeCategoryValue = (value: string) => value.toLowerCase().trim();
+const normalizeCategoryValue = (value: string) => (value || '').toString().toLowerCase().trim();
 
 const ORDER_STATUS_FLOW_BY_TYPE: Record<Order['type'] | 'DEFAULT', Order['status'][]> = {
     DELIVERY: ['PENDING', 'PREPARING', 'WAITING_COURIER', 'DELIVERING', 'COMPLETED', 'CANCELLED'],
@@ -363,7 +363,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const buildableProductInputRef = useRef<HTMLInputElement>(null);
   const deliveryZoneMapRef = useRef<any>(null);
   const deliveryZoneMapContainerRef = useRef<HTMLDivElement>(null);
+  const [deliveryZoneMapReady, setDeliveryZoneMapReady] = useState(false);
   const deliveryZoneCircleRefs = useRef<Map<string, any>>(new Map());
+  const deliveryZonePolygonRefs = useRef<Map<string, any>>(new Map());
+  const deliveryZoneDrawingManagerRef = useRef<any>(null);
   const deliveryZoneUpdateTimersRef = useRef<Map<string, any>>(new Map());
   const deliveryZoneSyncGuardRef = useRef<Set<string>>(new Set());
   const lastZoneIdsRef = useRef<string>('');
@@ -790,6 +793,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   useEffect(() => {
       if (settingsTab !== 'DELIVERY' || deliveryFeeMode !== 'BY_RADIUS') {
           setDeliveryZoneError(null);
+          setDeliveryZoneMapReady(false);
           return;
       }
       let cancelled = false;
@@ -799,11 +803,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           if (cancelled) return;
           if (!loaded) {
               setDeliveryZoneError('Erro ao carregar o mapa. Verifique a configuração da chave Google Maps.');
+              setDeliveryZoneMapReady(false);
               return;
           }
           setDeliveryZoneError(null);
           const container = deliveryZoneMapContainerRef.current;
-          if (!container) return;
+          if (!container) {
+              setDeliveryZoneMapReady(false);
+              return;
+          }
           const center = storeProfile.coordinates || { lat: -23.561684, lng: -46.655981 };
           if (!deliveryZoneMapRef.current || deliveryZoneMapRef.current.getDiv() !== container) {
               deliveryZoneMapRef.current = new window.google.maps.Map(container, {
@@ -816,10 +824,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               deliveryZoneCircleRefs.current.forEach((circle) => {
                   circle.setMap(deliveryZoneMapRef.current);
               });
+              window.google.maps.event.trigger(deliveryZoneMapRef.current, 'resize');
           } else if (storeProfile.coordinates) {
               deliveryZoneMapRef.current.setCenter(storeProfile.coordinates);
               window.google.maps.event.trigger(deliveryZoneMapRef.current, 'resize');
           }
+          setDeliveryZoneMapReady(true);
       };
       initMap();
       return () => {
@@ -829,11 +839,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
   useEffect(() => {
       if (deliveryFeeMode !== 'BY_RADIUS') return;
+      if (!deliveryZoneMapReady) return;
       if (!deliveryZoneMapRef.current || !window.google) return;
       const map = deliveryZoneMapRef.current;
       const circleMap = deliveryZoneCircleRefs.current;
+      const polygonMap = deliveryZonePolygonRefs.current;
       const guard = deliveryZoneSyncGuardRef.current;
       const timers = deliveryZoneUpdateTimersRef.current;
+      const selectedId = selectedDeliveryZoneId;
 
       const activeIds = new Set(deliveryZones.map((zone) => zone.id));
       for (const [zoneId, circle] of circleMap.entries()) {
@@ -847,9 +860,95 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               guard.delete(zoneId);
           }
       }
+      for (const [zoneId, polygon] of polygonMap.entries()) {
+          if (!activeIds.has(zoneId)) {
+              window.google.maps.event.clearInstanceListeners(polygon);
+              polygon.setMap(null);
+              polygonMap.delete(zoneId);
+              const timer = timers.get(zoneId);
+              if (timer) clearTimeout(timer);
+              timers.delete(zoneId);
+              guard.delete(zoneId);
+          }
+      }
 
       deliveryZones.forEach((zone) => {
           if (!zone) return;
+          const type = getZoneType(zone);
+          const isSelected = selectedId === zone.id;
+          const strokeColor = isSelected ? '#0ea5e9' : '#ef4444';
+          const fillColor = isSelected ? '#0ea5e9' : '#ef4444';
+          if (type === 'POLYGON') {
+              const path = Array.isArray(zone.polygonPath) ? zone.polygonPath : [];
+              if (path.length < 3) return;
+              let polygon = polygonMap.get(zone.id);
+              if (!polygon) {
+                  polygon = new window.google.maps.Polygon({
+                      map,
+                      paths: path,
+                      editable: true,
+                      draggable: true,
+                      fillColor,
+                      fillOpacity: 0.2,
+                      strokeColor,
+                      strokeWeight: 2
+                  });
+                  polygon.addListener('click', () => setSelectedDeliveryZoneId(zone.id));
+                  const scheduleSync = () => {
+                      if (guard.has(zone.id)) return;
+                      const timer = timers.get(zone.id);
+                      if (timer) clearTimeout(timer);
+                      timers.set(
+                          zone.id,
+                          setTimeout(() => {
+                              const points = polygon
+                                  .getPath()
+                                  .getArray()
+                                  .map((point: any) => ({ lat: point.lat(), lng: point.lng() }));
+                              if (points.length < 3) return;
+                              const avg = points.reduce(
+                                  (acc, item) => ({ lat: acc.lat + item.lat, lng: acc.lng + item.lng }),
+                                  { lat: 0, lng: 0 }
+                              );
+                              const centerLat = avg.lat / points.length;
+                              const centerLng = avg.lng / points.length;
+                              handleUpdateDeliveryZone(zone.id, {
+                                  polygonPath: points,
+                                  centerLat,
+                                  centerLng
+                              });
+                          }, 150)
+                      );
+                  };
+                  polygon.getPath().addListener('set_at', scheduleSync);
+                  polygon.getPath().addListener('insert_at', scheduleSync);
+                  polygon.getPath().addListener('remove_at', scheduleSync);
+                  polygon.addListener('dragend', scheduleSync);
+                  polygonMap.set(zone.id, polygon);
+                  return;
+              }
+              if (polygon.getMap() !== map) {
+                  polygon.setMap(map);
+              }
+              polygon.setOptions({ strokeColor, fillColor });
+              const currentPath = polygon.getPath().getArray().map((point: any) => ({
+                  lat: point.lat(),
+                  lng: point.lng()
+              }));
+              const needsUpdate =
+                  currentPath.length !== path.length ||
+                  currentPath.some(
+                      (point: any, idx: number) =>
+                          Math.abs(point.lat - path[idx].lat) > 0.000001 ||
+                          Math.abs(point.lng - path[idx].lng) > 0.000001
+                  );
+              if (needsUpdate) {
+                  guard.add(zone.id);
+                  polygon.setPaths(path);
+                  setTimeout(() => guard.delete(zone.id), 0);
+              }
+              return;
+          }
           const center = { lat: Number(zone.centerLat), lng: Number(zone.centerLng) };
           const radius = Number(zone.radiusMeters || 0);
           let circle = circleMap.get(zone.id);
@@ -861,11 +960,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   radius,
                   editable: true,
                   draggable: true,
-                  fillColor: '#ef4444',
+                  fillColor,
                   fillOpacity: 0.2,
-                  strokeColor: '#ef4444',
+                  strokeColor,
                   strokeWeight: 2
               });
+              circle.addListener('click', () => setSelectedDeliveryZoneId(zone.id));
               circleMap.set(zone.id, circle);
 
               const scheduleSync = () => {
@@ -896,6 +996,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           if (circle.getMap() !== map) {
               circle.setMap(map);
           }
+          circle.setOptions({ strokeColor, fillColor });
 
           const currentCenter = circle.getCenter();
           const currentRadius = circle.getRadius();
@@ -919,6 +1020,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           if (deliveryZones.length > 0) {
               const bounds = new window.google.maps.LatLngBounds();
               deliveryZones.forEach((zone) => {
+                  const type = getZoneType(zone);
+                  if (type === 'POLYGON' && Array.isArray(zone.polygonPath)) {
+                      zone.polygonPath.forEach((point) => bounds.extend(point));
+                      return;
+                  }
                   const lat = Number(zone.centerLat);
                   const lng = Number(zone.centerLng);
                   const radiusMeters = Number(zone.radiusMeters || 0);
@@ -931,7 +1037,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               map.fitBounds(bounds);
           }
       }
-  }, [deliveryFeeMode, deliveryZones]);
+  }, [deliveryFeeMode, deliveryZones, selectedDeliveryZoneId, deliveryZoneMapReady]);
 
   // --- CALCULATED METRICS ---
   
@@ -1437,9 +1543,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   };
 
   const generateId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const getZoneType = (zone: DeliveryZone | null | undefined) => (zone?.type === 'POLYGON' ? 'POLYGON' : 'RADIUS');
 
-  const updateDeliveryZones = (next: DeliveryZone[]) => {
-      setStoreProfile((prev) => ({ ...prev, deliveryZones: next }));
+  const updateDeliveryZones = (next: DeliveryZone[] | ((prev: DeliveryZone[]) => DeliveryZone[])) => {
+      setStoreProfile((prev) => {
+          const current = Array.isArray(prev.deliveryZones) ? prev.deliveryZones : [];
+          const resolved = typeof next === 'function' ? next(current) : next;
+          return { ...prev, deliveryZones: resolved };
+      });
   };
 
   const handleCreateDeliveryZone = () => {
@@ -1453,7 +1564,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           fee: 0,
           etaMinutes: 30,
           enabled: true,
-          priority: (deliveryZones.length || 0) + 1
+          priority: (deliveryZones.length || 0) + 1,
+          type: 'RADIUS'
       };
       const next = [...deliveryZones, nextZone];
       updateDeliveryZones(next);
@@ -1461,9 +1573,66 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       setDeliveryZoneNotice('Area criada. Ajuste o raio no mapa.');
   };
 
+  const handleCreateDeliveryPolygon = () => {
+      const map = deliveryZoneMapRef.current;
+      if (!map || !window.google?.maps?.drawing) {
+          setDeliveryZoneError('Mapa não pronto para desenhar polígonos.');
+          return;
+      }
+      const existing = deliveryZoneDrawingManagerRef.current;
+      if (existing) {
+          existing.setMap(null);
+          deliveryZoneDrawingManagerRef.current = null;
+      }
+      const drawingManager = new window.google.maps.drawing.DrawingManager({
+          drawingMode: window.google.maps.drawing.OverlayType.POLYGON,
+          drawingControl: false,
+          polygonOptions: {
+              editable: true,
+              draggable: true,
+              fillColor: '#ef4444',
+              fillOpacity: 0.2,
+              strokeColor: '#ef4444',
+              strokeWeight: 2
+          }
+      });
+      drawingManager.setMap(map);
+      deliveryZoneDrawingManagerRef.current = drawingManager;
+      setDeliveryZoneNotice('Desenhe o polígono no mapa.');
+
+      const listener = window.google.maps.event.addListener(drawingManager, 'overlaycomplete', (event: any) => {
+          if (event.type !== window.google.maps.drawing.OverlayType.POLYGON) return;
+          const path = event.overlay.getPath().getArray().map((point: any) => ({
+              lat: point.lat(),
+              lng: point.lng()
+          }));
+          event.overlay.setMap(null);
+          window.google.maps.event.removeListener(listener);
+          drawingManager.setMap(null);
+          deliveryZoneDrawingManagerRef.current = null;
+
+          const nextZone: DeliveryZone = {
+              id: generateId(),
+              name: `Area ${deliveryZones.length + 1}`,
+              centerLat: path[0]?.lat ?? (storeProfile.coordinates?.lat || -23.561684),
+              centerLng: path[0]?.lng ?? (storeProfile.coordinates?.lng || -46.655981),
+              radiusMeters: 0,
+              fee: 0,
+              etaMinutes: 30,
+              enabled: true,
+              priority: (deliveryZones.length || 0) + 1,
+              type: 'POLYGON',
+              polygonPath: path
+          };
+          updateDeliveryZones((current) => [...current, nextZone]);
+          setSelectedDeliveryZoneId(nextZone.id);
+          setDeliveryZoneNotice('Polígono criado. Ajuste os pontos no mapa.');
+      });
+  };
+
   const handleUpdateDeliveryZone = (zoneId: string, updates: Partial<DeliveryZone>) => {
-      updateDeliveryZones(
-          deliveryZones.map((zone) => (zone.id === zoneId ? { ...zone, ...updates } : zone))
+      updateDeliveryZones((current) =>
+          current.map((zone) => (zone.id === zoneId ? { ...zone, ...updates } : zone))
       );
   };
 
@@ -2358,9 +2527,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               const invalidZone = enabledZones.find(
                   (zone) =>
                       !zone.name ||
-                      Number(zone.radiusMeters || 0) <= 0 ||
-                      !Number.isFinite(Number(zone.centerLat)) ||
-                      !Number.isFinite(Number(zone.centerLng))
+                      (getZoneType(zone) === 'POLYGON'
+                          ? !Array.isArray(zone.polygonPath) || zone.polygonPath.length < 3
+                          : Number(zone.radiusMeters || 0) <= 0 ||
+                            !Number.isFinite(Number(zone.centerLat)) ||
+                            !Number.isFinite(Number(zone.centerLng)))
               );
               if (invalidZone) {
                   alert('Verifique os dados das áreas (nome, raio e centro).');
@@ -4668,6 +4839,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const printDownloadUrl = storeProfile.merchantId
           ? `/downloads/menufaz-print.exe?merchantId=${encodeURIComponent(storeProfile.merchantId)}`
           : '/downloads/menufaz-print.exe';
+      const tabletDownloadUrl = '/downloads/menufaz-tablet-pdv-latest.apk';
       const activeTab = tabs.find((tab) => tab.id === settingsTab) || tabs[0];
       const ActiveIcon = activeTab.icon;
 
@@ -5076,9 +5248,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                            <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-4 space-y-4">
                                <div className="flex flex-wrap items-center justify-between gap-3">
                                    <div>
-                                       <p className="font-bold text-slate-700 dark:text-white">Areas de entrega (raio)</p>
+                                       <p className="font-bold text-slate-700 dark:text-white">Areas de entrega (raio e poligono)</p>
                                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                                           Crie circulos no mapa para definir taxa e tempo de entrega.
+                                           Crie circulos ou poligonos no mapa para definir taxa e tempo de entrega.
                                        </p>
                                    </div>
                                    <div className="flex items-center gap-2">
@@ -5087,7 +5259,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                            onClick={handleCreateDeliveryZone}
                                            className="px-3 py-2 rounded-lg bg-red-600 text-white text-xs font-bold"
                                        >
-                                           Criar area
+                                           Criar area (raio)
+                                       </button>
+                                       <button
+                                           type="button"
+                                           onClick={handleCreateDeliveryPolygon}
+                                           className="px-3 py-2 rounded-lg bg-slate-900 text-white text-xs font-bold"
+                                       >
+                                           Criar poligono
                                        </button>
                                    </div>
                                </div>
@@ -5104,7 +5283,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                            className="h-72 rounded-xl border border-gray-200 dark:border-slate-800 bg-white"
                                        />
                                        <p className="text-[11px] text-gray-400">
-                                           Arraste o circulo para mover e ajuste o raio no controle ao lado.
+                                           Clique em uma area para editar. Arraste no mapa para mover/ajustar.
                                        </p>
                                    </div>
                                    <div className="space-y-4">
@@ -5118,6 +5297,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                        onChange={(e) => handleUpdateDeliveryZone(selectedDeliveryZone.id, { name: e.target.value })}
                                                        className="w-full p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
                                                    />
+                                               </div>
+                                               <div className="text-xs text-gray-500">
+                                                   Tipo: {getZoneType(selectedDeliveryZone) === 'POLYGON' ? 'Poligono' : 'Raio'}
                                                </div>
                                                <div className="grid grid-cols-2 gap-2">
                                                    <div>
@@ -5149,43 +5331,47 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                        />
                                                    </div>
                                                </div>
-                                               <div>
-                                                   <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
-                                                       Raio (m)
-                                                   </label>
-                                                   <input
-                                                       type="range"
-                                                       min="500"
-                                                       max="20000"
-                                                       step="100"
-                                                       value={selectedDeliveryZone.radiusMeters}
-                                                       onChange={(e) => {
-                                                           const nextRadius = Number(e.target.value || 0);
-                                                           handleUpdateDeliveryZone(selectedDeliveryZone.id, {
-                                                               radiusMeters: nextRadius
-                                                           });
-                                                           if (deliveryZoneCircleRef.current) {
-                                                               deliveryZoneCircleRef.current.setRadius(nextRadius);
-                                                           }
-                                                       }}
-                                                       className="w-full"
-                                                   />
-                                                   <input
-                                                       type="number"
-                                                       min="0"
-                                                       value={selectedDeliveryZone.radiusMeters}
-                                                       onChange={(e) => {
-                                                           const nextRadius = Number(e.target.value || 0);
-                                                           handleUpdateDeliveryZone(selectedDeliveryZone.id, {
-                                                               radiusMeters: nextRadius
-                                                           });
-                                                           if (deliveryZoneCircleRef.current) {
-                                                               deliveryZoneCircleRef.current.setRadius(nextRadius);
-                                                           }
-                                                       }}
-                                                       className="w-full mt-2 p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
-                                                   />
-                                               </div>
+                                               {getZoneType(selectedDeliveryZone) === 'RADIUS' ? (
+                                                   <div>
+                                                       <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
+                                                           Raio (m)
+                                                       </label>
+                                                       <input
+                                                           type="range"
+                                                           min="500"
+                                                           max="20000"
+                                                           step="100"
+                                                           value={selectedDeliveryZone.radiusMeters}
+                                                           onChange={(e) => {
+                                                               const nextRadius = Number(e.target.value || 0);
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   radiusMeters: nextRadius
+                                                               });
+                                                               const circle = deliveryZoneCircleRefs.current.get(selectedDeliveryZone.id);
+                                                               if (circle) circle.setRadius(nextRadius);
+                                                           }}
+                                                           className="w-full"
+                                                       />
+                                                       <input
+                                                           type="number"
+                                                           min="0"
+                                                           value={selectedDeliveryZone.radiusMeters}
+                                                           onChange={(e) => {
+                                                               const nextRadius = Number(e.target.value || 0);
+                                                               handleUpdateDeliveryZone(selectedDeliveryZone.id, {
+                                                                   radiusMeters: nextRadius
+                                                               });
+                                                               const circle = deliveryZoneCircleRefs.current.get(selectedDeliveryZone.id);
+                                                               if (circle) circle.setRadius(nextRadius);
+                                                           }}
+                                                           className="w-full mt-2 p-2 border rounded-lg dark:bg-slate-800 dark:border-slate-700 dark:text-white text-sm"
+                                                       />
+                                                   </div>
+                                               ) : (
+                                                   <div className="text-xs text-gray-500">
+                                                       Ajuste os pontos do poligono direto no mapa.
+                                                   </div>
+                                               )}
                                                <div className="grid grid-cols-2 gap-2">
                                                    <div>
                                                        <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Prioridade</label>
@@ -5227,6 +5413,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                deliveryZones.map((zone) => (
                                                    <div
                                                        key={zone.id}
+                                                       onClick={() => setSelectedDeliveryZoneId(zone.id)}
                                                        className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border ${
                                                            selectedDeliveryZoneId === zone.id
                                                                ? 'border-red-400 bg-red-50/60 dark:bg-red-900/20'
@@ -5236,7 +5423,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                        <div>
                                                            <p className="text-sm font-semibold text-slate-700 dark:text-white">{zone.name}</p>
                                                            <p className="text-[11px] text-slate-400">
-                                                               R$ {Number(zone.fee || 0).toFixed(2)} · {Math.round(zone.radiusMeters)} m
+                                                               {getZoneType(zone) === 'POLYGON' ? 'Poligono' : `${Math.round(zone.radiusMeters)} m`} · R$ {Number(zone.fee || 0).toFixed(2)}
                                                            </p>
                                                        </div>
                                                        <div className="flex items-center gap-2">
@@ -5737,6 +5924,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    className="inline-flex items-center justify-center px-4 py-2 rounded-xl font-bold text-sm bg-red-600 text-white hover:bg-red-700 shadow-sm shadow-red-600/20"
                                >
                                    Configurar impressora
+                               </button>
+                           </div>
+                       )}
+                       {canConfigurePrinter && (
+                           <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 p-4 space-y-2">
+                               <h4 className="text-sm font-bold text-slate-800 dark:text-white">Tablet PDV</h4>
+                               <p className="text-xs text-slate-500 dark:text-slate-400">
+                                   Baixe o APK do tablet PDV para travar a mesa e usar o layout tablet.
+                               </p>
+                               <button
+                                   type="button"
+                                   onClick={() => window.location.assign(tabletDownloadUrl)}
+                                   className="inline-flex items-center justify-center px-4 py-2 rounded-xl font-bold text-sm bg-slate-900 text-white hover:bg-slate-800 shadow-sm"
+                               >
+                                   Baixar APK Tablet PDV
                                </button>
                            </div>
                        )}
