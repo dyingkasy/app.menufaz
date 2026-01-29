@@ -5,6 +5,8 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.webkit.JavascriptInterface
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -16,12 +18,22 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONObject
+import java.net.URI
+import android.os.Build
 
 class WebViewActivity : AppCompatActivity() {
   private lateinit var webView: WebView
   private lateinit var mesaOverlay: TextView
   private val resetHandler = Handler(Looper.getMainLooper())
   private val longPressRunnable = Runnable { promptReset() }
+  private val claimHandler = Handler(Looper.getMainLooper())
+  private val claimRunnable = object : Runnable {
+    override fun run() {
+      claimTabletFromUrl()
+      claimHandler.postDelayed(this, 60000)
+    }
+  }
   private var config: PdvConfig? = null
 
   @SuppressLint("SetJavaScriptEnabled")
@@ -48,10 +60,15 @@ class WebViewActivity : AppCompatActivity() {
     settings.javaScriptEnabled = true
     settings.domStorageEnabled = true
     settings.userAgentString = settings.userAgentString + " MenufazTabletPDV/1.0"
+    webView.addJavascriptInterface(TabletBridge(), "MenufazTablet")
 
     webView.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url
+        if (url.scheme == "menufaz" && url.host == "reset") {
+          promptReset()
+          return true
+        }
         val host = url.host ?: return true
         if (host.lowercase() != "app.menufaz.com") return true
         if (url.scheme != "https") {
@@ -63,6 +80,8 @@ class WebViewActivity : AppCompatActivity() {
       }
     }
 
+    claimTabletFromUrl()
+    claimHandler.postDelayed(claimRunnable, 60000)
     webView.loadUrl(config!!.urlFinal)
   }
 
@@ -137,6 +156,42 @@ class WebViewActivity : AppCompatActivity() {
     }
   }
 
+  private fun claimTabletFromUrl() {
+    val url = config?.urlFinal ?: return
+    try {
+      val uri = URI(url)
+      val query = uri.query ?: return
+      val params = query.split("&")
+        .mapNotNull { item ->
+          val parts = item.split("=")
+          if (parts.size == 2) parts[0] to parts[1] else null
+        }
+        .toMap()
+      val token = params["tablet_token"] ?: return
+      val mesa = params["mesa"] ?: config?.mesa ?: ""
+      val deviceId = getDeviceId()
+      val label = buildDeviceLabel(mesa)
+      Thread {
+        StoreApi.claimTablet(token, deviceId, label)
+      }.start()
+    } catch (_: Exception) {
+    }
+  }
+
+  private fun getDeviceId(): String {
+    return Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+      ?.takeIf { it.isNotBlank() }
+      ?: PdvPrefs.getOrCreateDeviceId(this)
+  }
+
+  private fun buildDeviceLabel(mesa: String): String {
+    val model = listOf(Build.MANUFACTURER, Build.MODEL)
+      .filter { it.isNotBlank() }
+      .joinToString(" ")
+      .ifBlank { "Android" }
+    return if (mesa.isNotBlank()) "Mesa $mesa • $model" else model
+  }
+
   private fun hideSystemUi() {
     window.decorView.systemUiVisibility = (
       View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -146,5 +201,35 @@ class WebViewActivity : AppCompatActivity() {
         or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
         or View.SYSTEM_UI_FLAG_FULLSCREEN
       )
+  }
+
+  override fun onDestroy() {
+    claimHandler.removeCallbacks(claimRunnable)
+    super.onDestroy()
+  }
+
+  inner class TabletBridge {
+    @JavascriptInterface
+    fun getDeviceId(): String {
+      return getDeviceId()
+    }
+
+    @JavascriptInterface
+    fun getDeviceInfo(): String {
+      return try {
+        JSONObject()
+          .put("manufacturer", Build.MANUFACTURER)
+          .put("model", Build.MODEL)
+          .put("sdk", Build.VERSION.SDK_INT)
+          .toString()
+      } catch (_: Exception) {
+        "{}"
+      }
+    }
+
+    @JavascriptInterface
+    fun requestReset() {
+      runOnUiThread { promptReset() }
+    }
   }
 }

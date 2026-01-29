@@ -132,6 +132,9 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const [notes, setNotes] = useState('');
   const [buildableStep, setBuildableStep] = useState(0);
   const [buildableAlert, setBuildableAlert] = useState<string | null>(null);
+  const [tabletResetOpen, setTabletResetOpen] = useState(false);
+  const tabletTapCountRef = useRef(0);
+  const tabletTapTimerRef = useRef<number | null>(null);
 
   // Pizza State
   const [splitCount, setSplitCount] = useState(1);
@@ -1395,7 +1398,41 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
           </div>
       </div>
   );
-  const isTablet = new URLSearchParams(window.location.search).get('tablet') === '1';
+  const isTablet = (() => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('tablet') === '1') return true;
+      try {
+          if (localStorage.getItem('tablet_mode') === '1') return true;
+      } catch {}
+      const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+      return /MenufazTabletPDV/i.test(ua);
+  })();
+  const handleTabletLogoTap = () => {
+      if (!isTablet) return;
+      tabletTapCountRef.current += 1;
+      if (tabletTapTimerRef.current) {
+          window.clearTimeout(tabletTapTimerRef.current);
+      }
+      tabletTapTimerRef.current = window.setTimeout(() => {
+          tabletTapCountRef.current = 0;
+      }, 2000);
+      if (tabletTapCountRef.current >= 7) {
+          tabletTapCountRef.current = 0;
+          setTabletResetOpen(true);
+      }
+  };
+  const triggerTabletReset = () => {
+      try {
+          if (typeof window !== 'undefined') {
+              const bridge = (window as any).MenufazTablet;
+              if (bridge && typeof bridge.requestReset === 'function') {
+                  bridge.requestReset();
+                  return;
+              }
+              window.location.href = 'menufaz://reset';
+          }
+      } catch {}
+  };
 
   if (isTablet) {
       return (
@@ -1403,7 +1440,11 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
               <aside className="w-72 xl:w-80 bg-slate-900 border-r border-slate-800 flex flex-col">
                   <div className="p-6 border-b border-slate-800">
                       {store.logoUrl ? (
-                          <div className="w-20 h-20 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center p-2">
+                          <button
+                              type="button"
+                              onClick={handleTabletLogoTap}
+                              className="w-20 h-20 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center p-2"
+                          >
                               <img
                                   src={imageKitUrl(store.logoUrl || '', { width: 200, quality: 70 })}
                                   alt={`Logo ${store.name}`}
@@ -1411,11 +1452,15 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                   decoding="async"
                                   className="w-full h-full object-contain"
                               />
-                          </div>
+                          </button>
                       ) : (
-                          <div className="w-20 h-20 rounded-2xl bg-slate-800 flex items-center justify-center text-slate-400">
+                          <button
+                              type="button"
+                              onClick={handleTabletLogoTap}
+                              className="w-20 h-20 rounded-2xl bg-slate-800 flex items-center justify-center text-slate-400"
+                          >
                               <Utensils />
-                          </div>
+                          </button>
                       )}
                       <h1 className="mt-4 text-xl font-extrabold text-white leading-tight">
                           {store.name}
@@ -1552,6 +1597,35 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                   </div>
               </div>
 
+              {tabletResetOpen && (
+                  <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-6">
+                      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-sm">
+                          <h3 className="text-lg font-bold text-white">Desvincular tablet</h3>
+                          <p className="text-sm text-slate-400 mt-2">
+                              Isso fará o tablet voltar para a leitura do QR Code.
+                          </p>
+                          <div className="mt-6 flex gap-3">
+                              <button
+                                  type="button"
+                                  onClick={() => {
+                                      setTabletResetOpen(false);
+                                      triggerTabletReset();
+                                  }}
+                                  className="flex-1 h-11 rounded-xl bg-red-600 hover:bg-red-700 font-bold text-white"
+                              >
+                                  Desvincular
+                              </button>
+                              <button
+                                  type="button"
+                                  onClick={() => setTabletResetOpen(false)}
+                                  className="flex-1 h-11 rounded-xl border border-slate-700 text-slate-200"
+                              >
+                                  Cancelar
+                              </button>
+                          </div>
+                      </div>
+                  </div>
+              )}
               {productModal}
           </div>
       );

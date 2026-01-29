@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import Lenis from 'lenis';
 import Header from './components/Header';
 import StoreCard from './components/StoreCard';
@@ -24,7 +24,7 @@ import { CATEGORIES } from './constants';
 import { calculateDistance } from './utils/geo';
 import { ArrowRight, ChevronRight, ShoppingBag, MapPinOff, Loader2, ShieldCheck, ClipboardList } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { getStores, getStoreById, searchCatalog, getFavoriteStores, addFavoriteStore, removeFavoriteStore } from './services/db';
+import { getStores, getStoreById, searchCatalog, getFavoriteStores, addFavoriteStore, removeFavoriteStore, claimTabletToken } from './services/db';
 import { logClientError } from './services/logging';
 
 // Inner App Component to access AuthContext
@@ -88,6 +88,14 @@ const MenuFazApp: React.FC = () => {
       const params = new URLSearchParams(window.location.search);
       return (params.get('mesa') || '').trim();
   });
+  const [initialTabletToken] = useState(() => {
+      const params = new URLSearchParams(window.location.search);
+      return (params.get('tablet_token') || '').trim();
+  });
+  const [initialTabletDeviceId] = useState(() => {
+      const params = new URLSearchParams(window.location.search);
+      return (params.get('tablet_device_id') || '').trim();
+  });
 
   // Admin Impersonation State
   const [adminTargetStoreId, setAdminTargetStoreId] = useState<string | null>(null);
@@ -108,6 +116,7 @@ const MenuFazApp: React.FC = () => {
   // Signup Flow State
   const [pendingSignupRequestId, setPendingSignupRequestId] = useState<string | null>(null);
   const [pendingStoreSlug, setPendingStoreSlug] = useState<string | null>(null);
+  const initialPathRef = useRef<string>(typeof window !== 'undefined' ? window.location.pathname : '/');
 
   // Remove max radius limit as requested. We will filter by City.
   // const MAX_DELIVERY_RADIUS = 10.0; 
@@ -155,6 +164,22 @@ const MenuFazApp: React.FC = () => {
           .replace(/[\u0300-\u036f]/g, '')
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/(^-|-$)+/g, '');
+  const restoreLastPathIfNeeded = () => {
+    if (typeof window === 'undefined') return;
+    const isRoot = window.location.pathname === '/' && !window.location.search;
+    if (!isRoot) return;
+    const stored = localStorage.getItem('last_path');
+    if (!stored || !stored.startsWith('/')) return;
+    if (stored === '/') return;
+    try {
+      const url = new URL(stored, window.location.origin);
+      window.history.replaceState({}, document.title, url.pathname + url.search);
+      const mesa = new URLSearchParams(url.search).get('mesa');
+      if (mesa) {
+        setInitialTableParam(mesa.trim());
+      }
+    } catch {}
+  };
 
   const applyPath = (pathname: string) => {
     const trimmed = pathname.replace(/^\/+|\/+$/g, '');
@@ -190,6 +215,24 @@ const MenuFazApp: React.FC = () => {
 
     setPendingStoreSlug(trimmed);
   };
+  const isKnownRoute = (pathname: string) => {
+    const trimmed = pathname.replace(/^\/+|\/+$/g, '');
+    if (!trimmed) return true;
+    if (trimmed.match(/^pedido\/([^/]+)\/pagamento\/pix$/i)) return true;
+    const viewMap: Record<string, ViewState> = {
+      login: ViewState.LOGIN,
+      admin: ViewState.ADMIN,
+      'api-menufaz': ViewState.API_DOCS,
+      'cadastro-loja': ViewState.REGISTER_BUSINESS,
+      pedidos: ViewState.CLIENT_ORDERS,
+      perfil: ViewState.CLIENT_PROFILE,
+      checkout: ViewState.CHECKOUT,
+      'finalizar-cadastro': ViewState.FINISH_SIGNUP,
+      courier: ViewState.COURIER_DASHBOARD,
+      'acompanhar-mesa': ViewState.TABLE_TRACKING
+    };
+    return Boolean(viewMap[trimmed]);
+  };
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme');
@@ -213,6 +256,7 @@ const MenuFazApp: React.FC = () => {
         return;
     }
 
+    restoreLastPathIfNeeded();
     applyPath(window.location.pathname);
 
   }, []);
@@ -312,11 +356,84 @@ const MenuFazApp: React.FC = () => {
       }
   }, [selectedStore, initialTableParam]);
 
+  const isTabletMode =
+      new URLSearchParams(window.location.search).get('tablet') === '1' || !!initialTabletToken;
+  const tabletToken = initialTabletToken;
+  const tabletDeviceParam = initialTabletDeviceId;
+  useEffect(() => {
+      if (!isTabletMode || typeof navigator === 'undefined') return;
+      const ua = navigator.userAgent || '';
+      if (!/MenufazTabletPDV/i.test(ua)) return;
+      try {
+          localStorage.setItem('tablet_mode', '1');
+      } catch {}
+  }, [isTabletMode]);
+  useEffect(() => {
+      if (!isTabletMode || typeof window === 'undefined') return;
+      const flagKey = 'tablet_sw_cleared';
+      if (sessionStorage.getItem(flagKey)) return;
+      if (!('serviceWorker' in navigator) || !('caches' in window)) return;
+      const clear = async () => {
+          try {
+              const regs = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(regs.map((reg) => reg.unregister()));
+              const cacheNames = await caches.keys();
+              await Promise.all(cacheNames.map((name) => caches.delete(name)));
+          } catch {}
+          sessionStorage.setItem(flagKey, '1');
+          window.location.reload();
+      };
+      clear();
+  }, [isTabletMode]);
+  useEffect(() => {
+      if (!tabletToken) return;
+      const stored = localStorage.getItem('tablet_device_id');
+      let deviceId =
+          tabletDeviceParam ||
+          stored ||
+          (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+              ? crypto.randomUUID()
+              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+      try {
+          const bridge = (window as any).MenufazTablet;
+          if (bridge && typeof bridge.getDeviceId === 'function') {
+              const nativeId = String(bridge.getDeviceId() || '').trim();
+              if (nativeId) deviceId = nativeId;
+          }
+      } catch {}
+      if (!stored || (tabletDeviceParam && stored !== tabletDeviceParam)) {
+          localStorage.setItem('tablet_device_id', deviceId);
+      }
+      const label = tableContext?.tableNumber ? `Mesa ${tableContext.tableNumber}` : 'Tablet';
+      const ping = () => {
+          claimTabletToken(tabletToken, deviceId, label).catch(() => {});
+          if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
+              try {
+                  const payload = JSON.stringify({ token: tabletToken, deviceId, deviceLabel: label });
+                  const base = import.meta.env.VITE_API_BASE_URL || '';
+                  const url = `${base}/tablets/claim`;
+                  const blob = new Blob([payload], { type: 'application/json' });
+                  navigator.sendBeacon(url, blob);
+              } catch {}
+          }
+      };
+      ping();
+      const interval = setInterval(ping, 60000);
+      return () => clearInterval(interval);
+  }, [tabletToken, tabletDeviceParam, tableContext?.tableNumber]);
+
   useEffect(() => {
       if (pendingStoreSlug && !selectedStore) return;
 
       const currentPath = window.location.pathname.replace(/^\/+|\/+$/g, '');
       let nextPath = '';
+
+      if (currentView === ViewState.HOME && !selectedStore && !pendingStoreSlug) {
+          const initialPath = initialPathRef.current || '';
+          if (initialPath !== '/' && !isKnownRoute(initialPath)) {
+              return;
+          }
+      }
 
       if (currentView === ViewState.STORE_DETAILS && selectedStore) {
           const custom = selectedStore.customUrl ? normalizeSlug(selectedStore.customUrl) : '';
@@ -348,11 +465,27 @@ const MenuFazApp: React.FC = () => {
       if (nextPath !== currentPath) {
           const mesaValue = tableContext?.tableNumber || initialTableParam;
           const shouldKeepMesa = mesaValue && (currentView === ViewState.STORE_DETAILS || currentView === ViewState.TABLE_TRACKING);
-          const search = shouldKeepMesa ? `?mesa=${encodeURIComponent(mesaValue)}` : '';
+          const searchParams = new URLSearchParams();
+          if (shouldKeepMesa) {
+              searchParams.set('mesa', mesaValue);
+          }
+          if (isTabletMode) {
+              searchParams.set('tablet', '1');
+              if (tabletToken) searchParams.set('tablet_token', tabletToken);
+              if (tabletDeviceParam) searchParams.set('tablet_device_id', tabletDeviceParam);
+          }
+          const search = searchParams.toString() ? `?${searchParams.toString()}` : '';
           const url = `/${nextPath}${search}`;
           window.history.pushState({}, '', url);
       }
-  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam, pixPaymentOrderId]);
+  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam, pixPaymentOrderId, isTabletMode, tabletToken, tabletDeviceParam]);
+  useEffect(() => {
+      if (typeof window === 'undefined') return;
+      const path = window.location.pathname + window.location.search;
+      if (path) {
+          localStorage.setItem('last_path', path);
+      }
+  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam, pixPaymentOrderId, isTabletMode, tabletToken, tabletDeviceParam]);
 
   // Auto-login behavior and redirection
   useEffect(() => {
@@ -728,7 +861,6 @@ const MenuFazApp: React.FC = () => {
           />
       );
   }
-  const isTabletMode = new URLSearchParams(window.location.search).get('tablet') === '1';
 
   return (
     <div className="min-h-screen flex flex-col text-gray-800 dark:text-gray-100 font-sans bg-gray-50/50 dark:bg-slate-900 transition-colors duration-300">
