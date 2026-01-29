@@ -1538,6 +1538,56 @@ const updateOrderPaymentAndStatus = async ({ orderRow, orderData, paymentRow, re
   }
 };
 
+const updateTablePaymentRow = async ({ paymentId, statusLocal, qrCode, timestampLimite }) => {
+  if (!paymentId) return;
+  const updates = [];
+  const values = [];
+  let idx = 1;
+  if (statusLocal) {
+    updates.push(`status_local = $${idx++}`);
+    values.push(statusLocal);
+  }
+  if (qrCode !== undefined) {
+    updates.push(`qr_code = $${idx++}`);
+    values.push(qrCode);
+  }
+  if (timestampLimite !== undefined) {
+    updates.push(`timestamp_limite = $${idx++}`);
+    values.push(timestampLimite);
+  }
+  updates.push(`updated_at = NOW()`);
+  if (!updates.length) return;
+  values.push(paymentId);
+  await query(`UPDATE table_payments SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+};
+
+const updateOrdersForTablePayment = async ({ orderIds = [], statusLocal }) => {
+  let ids = orderIds;
+  if (typeof ids === 'string') {
+    try {
+      ids = JSON.parse(ids);
+    } catch {
+      ids = [];
+    }
+  }
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  if (statusLocal !== ORDER_PAYMENT_STATUS.paid) return;
+  const { rows } = await query(
+    'SELECT id, status, store_id, data FROM orders WHERE id = ANY($1::uuid[])',
+    [ids]
+  );
+  for (const row of rows) {
+    const orderData = row.data || {};
+    const nextData = {
+      ...(orderData || {}),
+      paymentStatus: ORDER_PAYMENT_STATUS.paid,
+      paymentProvider: ORDER_PAYMENT_PROVIDER.pixRepasse,
+      paymentMethod: orderData.paymentMethod || 'PIX (Online)'
+    };
+    await query('UPDATE orders SET data = $1 WHERE id = $2', [nextData, row.id]);
+  }
+};
+
 const generateUniqueMerchantId = async () => {
   let candidate = crypto.randomUUID();
   let attempts = 0;
@@ -2451,15 +2501,17 @@ app.post('/api/tablet/bill/pay/pix', async (req, res) => {
   const mapped = mapPixRepasseResponse(paymentResult.data || {});
   const idSolicitacao = mapped.idSolicitacao || null;
   const qrCode = mapped.qrCode || null;
-  await query(
+  const { rows: paymentRows } = await query(
     `
     INSERT INTO table_payments (store_id, table_number, table_session_id, order_ids, valor, id_solicitacao, timestamp_limite, qr_code)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    RETURNING id
     `,
     [storeId, tableNumber, tableSessionId, JSON.stringify(orderIds), total, idSolicitacao, timestampLimiteSolicitacao, qrCode]
   );
 
   res.json({
+    paymentId: paymentRows?.[0]?.id,
     total,
     qrCode,
     expiresAt: timestampLimiteSolicitacao,
@@ -2516,6 +2568,109 @@ app.post('/api/tablets/revoke', async (req, res) => {
     );
   }
   res.json({ ok: true });
+});
+
+app.get('/api/sse/table-payments/:tableSessionId', async (req, res) => {
+  const storeId = (req.query?.storeId || '').toString().trim();
+  const tableNumber = (req.query?.tableNumber || '').toString().trim();
+  const tableSessionId = (req.params.tableSessionId || '').toString().trim();
+  if (!storeId || !tableNumber || !tableSessionId) {
+    return res.status(400).json({ error: 'storeId, tableNumber, tableSessionId required' });
+  }
+
+  const { rows: paymentRows } = await query(
+    `
+    SELECT *
+    FROM table_payments
+    WHERE store_id = $1
+      AND table_number = $2
+      AND table_session_id = $3
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [storeId, tableNumber, tableSessionId]
+  );
+  if (paymentRows.length === 0) return res.status(404).json({ error: 'payment not found' });
+  let paymentRow = paymentRows[0];
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendEvent = (event, data) => {
+    if (event) res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const sendStatus = () => {
+    sendEvent('status', {
+      paymentId: paymentRow.id,
+      status: paymentRow.status_local,
+      qrCode: paymentRow.qr_code,
+      expiresAt: paymentRow.timestamp_limite
+    });
+  };
+
+  sendEvent('connected', { paymentId: paymentRow.id });
+  sendStatus();
+
+  let closed = false;
+  let pollInterval = null;
+  let pingInterval = null;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    if (pollInterval) clearInterval(pollInterval);
+    if (pingInterval) clearInterval(pingInterval);
+  };
+
+  const poll = async () => {
+    try {
+      if (!paymentRow.id_solicitacao) return;
+      if (paymentRow.timestamp_limite && new Date(paymentRow.timestamp_limite).getTime() <= Date.now()) {
+        await updateTablePaymentRow({
+          paymentId: paymentRow.id,
+          statusLocal: ORDER_PAYMENT_STATUS.expired
+        });
+        paymentRow.status_local = ORDER_PAYMENT_STATUS.expired;
+        sendStatus();
+        return;
+      }
+      const statusResponse = await consultarStatusPixRepasse({
+        idSolicitacao: paymentRow.id_solicitacao,
+        baseUrl: pixRepasseBaseUrl,
+        tokenApiExterna: pixRepasseToken
+      });
+      if (!statusResponse.ok) return;
+      const mapped = mapPixRepasseResponse(statusResponse.data || {});
+      const statusLocal = resolvePixStatusLocal({
+        codigoEstadoPagamento: mapped.codigoEstadoPagamento,
+        codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+        timestampLimite: paymentRow.timestamp_limite
+      });
+      await updateTablePaymentRow({
+        paymentId: paymentRow.id,
+        statusLocal
+      });
+      paymentRow = { ...paymentRow, status_local: statusLocal };
+      if (statusLocal === ORDER_PAYMENT_STATUS.paid) {
+        await updateOrdersForTablePayment({
+          orderIds: paymentRow.order_ids || [],
+          statusLocal
+        });
+      }
+      sendStatus();
+    } catch {
+    }
+  };
+
+  pollInterval = setInterval(poll, 8000);
+  pingInterval = setInterval(() => {
+    res.write(': ping\n\n');
+  }, 20000);
+
+  req.on('close', cleanup);
 });
 
 app.get('/api/empresa/pagamentos/pix-repasse', async (req, res) => {
@@ -6902,7 +7057,66 @@ const startPixRepasseReconciler = () => {
   }, 90 * 1000);
 };
 
+let tablePixReconcileRunning = false;
+const startTablePixReconciler = () => {
+  setInterval(async () => {
+    if (tablePixReconcileRunning) return;
+    tablePixReconcileRunning = true;
+    try {
+      const { rows } = await query(
+        `
+        SELECT *
+        FROM table_payments
+        WHERE status_local = $1
+        ORDER BY created_at ASC
+        LIMIT 25
+        `,
+        [ORDER_PAYMENT_STATUS.pending]
+      );
+      for (const row of rows) {
+        if (row.timestamp_limite && new Date(row.timestamp_limite).getTime() <= Date.now()) {
+          await updateTablePaymentRow({
+            paymentId: row.id,
+            statusLocal: ORDER_PAYMENT_STATUS.expired
+          });
+          continue;
+        }
+        if (!row.id_solicitacao) continue;
+        const statusResponse = await consultarStatusPixRepasse({
+          idSolicitacao: row.id_solicitacao,
+          baseUrl: pixRepasseBaseUrl,
+          tokenApiExterna: pixRepasseToken
+        });
+        if (!statusResponse.ok) {
+          continue;
+        }
+        const mapped = mapPixRepasseResponse(statusResponse.data || {});
+        const statusLocal = resolvePixStatusLocal({
+          codigoEstadoPagamento: mapped.codigoEstadoPagamento,
+          codigoEstadoSolicitacao: mapped.codigoEstadoSolicitacao,
+          timestampLimite: row.timestamp_limite
+        });
+        await updateTablePaymentRow({
+          paymentId: row.id,
+          statusLocal
+        });
+        if (statusLocal === ORDER_PAYMENT_STATUS.paid) {
+          await updateOrdersForTablePayment({
+            orderIds: row.order_ids || [],
+            statusLocal
+          });
+        }
+      }
+    } catch (error) {
+      console.error('table pix repasse reconcile failed', error);
+    } finally {
+      tablePixReconcileRunning = false;
+    }
+  }, 90 * 1000);
+};
+
 app.listen(port, () => {
   console.log(`API listening on port ${port}`);
   startPixRepasseReconciler();
+  startTablePixReconciler();
 });

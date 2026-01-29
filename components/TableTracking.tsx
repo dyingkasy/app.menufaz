@@ -38,6 +38,7 @@ const TableTracking: React.FC<TableTrackingProps> = ({
   const [pixQrImage, setPixQrImage] = useState<string | null>(null);
   const [pixExpiresAt, setPixExpiresAt] = useState<string | null>(null);
   const [pixCountdown, setPixCountdown] = useState('10:00');
+  const [pixStatus, setPixStatus] = useState<'PENDING' | 'PAID' | 'EXPIRED' | 'FAILED' | 'CANCELLED'>('PENDING');
 
   useEffect(() => {
     const unsubscribe = subscribeToTableOrders(store.id, tableNumber, tableSessionId, (next) => {
@@ -155,6 +156,11 @@ const TableTracking: React.FC<TableTrackingProps> = ({
       });
       setPixQrCode(data.qrCode || null);
       setPixExpiresAt(data.expiresAt || null);
+      if (data.status) {
+        setPixStatus(data.status as any);
+      } else {
+        setPixStatus('PENDING');
+      }
       setPixModalOpen(true);
     } catch (error: any) {
       setPixError(error?.message || 'Erro ao gerar cobrança PIX.');
@@ -162,6 +168,40 @@ const TableTracking: React.FC<TableTrackingProps> = ({
       setPixLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!pixModalOpen) return;
+    if (!tableSessionId) return;
+    const query = new URLSearchParams({
+      storeId: store.id,
+      tableNumber
+    }).toString();
+    const source = new EventSource(`/api/sse/table-payments/${encodeURIComponent(tableSessionId)}?${query}`);
+    const handleStatus = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data || '{}');
+        if (data.qrCode) setPixQrCode(data.qrCode);
+        if (data.expiresAt) setPixExpiresAt(data.expiresAt);
+        if (data.status) {
+          setPixStatus(data.status);
+        }
+        if (data.status === 'PAID') {
+          setPixError('');
+        }
+        if (data.status === 'EXPIRED') {
+          setPixError('PIX expirado. Gere novamente.');
+        }
+      } catch {}
+    };
+    source.addEventListener('status', handleStatus);
+    source.onerror = () => {
+      // keep silent
+    };
+    return () => {
+      source.removeEventListener('status', handleStatus);
+      source.close();
+    };
+  }, [pixModalOpen, store.id, tableNumber, tableSessionId]);
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-950 font-sans pb-20">
@@ -218,7 +258,9 @@ const TableTracking: React.FC<TableTrackingProps> = ({
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <h3 className="text-lg font-bold text-slate-800 dark:text-white">Fechar conta da mesa</h3>
-                  <p className="text-xs text-gray-500">Mesa {tableNumber} • Expira em {pixCountdown}</p>
+                  <p className="text-xs text-gray-500">
+                    Mesa {tableNumber} • Expira em {pixCountdown}
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -229,6 +271,12 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                 </button>
               </div>
               <div className="flex flex-col items-center gap-4">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  <span>Status:</span>
+                  <span className={`rounded-full px-2 py-0.5 ${pixStatus === 'PAID' ? 'bg-emerald-100 text-emerald-700' : pixStatus === 'EXPIRED' ? 'bg-rose-100 text-rose-600' : 'bg-slate-100 text-slate-600'}`}>
+                    {pixStatus === 'PAID' ? 'Pago' : pixStatus === 'EXPIRED' ? 'Expirado' : 'Aguardando'}
+                  </span>
+                </div>
                 {pixQrImage ? (
                   <img src={pixQrImage} alt="QR Code Pix" className="w-56 h-56" />
                 ) : (
