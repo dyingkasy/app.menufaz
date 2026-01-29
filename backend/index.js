@@ -2360,17 +2360,45 @@ app.post('/api/tablets/revoke', async (req, res) => {
   const tabletId = (req.body?.tabletId || '').toString().trim();
   if (!tabletId) return res.status(400).json({ error: 'tabletId required' });
 
-  const { rowCount } = await query(
+  const { rows } = await query(
     `
-    UPDATE tablet_devices
-    SET revoked_at = NOW()
+    SELECT id, table_number, token, device_id, device_label, revoked_at
+    FROM tablet_devices
     WHERE id = $1
       AND store_id = $2
-      AND revoked_at IS NULL
     `,
     [tabletId, storeId]
   );
-  if (!rowCount) return res.status(404).json({ error: 'not found' });
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const row = rows[0];
+  if (!row.revoked_at) {
+    await query(
+      `
+      UPDATE tablet_devices
+      SET revoked_at = NOW()
+      WHERE id = $1
+        AND store_id = $2
+        AND revoked_at IS NULL
+      `,
+      [tabletId, storeId]
+    );
+    await query(
+      `
+      INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        storeId,
+        row.table_number,
+        row.token,
+        row.device_id || null,
+        row.device_label || null,
+        'revoked',
+        (req.headers['user-agent'] || '').toString().slice(0, 300),
+        (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+      ]
+    );
+  }
   res.json({ ok: true });
 });
 
