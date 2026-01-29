@@ -1,0 +1,7 @@
+<resources>
+  <string name="app_name">Menufaz PDV</string>
+  <string name="scanner_title">Aponte para o QR Code da mesa</string>
+  <string name="scanner_error">QR Code inválido. Use apenas URLs do app.menufaz.com com ?mesa=</string>
+  <string name="scanner_manual">Digitar mesa</string>
+  <string name="reset_blocked">Reset bloqueado: senha não configurada.</string>
+</resources>

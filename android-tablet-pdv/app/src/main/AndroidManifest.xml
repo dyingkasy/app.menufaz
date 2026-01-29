@@ -1,0 +1,32 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-permission android:name="android.permission.INTERNET" />
+
+  <application
+    android:allowBackup="true"
+    android:label="Menufaz PDV"
+    android:supportsRtl="true"
+    android:theme="@style/Theme.MenufazTablet">
+
+    <activity
+      android:name=".WebViewActivity"
+      android:exported="false"
+      android:screenOrientation="sensorLandscape" />
+
+    <activity
+      android:name=".ScannerActivity"
+      android:exported="false"
+      android:screenOrientation="sensorLandscape" />
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:screenOrientation="sensorLandscape">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

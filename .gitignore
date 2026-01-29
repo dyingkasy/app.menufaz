@@ -9,6 +9,10 @@ lerna-debug.log*
 
 node_modules
 dist
+.gradle
+android-tablet-pdv/.gradle
+android-tablet-pdv/app/build
+android-tablet-pdv/build
 dist-ssr
 *.local
 
