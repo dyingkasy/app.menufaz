@@ -9,8 +9,11 @@ app.menufaz.com {
   handle_path /downloads/* {
     root * /srv/downloads
     header Content-Type application/octet-stream
-    header Content-Disposition "attachment; filename=\"menufaz-print.exe\""
     header X-Menufaz-Download "1"
+    @tablet_apk path /menufaz-tablet-pdv-latest.apk
+    header @tablet_apk Content-Disposition "attachment; filename=\"menufaz-tablet-pdv-latest.apk\""
+    @print_exe path /menufaz-print.exe
+    header @print_exe Content-Disposition "attachment; filename=\"menufaz-print.exe\""
     file_server
   }
 
@@ -30,8 +33,11 @@ http://localhost, http://127.0.0.1 {
   handle_path /downloads/* {
     root * /srv/downloads
     header Content-Type application/octet-stream
-    header Content-Disposition "attachment; filename=\"menufaz-print.exe\""
     header X-Menufaz-Download "1"
+    @tablet_apk path /menufaz-tablet-pdv-latest.apk
+    header @tablet_apk Content-Disposition "attachment; filename=\"menufaz-tablet-pdv-latest.apk\""
+    @print_exe path /menufaz-print.exe
+    header @print_exe Content-Disposition "attachment; filename=\"menufaz-print.exe\""
     file_server
   }
 
