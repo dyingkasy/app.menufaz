@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, ChevronDown, Heart, Share2, Bike, ShoppingBag, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
+import { ArrowLeft, Star, Clock, Search, Plus, Minus, Info, ChevronRight, ChevronDown, Heart, Share2, Bike, ShoppingBag, ShoppingCart, Sun, Moon, X, Slice, Check, Layers, Database, Lock, Utensils } from 'lucide-react';
 import { Store, Product, CartItem, Review, PizzaFlavor, Address, Coordinates } from '../types';
 import { getProductsByStore, getPizzaFlavorsByStore, getReviewsByStore, addReview } from '../services/db';
 import { formatCurrencyBRL } from '../utils/format';
@@ -55,6 +55,8 @@ interface StoreDetailsProps {
   onToggleFavorite?: () => void;
   initialProductId?: string;
   onProductOpened?: () => void;
+  isDarkMode?: boolean;
+  onToggleTheme?: () => void;
 }
 
 const StoreDetails: React.FC<StoreDetailsProps> = ({ 
@@ -69,7 +71,9 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     isFavorited = false,
     onToggleFavorite,
     initialProductId,
-    onProductOpened
+    onProductOpened,
+    isDarkMode = false,
+    onToggleTheme
 }) => {
   const { user } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
@@ -1502,18 +1506,43 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
               <div className="flex-1 min-w-0">
                   <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-6 py-4 flex items-center justify-between">
                       <div className="text-xs uppercase tracking-[0.25em] text-slate-400 font-bold">Cardápio</div>
-                      <button
-                          onClick={onOpenCart}
-                          className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
-                          aria-label="Abrir sacola"
-                      >
-                          <ShoppingBag size={18} />
-                          {cartItems.length > 0 && (
-                              <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                  {cartItems.reduce((acc, item) => acc + item.quantity, 0)}
-                              </span>
+                      <div className="flex items-center gap-3">
+                          {tableNumber && onTrackTable && (
+                              <button
+                                  onClick={() => {
+                                      try {
+                                          sessionStorage.setItem('tablet_show_account', '1');
+                                      } catch {}
+                                      onTrackTable();
+                                  }}
+                                  className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                                  aria-label="Ver conta da mesa"
+                              >
+                                  <ShoppingBag size={18} />
+                              </button>
                           )}
-                      </button>
+                          {onToggleTheme && (
+                              <button
+                                  onClick={onToggleTheme}
+                                  className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                                  aria-label="Alternar tema"
+                              >
+                                  {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+                              </button>
+                          )}
+                          <button
+                              onClick={onOpenCart}
+                              className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                              aria-label="Abrir sacola"
+                          >
+                              <ShoppingCart size={18} />
+                              {cartItems.length > 0 && (
+                                  <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                      {cartItems.reduce((acc, item) => acc + item.quantity, 0)}
+                                  </span>
+                              )}
+                          </button>
+                      </div>
                   </header>
 
                   <div className="px-6 py-6 space-y-10">

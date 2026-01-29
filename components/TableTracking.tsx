@@ -37,6 +37,15 @@ const TableTracking: React.FC<TableTrackingProps> = ({
     });
     return () => unsubscribe();
   }, [store.id, tableNumber, tableSessionId]);
+  useEffect(() => {
+    if (!isTabletMode) return;
+    try {
+      if (sessionStorage.getItem('tablet_show_account') === '1') {
+        sessionStorage.removeItem('tablet_show_account');
+        setShowAccount(true);
+      }
+    } catch {}
+  }, [isTabletMode]);
 
   const activeOrders = useMemo(
     () => orders.filter((order) => !['COMPLETED', 'CANCELLED'].includes(order.status)),
@@ -104,15 +113,6 @@ const TableTracking: React.FC<TableTrackingProps> = ({
             <h1 className="text-xl font-bold text-slate-800 dark:text-white">Acompanhar mesa</h1>
             <p className="text-xs text-gray-500 dark:text-gray-400">{store.name} • Mesa {tableNumber}</p>
           </div>
-          {isTabletMode && (
-            <button
-              type="button"
-              onClick={() => setShowAccount(true)}
-              className="ml-auto flex items-center gap-2 rounded-full border border-slate-200 dark:border-slate-700 px-3 py-2 text-xs font-bold text-slate-600 dark:text-slate-200 hover:border-red-300"
-            >
-              <ShoppingBag size={16} /> Conta da mesa
-            </button>
-          )}
         </div>
       </header>
 
