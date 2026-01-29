@@ -57,6 +57,7 @@ interface StoreDetailsProps {
   onProductOpened?: () => void;
   isDarkMode?: boolean;
   onToggleTheme?: () => void;
+  isTabletMode?: boolean;
 }
 
 const StoreDetails: React.FC<StoreDetailsProps> = ({ 
@@ -73,7 +74,8 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
     initialProductId,
     onProductOpened,
     isDarkMode = false,
-    onToggleTheme
+    onToggleTheme,
+    isTabletMode
 }) => {
   const { user } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
@@ -1403,6 +1405,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
       </div>
   );
   const isTablet = (() => {
+      if (typeof isTabletMode === 'boolean') return isTabletMode;
       const params = new URLSearchParams(window.location.search);
       if (params.get('tablet') === '1') return true;
       if (params.get('tablet_token')) return true;

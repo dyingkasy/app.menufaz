@@ -356,8 +356,18 @@ const MenuFazApp: React.FC = () => {
       }
   }, [selectedStore, initialTableParam]);
 
-  const isTabletMode =
-      new URLSearchParams(window.location.search).get('tablet') === '1' || !!initialTabletToken;
+  const isTabletMode = (() => {
+      if (typeof window === 'undefined') return false;
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('tablet') === '1') return true;
+      if (params.get('tablet_token')) return true;
+      if (initialTabletToken) return true;
+      try {
+          if (localStorage.getItem('tablet_mode') === '1') return true;
+      } catch {}
+      const ua = navigator.userAgent || '';
+      return /MenufazTabletPDV/i.test(ua) || /Android.*wv/i.test(ua);
+  })();
   const tabletToken = initialTabletToken;
   const tabletDeviceParam = initialTabletDeviceId;
   useEffect(() => {
@@ -1029,6 +1039,7 @@ const MenuFazApp: React.FC = () => {
                 onProductOpened={() => setPendingProductId(null)}
                 isDarkMode={isDarkMode}
                 onToggleTheme={toggleTheme}
+                isTabletMode={isTabletMode}
             />
          ) : (
              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-12">
