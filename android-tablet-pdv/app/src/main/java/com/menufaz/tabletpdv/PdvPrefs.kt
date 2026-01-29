@@ -8,6 +8,7 @@ object PdvPrefs {
   private const val KEY_MESA = "mesa"
   private const val KEY_URL = "url_final"
   private const val KEY_PIN = "admin_pin"
+  private const val KEY_DEVICE_ID = "device_id"
 
   fun load(context: Context): PdvConfig? {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -31,5 +32,14 @@ object PdvPrefs {
   fun clear(context: Context) {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     prefs.edit().clear().apply()
+  }
+
+  fun getOrCreateDeviceId(context: Context): String {
+    val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val existing = prefs.getString(KEY_DEVICE_ID, null)
+    if (!existing.isNullOrBlank()) return existing
+    val generated = "${System.currentTimeMillis().toString(36)}-${kotlin.random.Random.nextLong().toString(36)}"
+    prefs.edit().putString(KEY_DEVICE_ID, generated).apply()
+    return generated
   }
 }
