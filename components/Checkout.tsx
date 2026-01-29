@@ -871,169 +871,171 @@ const Checkout: React.FC<CheckoutProps> = ({
             )}
         </section>
 
-        {/* Order Summary */}
-        <section>
-            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <CreditCard size={16} /> Resumo
-            </h3>
-            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                <div className="p-5 max-h-60 overflow-y-auto">
-                    {cartItems.map(item => (
-                        <div key={item.id} className="flex justify-between mb-4 last:mb-0">
-                            <div className="flex gap-3">
-                                <span className="bg-gray-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 w-6 h-6 flex items-center justify-center rounded font-bold text-xs shrink-0">
-                                    {item.quantity}x
-                                </span>
-                                <div>
-                                    <p className="text-sm font-medium text-slate-800 dark:text-white leading-tight">{item.product.name}</p>
-                                    {item.options.length > 0 && (
-                                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                                            {item.options.map(o => o.optionName).join(', ')}
-                                        </p>
-                                    )}
+        {!isTabletMode && (
+            <section>
+                <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                    <CreditCard size={16} /> Resumo
+                </h3>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                    <div className="p-5 max-h-60 overflow-y-auto">
+                        {cartItems.map(item => (
+                            <div key={item.id} className="flex justify-between mb-4 last:mb-0">
+                                <div className="flex gap-3">
+                                    <span className="bg-gray-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 w-6 h-6 flex items-center justify-center rounded font-bold text-xs shrink-0">
+                                        {item.quantity}x
+                                    </span>
+                                    <div>
+                                        <p className="text-sm font-medium text-slate-800 dark:text-white leading-tight">{item.product.name}</p>
+                                        {item.options.length > 0 && (
+                                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                {item.options.map(o => o.optionName).join(', ')}
+                                            </p>
+                                        )}
+                                    </div>
                                 </div>
+                                <p className="text-sm font-medium text-slate-800 dark:text-white">{formatCurrencyBRL(item.totalPrice)}</p>
                             </div>
-                            <p className="text-sm font-medium text-slate-800 dark:text-white">{formatCurrencyBRL(item.totalPrice)}</p>
-                        </div>
-                    ))}
-                </div>
-                <div className="p-5 space-y-2 bg-white dark:bg-slate-900 border-t border-gray-100 dark:border-slate-800">
-                    <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
-                        <span>Subtotal</span>
-                        <span>{formatCurrencyBRL(subtotal)}</span>
+                        ))}
                     </div>
-                    {orderType === 'DELIVERY' && deliveryMinValue > 0 && (
-                        <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-                            <span>Pedido mínimo entrega</span>
-                            <span>{formatCurrencyBRL(deliveryMinValue)}</span>
+                    <div className="p-5 space-y-2 bg-white dark:bg-slate-900 border-t border-gray-100 dark:border-slate-800">
+                        <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
+                            <span>Subtotal</span>
+                            <span>{formatCurrencyBRL(subtotal)}</span>
                         </div>
-                    )}
-                    <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
-                        <span>Taxa de Entrega</span>
-                        {orderType === 'DELIVERY' ? (
-                            deliveryFeeMode === 'BY_NEIGHBORHOOD' ? (
-                                isNeighborhoodBlocked ? (
-                                    <span className="text-red-600 font-semibold">Indisponível</span>
-                                ) : (
-                                    <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
-                                )
-                            ) : deliveryFeeMode === 'BY_RADIUS' ? (
-                                deliveryZoneError ? (
-                                    <span className="text-red-600 font-semibold">Indisponível</span>
+                        {orderType === 'DELIVERY' && deliveryMinValue > 0 && (
+                            <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                                <span>Pedido mínimo entrega</span>
+                                <span>{formatCurrencyBRL(deliveryMinValue)}</span>
+                            </div>
+                        )}
+                        <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
+                            <span>Taxa de Entrega</span>
+                            {orderType === 'DELIVERY' ? (
+                                deliveryFeeMode === 'BY_NEIGHBORHOOD' ? (
+                                    isNeighborhoodBlocked ? (
+                                        <span className="text-red-600 font-semibold">Indisponível</span>
+                                    ) : (
+                                        <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                                    )
+                                ) : deliveryFeeMode === 'BY_RADIUS' ? (
+                                    deliveryZoneError ? (
+                                        <span className="text-red-600 font-semibold">Indisponível</span>
+                                    ) : (
+                                        <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                                    )
                                 ) : (
                                     <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
                                 )
                             ) : (
-                                <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
-                            )
-                        ) : (
-                            <span className="text-green-600 font-bold">Grátis (Retirada)</span>
+                                <span className="text-green-600 font-bold">Grátis (Retirada)</span>
+                            )}
+                        </div>
+                        {discount > 0 && (
+                            <div className="flex justify-between text-sm text-green-600 font-bold">
+                                <span>Desconto</span>
+                                <span>- {formatCurrencyBRL(discount)}</span>
+                            </div>
                         )}
-                    </div>
-                    {discount > 0 && (
-                        <div className="flex justify-between text-sm text-green-600 font-bold">
-                            <span>Desconto</span>
-                            <span>- {formatCurrencyBRL(discount)}</span>
+                        {isBelowDeliveryMin && (
+                            <div className="text-xs text-rose-600 font-bold">
+                                Pedido mínimo para entrega: {formatCurrencyBRL(deliveryMinValue)}. Falta{' '}
+                                {formatCurrencyBRL(Math.max(0, deliveryMinValue - deliverySubtotal))} para concluir.
+                            </div>
+                        )}
+                        <div className="flex justify-between text-xl font-extrabold text-slate-800 dark:text-white pt-3 mt-2 border-t border-gray-100 dark:border-slate-800">
+                            <span>Total</span>
+                            <span>{formatCurrencyBRL(total)}</span>
                         </div>
-                    )}
-                    {isBelowDeliveryMin && (
-                        <div className="text-xs text-rose-600 font-bold">
-                            Pedido mínimo para entrega: {formatCurrencyBRL(deliveryMinValue)}. Falta{' '}
-                            {formatCurrencyBRL(Math.max(0, deliveryMinValue - deliverySubtotal))} para concluir.
-                        </div>
-                    )}
-                    <div className="flex justify-between text-xl font-extrabold text-slate-800 dark:text-white pt-3 mt-2 border-t border-gray-100 dark:border-slate-800">
-                        <span>Total</span>
-                        <span>{formatCurrencyBRL(total)}</span>
                     </div>
                 </div>
-            </div>
-        </section>
+            </section>
+        )}
 
-        {/* Coupons */}
-        <section>
-            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-                Cupom
-            </h3>
-            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5 space-y-4">
-                <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                        type="text"
-                        value={couponInput}
-                        onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                        placeholder="Digite o cupom"
-                        className="flex-1 p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
-                    />
-                    <button
-                        type="button"
-                        onClick={handleApplyCouponCode}
-                        className="px-4 py-3 rounded-xl font-bold text-sm bg-slate-900 text-white hover:opacity-90"
-                    >
-                        Aplicar
-                    </button>
-                    {selectedCoupon && (
+        {!isTabletMode && (
+            <section>
+                <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                    Cupom
+                </h3>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5 space-y-4">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                            type="text"
+                            value={couponInput}
+                            onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                            placeholder="Digite o cupom"
+                            className="flex-1 p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                        />
                         <button
                             type="button"
-                            onClick={handleRemoveCoupon}
-                            className="px-4 py-3 rounded-xl font-bold text-sm border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200"
+                            onClick={handleApplyCouponCode}
+                            className="px-4 py-3 rounded-xl font-bold text-sm bg-slate-900 text-white hover:opacity-90"
                         >
-                            Remover
+                            Aplicar
                         </button>
+                        {selectedCoupon && (
+                            <button
+                                type="button"
+                                onClick={handleRemoveCoupon}
+                                className="px-4 py-3 rounded-xl font-bold text-sm border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200"
+                            >
+                                Remover
+                            </button>
+                        )}
+                    </div>
+                    {couponMessage && (
+                        <p className="text-sm text-slate-600 dark:text-slate-300">{couponMessage}</p>
+                    )}
+                    {eligibleCoupons.length === 0 && (
+                        <p className="text-sm text-slate-500 dark:text-slate-400">Nenhum cupom disponível.</p>
+                    )}
+                    {activeCoupons.length > 0 && (
+                        <div className="space-y-2">
+                            {activeCoupons.map((coupon) => {
+                                const status = couponStatus(coupon);
+                                return (
+                                    <div
+                                        key={coupon.id}
+                                        className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-xl border ${
+                                            status.eligible
+                                                ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
+                                                : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50'
+                                        }`}
+                                    >
+                                        <div>
+                                            <p className="font-bold text-slate-800 dark:text-white">{coupon.code}</p>
+                                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                {coupon.description || 'Cupom disponível'}
+                                            </p>
+                                            <div className="text-xs text-slate-500 dark:text-slate-400 mt-1 flex flex-wrap gap-2">
+                                                <span>
+                                                    {coupon.discountType === 'PERCENTAGE'
+                                                        ? `${coupon.discountValue}% OFF`
+                                                        : `R$ ${coupon.discountValue} OFF`}
+                                                </span>
+                                                {coupon.minOrderValue > 0 && (
+                                                    <span>Pedido mínimo R$ {coupon.minOrderValue}</span>
+                                                )}
+                                                {coupon.expiresAt && (
+                                                    <span>Válido até {new Date(coupon.expiresAt).toLocaleDateString()}</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            disabled={!status.eligible}
+                                            onClick={() => handleApplyCoupon(coupon)}
+                                            className="px-4 py-2 rounded-xl text-sm font-bold bg-white border border-slate-200 text-slate-700 hover:border-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            Aplicar
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     )}
                 </div>
-                {couponMessage && (
-                    <p className="text-sm text-slate-600 dark:text-slate-300">{couponMessage}</p>
-                )}
-                {eligibleCoupons.length === 0 && (
-                    <p className="text-sm text-slate-500 dark:text-slate-400">Nenhum cupom disponível.</p>
-                )}
-                {activeCoupons.length > 0 && (
-                    <div className="space-y-2">
-                        {activeCoupons.map((coupon) => {
-                            const status = couponStatus(coupon);
-                            return (
-                                <div
-                                    key={coupon.id}
-                                    className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-xl border ${
-                                        status.eligible
-                                            ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
-                                            : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50'
-                                    }`}
-                                >
-                                    <div>
-                                        <p className="font-bold text-slate-800 dark:text-white">{coupon.code}</p>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                                            {coupon.description || 'Cupom disponível'}
-                                        </p>
-                                        <div className="text-xs text-slate-500 dark:text-slate-400 mt-1 flex flex-wrap gap-2">
-                                            <span>
-                                                {coupon.discountType === 'PERCENTAGE'
-                                                    ? `${coupon.discountValue}% OFF`
-                                                    : `R$ ${coupon.discountValue} OFF`}
-                                            </span>
-                                            {coupon.minOrderValue > 0 && (
-                                                <span>Pedido mínimo R$ {coupon.minOrderValue}</span>
-                                            )}
-                                            {coupon.expiresAt && (
-                                                <span>Válido até {new Date(coupon.expiresAt).toLocaleDateString()}</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        disabled={!status.eligible}
-                                        onClick={() => handleApplyCoupon(coupon)}
-                                        className="px-4 py-2 rounded-xl text-sm font-bold bg-white border border-slate-200 text-slate-700 hover:border-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                        Aplicar
-                                    </button>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
-            </div>
-        </section>
+            </section>
+        )}
 
         {/* Contact Phone */}
         <section>
@@ -1126,6 +1128,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             )}
         </section>
 
+        {!isTabletMode && (
         <section>
              <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <Banknote size={16} /> Pagamento
@@ -1168,6 +1171,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                 </div>
             </div>
         </section>
+        )}
 
       </main>
 

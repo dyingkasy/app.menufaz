@@ -189,10 +189,23 @@ const TableTracking: React.FC<TableTrackingProps> = ({
         if (data.status === 'PAID') {
           setPixError('');
           setPixPaidToast(true);
-          setTimeout(() => {
-            setPixPaidToast(false);
-            setPixModalOpen(false);
-          }, 1500);
+          try {
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = 880;
+            gain.gain.value = 0.08;
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            setTimeout(() => {
+              osc.stop();
+              ctx.close();
+            }, 150);
+          } catch {}
+          setPixModalOpen(false);
+          setTimeout(() => setPixPaidToast(false), 1200);
         }
         if (data.status === 'EXPIRED') {
           setPixError('PIX expirado. Gere novamente.');
