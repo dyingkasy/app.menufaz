@@ -1440,15 +1440,21 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   };
 
   if (isTablet) {
+      const tabletRoot = isDarkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900';
+      const tabletSidebar = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+      const tabletHeader = isDarkMode ? 'bg-slate-950/90 border-slate-800' : 'bg-white/90 border-slate-200';
+      const tabletCard = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+      const tabletMuted = isDarkMode ? 'text-slate-400' : 'text-slate-500';
+      const tabletButton = isDarkMode ? 'bg-slate-900 border-slate-800 hover:bg-slate-800' : 'bg-white border-slate-200 hover:bg-slate-100';
       return (
-          <div className="min-h-screen bg-slate-950 text-white flex font-sans">
-              <aside className="w-72 xl:w-80 bg-slate-900 border-r border-slate-800 flex flex-col">
-                  <div className="p-6 border-b border-slate-800">
+          <div className={`min-h-screen ${tabletRoot} flex font-sans`}>
+              <aside className={`w-72 xl:w-80 ${tabletSidebar} border-r flex flex-col`}>
+                  <div className={`p-6 border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
                       {store.logoUrl ? (
                           <button
                               type="button"
                               onClick={handleTabletLogoTap}
-                              className="w-20 h-20 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center p-2"
+                              className={`w-20 h-20 rounded-2xl ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'} border flex items-center justify-center p-2`}
                           >
                               <img
                                   src={imageKitUrl(store.logoUrl || '', { width: 200, quality: 70 })}
@@ -1462,39 +1468,39 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                           <button
                               type="button"
                               onClick={handleTabletLogoTap}
-                              className="w-20 h-20 rounded-2xl bg-slate-800 flex items-center justify-center text-slate-400"
+                              className={`w-20 h-20 rounded-2xl ${isDarkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-200 text-slate-600'} flex items-center justify-center`}
                           >
                               <Utensils />
                           </button>
                       )}
-                      <h1 className="mt-4 text-xl font-extrabold text-white leading-tight">
+                      <h1 className={`mt-4 text-xl font-extrabold leading-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
                           {store.name}
                       </h1>
                       {tableNumber && (
-                          <p className="text-xs text-slate-400 mt-1">Mesa {tableNumber}</p>
+                          <p className={`text-xs mt-1 ${tabletMuted}`}>Mesa {tableNumber}</p>
                       )}
                   </div>
                   <div className="p-6 pt-4">
-                      <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Buscar</p>
+                      <p className={`text-[11px] uppercase tracking-[0.25em] font-bold ${tabletMuted}`}>Buscar</p>
                       <div className="relative mt-3">
-                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                          <Search className={`absolute left-4 top-1/2 -translate-y-1/2 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`} size={18} />
                           <input
                               type="text"
                               value={searchTerm}
                               onChange={(e) => setSearchTerm(e.target.value)}
                               placeholder="Digite o nome do produto"
-                              className="w-full pl-11 pr-4 py-3 rounded-2xl border border-slate-800 bg-slate-950 text-white focus:ring-2 focus:ring-red-500 outline-none"
+                              className={`w-full pl-11 pr-4 py-3 rounded-2xl border outline-none focus:ring-2 focus:ring-red-500 ${isDarkMode ? 'border-slate-800 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-900'}`}
                           />
                       </div>
                   </div>
                   <div className="flex-1 overflow-y-auto px-4 pb-6">
-                      <p className="text-[11px] uppercase tracking-[0.25em] text-slate-500 font-bold px-2">Categorias</p>
+                      <p className={`text-[11px] uppercase tracking-[0.25em] font-bold px-2 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>Categorias</p>
                       <div className="mt-3 space-y-2">
                           {categories.map(cat => (
                               <button
                                   key={cat}
                                   onClick={() => scrollToSection(`cat-${cat}`)}
-                                  className="w-full text-left px-4 py-3 rounded-xl bg-slate-900/60 hover:bg-slate-800 text-sm font-semibold text-slate-200 transition-colors"
+                                  className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold transition-colors ${isDarkMode ? 'bg-slate-900/60 hover:bg-slate-800 text-slate-200' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
                               >
                                   {cat}
                               </button>
@@ -1504,8 +1510,8 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
               </aside>
 
               <div className="flex-1 min-w-0">
-                  <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-6 py-4 flex items-center justify-between">
-                      <div className="text-xs uppercase tracking-[0.25em] text-slate-400 font-bold">Cardápio</div>
+                  <header className={`sticky top-0 z-30 backdrop-blur border-b px-6 py-4 flex items-center justify-between ${tabletHeader}`}>
+                      <div className={`text-xs uppercase tracking-[0.25em] font-bold ${tabletMuted}`}>Cardápio</div>
                       <div className="flex items-center gap-3">
                           {tableNumber && onTrackTable && (
                               <button
@@ -1515,7 +1521,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                       } catch {}
                                       onTrackTable();
                                   }}
-                                  className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                                  className={`relative flex items-center justify-center w-11 h-11 rounded-full ${tabletButton}`}
                                   aria-label="Ver conta da mesa"
                               >
                                   <ShoppingBag size={18} />
@@ -1524,7 +1530,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                           {onToggleTheme && (
                               <button
                                   onClick={onToggleTheme}
-                                  className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                                  className={`relative flex items-center justify-center w-11 h-11 rounded-full ${tabletButton}`}
                                   aria-label="Alternar tema"
                               >
                                   {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
@@ -1532,7 +1538,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                           )}
                           <button
                               onClick={onOpenCart}
-                              className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                              className={`relative flex items-center justify-center w-11 h-11 rounded-full ${tabletButton}`}
                               aria-label="Abrir sacola"
                           >
                               <ShoppingCart size={18} />
@@ -1549,7 +1555,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                       {loadingProducts ? (
                           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
                               {Array.from({ length: 6 }).map((_, idx) => (
-                                  <div key={idx} className="rounded-2xl border border-slate-800 bg-slate-900 p-4 flex gap-4">
+                                  <div key={idx} className={`rounded-2xl border p-4 flex gap-4 ${tabletCard}`}>
                                       <div className="flex-1 space-y-3">
                                           <div className="h-4 w-2/3 rounded-full skeleton-shimmer" />
                                           <div className="h-3 w-full rounded-full skeleton-shimmer" />
@@ -1569,7 +1575,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
 
                               return (
                                   <div key={cat} id={`cat-${cat}`} className="scroll-mt-24">
-                                      <h2 className="text-lg font-bold text-white mb-4 pb-2 border-b border-slate-800">
+                                      <h2 className={`text-lg font-bold mb-4 pb-2 border-b ${isDarkMode ? 'text-white border-slate-800' : 'text-slate-900 border-slate-200'}`}>
                                           {cat}
                                       </h2>
                                       <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -1577,32 +1583,32 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                               <div
                                                   key={product.id}
                                                   onClick={() => handleOpenProduct(product)}
-                                                  className="bg-slate-900 rounded-2xl p-4 flex gap-4 cursor-pointer border border-slate-800 hover:border-red-600 shadow-sm transition-all group"
+                                                  className={`rounded-2xl p-4 flex gap-4 cursor-pointer border shadow-sm transition-all group ${tabletCard} ${isDarkMode ? 'hover:border-red-600' : 'hover:border-red-500'}`}
                                               >
                                                   <div className="flex-1 flex flex-col">
-                                                      <h3 className="font-bold text-white mb-1 text-base group-hover:text-red-400 transition-colors">
+                                                      <h3 className={`font-bold mb-1 text-base transition-colors ${isDarkMode ? 'text-white group-hover:text-red-400' : 'text-slate-900 group-hover:text-red-600'}`}>
                                                           {product.name}
                                                       </h3>
-                                                      <p className="text-sm text-slate-400 line-clamp-2 mb-3 flex-grow leading-relaxed">
+                                                      <p className={`text-sm line-clamp-2 mb-3 flex-grow leading-relaxed ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
                                                           {product.description}
                                                       </p>
                                                       <div className="flex items-center gap-2 mt-auto">
                                                           {product.promoPrice ? (
                                                               <>
-                                                                  <span className="text-green-400 font-bold">{formatCurrencyBRL(product.promoPrice)}</span>
-                                                                  <span className="text-xs text-slate-500 line-through">{formatCurrencyBRL(product.price)}</span>
+                                                                  <span className="text-green-500 font-bold">{formatCurrencyBRL(product.promoPrice)}</span>
+                                                                  <span className={`text-xs line-through ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>{formatCurrencyBRL(product.price)}</span>
                                                               </>
                                                           ) : (
-                                                              <span className="text-slate-200 font-medium">{formatCurrencyBRL(product.price)}</span>
+                                                              <span className={`font-medium ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>{formatCurrencyBRL(product.price)}</span>
                                                           )}
                                                           {product.isPizza && product.maxFlavors && product.maxFlavors > 1 && (
-                                                              <span className="text-[10px] bg-orange-900/40 text-orange-300 px-2 py-0.5 rounded-full flex items-center gap-1 font-bold">
+                                                              <span className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-bold ${isDarkMode ? 'bg-orange-900/40 text-orange-300' : 'bg-orange-100 text-orange-700'}`}>
                                                                   <Slice size={10} /> Até {product.maxFlavors} Sabores
                                                               </span>
                                                           )}
                                                       </div>
                                                   </div>
-                                                  <div className="w-28 h-28 flex-shrink-0 rounded-xl overflow-hidden relative bg-slate-800">
+                                                  <div className={`w-28 h-28 flex-shrink-0 rounded-xl overflow-hidden relative ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
                                                       {product.imageUrl ? (
                                                           <img
                                                               src={imageKitUrl(product.imageUrl, { width: 520, quality: 70 })}
