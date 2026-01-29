@@ -1401,6 +1401,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const isTablet = (() => {
       const params = new URLSearchParams(window.location.search);
       if (params.get('tablet') === '1') return true;
+      if (params.get('tablet_token')) return true;
       try {
           if (localStorage.getItem('tablet_mode') === '1') return true;
       } catch {}

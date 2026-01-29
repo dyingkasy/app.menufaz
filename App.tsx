@@ -361,9 +361,7 @@ const MenuFazApp: React.FC = () => {
   const tabletToken = initialTabletToken;
   const tabletDeviceParam = initialTabletDeviceId;
   useEffect(() => {
-      if (!isTabletMode || typeof navigator === 'undefined') return;
-      const ua = navigator.userAgent || '';
-      if (!/MenufazTabletPDV/i.test(ua)) return;
+      if (!isTabletMode) return;
       try {
           localStorage.setItem('tablet_mode', '1');
       } catch {}
