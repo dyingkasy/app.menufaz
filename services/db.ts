@@ -65,6 +65,13 @@ const apiFetch = async <T>(path: string, options?: RequestInit): Promise<T> => {
   return response.json() as Promise<T>;
 };
 
+const isAuthError = (error: any) => {
+  const status = error?.status;
+  if (status === 401 || status === 403) return true;
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('unauthorized') || message.includes('forbidden');
+};
+
 const poller = <T>(fn: () => Promise<T>, listener: (value: T) => void) => {
   let cancelled = false;
   const run = async () => {
@@ -157,12 +164,24 @@ export const getPixRepasseConfig = async (storeId?: string) => {
     };
   }
   const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : '';
-  return apiFetch<{
-    pix_enabled: boolean;
-    pix_hash_recebedor_01?: string;
-    pix_hash_recebedor_02?: string;
-    pix_identificacao_pdv?: string;
-  }>(`/empresa/pagamentos/pix-repasse${query}`);
+  try {
+    return await apiFetch<{
+      pix_enabled: boolean;
+      pix_hash_recebedor_01?: string;
+      pix_hash_recebedor_02?: string;
+      pix_identificacao_pdv?: string;
+    }>(`/empresa/pagamentos/pix-repasse${query}`);
+  } catch (error) {
+    if (isAuthError(error)) {
+      return {
+        pix_enabled: false,
+        pix_hash_recebedor_01: '',
+        pix_hash_recebedor_02: '',
+        pix_identificacao_pdv: ''
+      };
+    }
+    throw error;
+  }
 };
 
 export const updatePixRepasseConfig = async (payload: {
@@ -315,7 +334,12 @@ export const getFavoriteStores = async (): Promise<string[]> => {
   ensureApi();
   const token = getAuthToken();
   if (!token) return [];
-  return apiFetch<string[]>('/favorites');
+  try {
+    return await apiFetch<string[]>('/favorites');
+  } catch (error) {
+    if (isAuthError(error)) return [];
+    throw error;
+  }
 };
 
 export const addFavoriteStore = async (storeId: string) => {
@@ -677,14 +701,24 @@ export const listTablets = async (storeId: string) => {
   ensureApi();
   const token = getAuthToken();
   if (!token) return [];
-  return apiFetch(`/tablets?storeId=${encodeURIComponent(storeId)}`);
+  try {
+    return await apiFetch(`/tablets?storeId=${encodeURIComponent(storeId)}`);
+  } catch (error) {
+    if (isAuthError(error)) return [];
+    throw error;
+  }
 };
 
 export const listTabletEvents = async (storeId: string) => {
   ensureApi();
   const token = getAuthToken();
   if (!token) return [];
-  return apiFetch(`/tablets/events?storeId=${encodeURIComponent(storeId)}`);
+  try {
+    return await apiFetch(`/tablets/events?storeId=${encodeURIComponent(storeId)}`);
+  } catch (error) {
+    if (isAuthError(error)) return [];
+    throw error;
+  }
 };
 
 export const revokeTablet = async (storeId: string, tabletId: string) => {
@@ -1015,7 +1049,12 @@ export const getErrorLogs = async (params: {
   if (params.limit) query.set('limit', String(params.limit));
   if (params.offset) query.set('offset', String(params.offset));
 
-  return apiFetch<{ items: ErrorLogEntry[]; total: number }>(`/logs?${query.toString()}`);
+  try {
+    return await apiFetch<{ items: ErrorLogEntry[]; total: number }>(`/logs?${query.toString()}`);
+  } catch (error) {
+    if (isAuthError(error)) return { items: [], total: 0 };
+    throw error;
+  }
 };
 
 export const setErrorLogResolved = async (logId: string, resolved: boolean) => {
