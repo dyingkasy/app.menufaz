@@ -8,6 +8,8 @@ import java.net.URL
 object StoreApi {
   private const val BASE_URL = "https://app.menufaz.com"
 
+  data class ClaimResult(val ok: Boolean, val revoked: Boolean)
+
   fun fetchAdminPin(slug: String): String {
     val connection = (URL("$BASE_URL/api/stores").openConnection() as HttpURLConnection).apply {
       connectTimeout = 10000
@@ -43,12 +45,12 @@ object StoreApi {
     }
   }
 
-  fun claimTablet(token: String, deviceId: String, deviceLabel: String): Boolean {
+  fun claimTablet(token: String, deviceId: String, deviceLabel: String): ClaimResult {
     val payload = JSONObject()
       .put("token", token)
       .put("deviceId", deviceId)
       .put("deviceLabel", deviceLabel)
-    val postOk = try {
+    val postResult = try {
       val connection = (URL("$BASE_URL/api/tablets/claim").openConnection() as HttpURLConnection).apply {
         connectTimeout = 10000
         readTimeout = 15000
@@ -58,13 +60,14 @@ object StoreApi {
       }
       connection.outputStream.use { it.write(payload.toString().toByteArray()) }
       val ok = connection.responseCode in 200..299
+      val revoked = isRevokedResponse(connection)
       connection.disconnect()
-      ok
+      ClaimResult(ok = ok, revoked = revoked)
     } catch (_: Exception) {
-      false
+      ClaimResult(ok = false, revoked = false)
     }
 
-    if (postOk) return true
+    if (postResult.ok || postResult.revoked) return postResult
 
     return try {
       val query = "token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
@@ -76,8 +79,29 @@ object StoreApi {
         requestMethod = "GET"
       }
       val ok = connection.responseCode in 200..299
+      val revoked = isRevokedResponse(connection)
       connection.disconnect()
-      ok
+      ClaimResult(ok = ok, revoked = revoked)
+    } catch (_: Exception) {
+      ClaimResult(ok = false, revoked = false)
+    }
+  }
+
+  private fun isRevokedResponse(connection: HttpURLConnection): Boolean {
+    return try {
+      val stream = if (connection.responseCode in 200..299) {
+        connection.inputStream
+      } else {
+        connection.errorStream
+      } ?: return false
+      val body = stream.bufferedReader().use { it.readText() }
+      if (body.isBlank()) return false
+      if (body.contains("\"error\":\"revoked\"")) return true
+      if (body.contains("\"action\":\"reset\"")) return true
+      val parsed = runCatching { JSONObject(body) }.getOrNull()
+      val error = parsed?.optString("error", "") ?: ""
+      val action = parsed?.optString("action", "") ?: ""
+      error.equals("revoked", ignoreCase = true) || action.equals("reset", ignoreCase = true)
     } catch (_: Exception) {
       false
     }

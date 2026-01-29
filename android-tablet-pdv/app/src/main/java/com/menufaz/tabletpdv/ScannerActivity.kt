@@ -120,8 +120,15 @@ class ScannerActivity : AppCompatActivity() {
         ?.takeIf { it.isNotBlank() }
         ?: PdvPrefs.getOrCreateDeviceId(this)
       val deviceLabel = "Mesa ${parsed.mesa}"
-      val claimed = StoreApi.claimTablet(parsed.token, deviceId, deviceLabel)
-      if (!claimed) {
+      val claim = StoreApi.claimTablet(parsed.token, deviceId, deviceLabel)
+      if (claim.revoked) {
+        handling.set(false)
+        runOnUiThread {
+          Toast.makeText(this, "Tablet revogado. Leia um novo QR.", Toast.LENGTH_SHORT).show()
+        }
+        return@Thread
+      }
+      if (!claim.ok) {
         handling.set(false)
         runOnUiThread {
           Toast.makeText(this, "QR expirado ou invalido.", Toast.LENGTH_SHORT).show()

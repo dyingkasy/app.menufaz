@@ -31,7 +31,7 @@ class WebViewActivity : AppCompatActivity() {
   private val claimRunnable = object : Runnable {
     override fun run() {
       claimTabletFromUrl()
-      claimHandler.postDelayed(this, 60000)
+      claimHandler.postDelayed(this, 10000)
     }
   }
   private var config: PdvConfig? = null
@@ -81,7 +81,7 @@ class WebViewActivity : AppCompatActivity() {
     }
 
     claimTabletFromUrl()
-    claimHandler.postDelayed(claimRunnable, 60000)
+    claimHandler.postDelayed(claimRunnable, 10000)
     webView.loadUrl(config!!.urlFinal)
   }
 
@@ -172,7 +172,10 @@ class WebViewActivity : AppCompatActivity() {
       val deviceId = getTabletDeviceId()
       val label = buildDeviceLabel(mesa)
       Thread {
-        StoreApi.claimTablet(token, deviceId, label)
+        val result = StoreApi.claimTablet(token, deviceId, label)
+        if (result.revoked) {
+          runOnUiThread { startScanner() }
+        }
       }.start()
     } catch (_: Exception) {
     }
