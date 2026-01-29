@@ -2177,22 +2177,6 @@ const processTabletClaim = async ({ token, deviceId, deviceLabel, req }) => {
   if (rows.length === 0) return { status: 404, body: { error: 'not found' } };
   const row = rows[0];
   if (row.revoked_at) {
-    await query(
-      `
-      INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      `,
-      [
-        row.store_id,
-        row.table_number,
-        token,
-        deviceId || null,
-        deviceLabel || null,
-        'claim_failed_revoked',
-        (req.headers['user-agent'] || '').toString().slice(0, 300),
-        (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
-      ]
-    );
     return { status: 403, body: { error: 'revoked', action: 'reset' }, row };
   }
 
