@@ -2169,15 +2169,12 @@ app.post('/api/tablets/qr', async (req, res) => {
   });
 });
 
-const handleTabletClaim = async (req, res) => {
-  const token = (req.body?.token || req.query?.token || '').toString().trim();
-  const deviceId = (req.body?.deviceId || req.query?.deviceId || '').toString().trim();
-  const deviceLabel = (req.body?.deviceLabel || req.query?.deviceLabel || '').toString().trim();
-  if (!token) return res.status(400).json({ error: 'token required' });
-  if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
+const processTabletClaim = async ({ token, deviceId, deviceLabel, req }) => {
+  if (!token) return { status: 400, body: { error: 'token required' } };
+  if (!deviceId) return { status: 400, body: { error: 'deviceId required' } };
 
   const { rows } = await query('SELECT * FROM tablet_devices WHERE token = $1', [token]);
-  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  if (rows.length === 0) return { status: 404, body: { error: 'not found' } };
   const row = rows[0];
   if (row.revoked_at) {
     await query(
@@ -2196,7 +2193,7 @@ const handleTabletClaim = async (req, res) => {
         (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
       ]
     );
-    return res.status(403).json({ error: 'revoked', action: 'reset' });
+    return { status: 403, body: { error: 'revoked', action: 'reset' }, row };
   }
 
   const now = new Date();
@@ -2218,7 +2215,7 @@ const handleTabletClaim = async (req, res) => {
         (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
       ]
     );
-    return res.status(403).json({ error: 'expired' });
+    return { status: 403, body: { error: 'expired' }, row };
   }
   if (expired && !row.device_id) {
     await query(
@@ -2237,7 +2234,7 @@ const handleTabletClaim = async (req, res) => {
         (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
       ]
     );
-    return res.status(403).json({ error: 'expired' });
+    return { status: 403, body: { error: 'expired' }, row };
   }
 
   const nextDeviceId = row.device_id || deviceId || null;
@@ -2271,16 +2268,52 @@ const handleTabletClaim = async (req, res) => {
     ]
   );
 
-  res.json({
-    ok: true,
-    storeId: row.store_id,
-    tableNumber: row.table_number,
-    expiresAt: row.expires_at
-  });
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      storeId: row.store_id,
+      tableNumber: row.table_number,
+      expiresAt: row.expires_at
+    },
+    row,
+    deviceId: nextDeviceId,
+    deviceLabel: nextDeviceLabel
+  };
+};
+
+const handleTabletClaim = async (req, res) => {
+  const token = (req.body?.token || req.query?.token || '').toString().trim();
+  const deviceId = (req.body?.deviceId || req.query?.deviceId || '').toString().trim();
+  const deviceLabel = (req.body?.deviceLabel || req.query?.deviceLabel || '').toString().trim();
+  const result = await processTabletClaim({ token, deviceId, deviceLabel, req });
+  return res.status(result.status).json(result.body);
 };
 
 app.post('/api/tablets/claim', handleTabletClaim);
 app.get('/api/tablets/claim', handleTabletClaim);
+
+app.get('/tablet-claim', async (req, res) => {
+  const token = (req.query?.token || '').toString().trim();
+  const deviceId = (req.query?.deviceId || '').toString().trim();
+  const deviceLabel = (req.query?.deviceLabel || '').toString().trim();
+  const mesaParam = (req.query?.mesa || '').toString().trim();
+  const slugParam = (req.query?.slug || '').toString().trim();
+  const result = await processTabletClaim({ token, deviceId, deviceLabel, req });
+  if (result.status !== 200 || !result.row) {
+    return res.status(result.status).send('<h1>Falha ao vincular tablet.</h1>');
+  }
+  const storeId = result.row.store_id;
+  const tableNumber = mesaParam || result.row.table_number;
+  const { rows } = await query('SELECT id, data FROM stores WHERE id = $1', [storeId]);
+  const storeData = rows[0]?.data || {};
+  const custom = (storeData.customUrl || '').toString().trim();
+  const name = (storeData.name || '').toString().trim();
+  const slug = slugParam || custom || name || storeId;
+  const safeSlug = normalizeSlug(slug);
+  const redirectUrl = `https://app.menufaz.com/${safeSlug}?mesa=${encodeURIComponent(tableNumber)}&tablet=1&tablet_token=${encodeURIComponent(token)}&tablet_device_id=${encodeURIComponent(deviceId)}`;
+  return res.redirect(302, redirectUrl);
+});
 
 app.get('/api/tablets', async (req, res) => {
   const authPayload = getAuthPayload(req);

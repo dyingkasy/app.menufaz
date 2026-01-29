@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -107,11 +108,27 @@ class ScannerActivity : AppCompatActivity() {
       showError()
       return
     }
+    if (parsed.token.isNullOrBlank()) {
+      showError()
+      return
+    }
 
     if (!handling.compareAndSet(false, true)) return
 
-    val finalUrl = UrlUtils.buildFinalUrl(parsed.slug, parsed.mesa)
     Thread {
+      val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        ?.takeIf { it.isNotBlank() }
+        ?: PdvPrefs.getOrCreateDeviceId(this)
+      val deviceLabel = "Mesa ${parsed.mesa}"
+      val claimed = StoreApi.claimTablet(parsed.token, deviceId, deviceLabel)
+      if (!claimed) {
+        handling.set(false)
+        runOnUiThread {
+          Toast.makeText(this, "QR expirado ou invalido.", Toast.LENGTH_SHORT).show()
+        }
+        return@Thread
+      }
+      val finalUrl = UrlUtils.buildClaimUrl(parsed.slug, parsed.mesa, parsed.token, deviceId, deviceLabel)
       val adminPin = StoreApi.fetchAdminPin(parsed.slug)
       val config = PdvConfig(parsed.slug, parsed.mesa, finalUrl, adminPin)
       PdvPrefs.save(this, config)
@@ -166,8 +183,11 @@ class ScannerActivity : AppCompatActivity() {
           return@setPositiveButton
         }
         handling.set(true)
-        val finalUrl = UrlUtils.buildFinalUrl(slug, mesa)
         Thread {
+          val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?: PdvPrefs.getOrCreateDeviceId(this)
+          val finalUrl = UrlUtils.buildFinalUrl(slug, mesa, null, deviceId)
           val adminPin = StoreApi.fetchAdminPin(slug)
           val config = PdvConfig(slug, mesa, finalUrl, adminPin)
           PdvPrefs.save(this, config)

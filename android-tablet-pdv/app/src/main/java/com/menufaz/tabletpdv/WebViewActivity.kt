@@ -167,7 +167,7 @@ class WebViewActivity : AppCompatActivity() {
           if (parts.size == 2) parts[0] to parts[1] else null
         }
         .toMap()
-      val token = params["tablet_token"] ?: return
+      val token = params["tablet_token"] ?: params["token"] ?: return
       val mesa = params["mesa"] ?: config?.mesa ?: ""
       val deviceId = getTabletDeviceId()
       val label = buildDeviceLabel(mesa)
