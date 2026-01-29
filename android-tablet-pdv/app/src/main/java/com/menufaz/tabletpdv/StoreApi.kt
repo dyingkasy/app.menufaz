@@ -1,6 +1,7 @@
 package com.menufaz.tabletpdv
 
 import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -39,6 +40,46 @@ object StoreApi {
       ""
     } finally {
       connection.disconnect()
+    }
+  }
+
+  fun claimTablet(token: String, deviceId: String, deviceLabel: String): Boolean {
+    val payload = JSONObject()
+      .put("token", token)
+      .put("deviceId", deviceId)
+      .put("deviceLabel", deviceLabel)
+    val postOk = try {
+      val connection = (URL("$BASE_URL/api/tablets/claim").openConnection() as HttpURLConnection).apply {
+        connectTimeout = 10000
+        readTimeout = 15000
+        requestMethod = "POST"
+        setRequestProperty("Content-Type", "application/json")
+        doOutput = true
+      }
+      connection.outputStream.use { it.write(payload.toString().toByteArray()) }
+      val ok = connection.responseCode in 200..299
+      connection.disconnect()
+      ok
+    } catch (_: Exception) {
+      false
+    }
+
+    if (postOk) return true
+
+    return try {
+      val query = "token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
+        "&deviceId=${java.net.URLEncoder.encode(deviceId, "UTF-8")}" +
+        "&deviceLabel=${java.net.URLEncoder.encode(deviceLabel, "UTF-8")}"
+      val connection = (URL("$BASE_URL/api/tablets/claim?$query").openConnection() as HttpURLConnection).apply {
+        connectTimeout = 10000
+        readTimeout = 15000
+        requestMethod = "GET"
+      }
+      val ok = connection.responseCode in 200..299
+      connection.disconnect()
+      ok
+    } catch (_: Exception) {
+      false
     }
   }
 }
