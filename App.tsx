@@ -15,6 +15,7 @@ import StoreDetails from './components/StoreDetails';
 import CartDrawer from './components/CartDrawer'; 
 import ClientOrders from './components/ClientOrders'; 
 import Checkout from './components/Checkout';
+import PixPayment from './components/PixPayment';
 import ClientProfile from './components/ClientProfile';
 import FinishSignup from './components/FinishSignup'; // Import
 import TableTracking from './components/TableTracking';
@@ -30,6 +31,7 @@ import { logClientError } from './services/logging';
 const MenuFazApp: React.FC = () => {
   const { user, loading: authLoading, logout } = useAuth();
   const [currentView, setCurrentView] = useState<ViewState>(ViewState.HOME);
+  const [pixPaymentOrderId, setPixPaymentOrderId] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   const [globalSearchTerm, setGlobalSearchTerm] = useState<string>('');
   const [searchLoading, setSearchLoading] = useState(false);
@@ -158,6 +160,13 @@ const MenuFazApp: React.FC = () => {
     const trimmed = pathname.replace(/^\/+|\/+$/g, '');
     if (!trimmed) {
       setCurrentView(ViewState.HOME);
+      return;
+    }
+
+    const pixMatch = trimmed.match(/^pedido\/([^/]+)\/pagamento\/pix$/i);
+    if (pixMatch) {
+      setPixPaymentOrderId(pixMatch[1]);
+      setCurrentView(ViewState.PIX_PAYMENT);
       return;
     }
 
@@ -332,6 +341,8 @@ const MenuFazApp: React.FC = () => {
           nextPath = 'finalizar-cadastro';
       } else if (currentView === ViewState.COURIER_DASHBOARD) {
           nextPath = 'courier';
+      } else if (currentView === ViewState.PIX_PAYMENT && pixPaymentOrderId) {
+          nextPath = `pedido/${pixPaymentOrderId}/pagamento/pix`;
       }
 
       if (nextPath !== currentPath) {
@@ -341,7 +352,7 @@ const MenuFazApp: React.FC = () => {
           const url = `/${nextPath}${search}`;
           window.history.pushState({}, '', url);
       }
-  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam]);
+  }, [currentView, selectedStore, pendingStoreSlug, tableContext, initialTableParam, pixPaymentOrderId]);
 
   // Auto-login behavior and redirection
   useEffect(() => {
@@ -490,6 +501,11 @@ const MenuFazApp: React.FC = () => {
   const handleOrderPlaced = () => {
       setCartItems([]);
       setCurrentView(tableContext ? ViewState.TABLE_TRACKING : ViewState.CLIENT_ORDERS);
+  };
+
+  const handlePixPayment = (orderId: string) => {
+      setPixPaymentOrderId(orderId);
+      setCurrentView(ViewState.PIX_PAYMENT);
   };
   const handleOpenOrderLookup = () => {
       setOrderLookupError('');
@@ -676,6 +692,7 @@ const MenuFazApp: React.FC = () => {
                 address={currentAddressObj}
                 onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
                 onOrderPlaced={handleOrderPlaced}
+                onPixPayment={handlePixPayment}
                 onChangeAddress={() => setIsLocationModalOpen(true)}
                 tableContext={activeTableContext}
               />
@@ -702,31 +719,45 @@ const MenuFazApp: React.FC = () => {
       );
   }
 
+  if (currentView === ViewState.PIX_PAYMENT && pixPaymentOrderId) {
+      return (
+          <PixPayment
+              orderId={pixPaymentOrderId}
+              onBack={() => setCurrentView(ViewState.CLIENT_ORDERS)}
+              onPaid={handleOrderPlaced}
+          />
+      );
+  }
+  const isTabletMode = new URLSearchParams(window.location.search).get('tablet') === '1';
+
   return (
     <div className="min-h-screen flex flex-col text-gray-800 dark:text-gray-100 font-sans bg-gray-50/50 dark:bg-slate-900 transition-colors duration-300">
-      <Header 
-        currentView={currentView} 
-        onNavigate={setCurrentView} 
-        storeName={currentView === ViewState.STORE_DETAILS ? selectedStore?.name : undefined}
-        onOpenLocation={() => setIsLocationModalOpen(true)}
-        onOpenOrderHistory={handleOpenOrderLookup}
-        currentAddress={currentAddressString}
-        userRole={user?.role || 'GUEST'}
-        userName={user?.name}
-        isDarkMode={isDarkMode}
-        toggleTheme={toggleTheme}
-        cartItemCount={cartCount}
-        cartTotal={cartTotal}
-        onOpenCart={() => setIsCartOpen(true)}
-        onSearch={setGlobalSearchTerm}
-        searchValue={globalSearchTerm}
-        searchLoading={searchLoading}
-        searchResults={searchResults}
-        onSearchSelectStore={handleSearchSelectStore}
-        onSearchSelectProduct={handleSearchSelectProduct}
-      />
+      {!isTabletMode && (
+        <Header 
+          currentView={currentView} 
+          onNavigate={setCurrentView} 
+          storeName={currentView === ViewState.STORE_DETAILS ? selectedStore?.name : undefined}
+          onOpenLocation={() => setIsLocationModalOpen(true)}
+          onOpenOrderHistory={handleOpenOrderLookup}
+          currentAddress={currentAddressString}
+          userRole={user?.role || 'GUEST'}
+          userName={user?.name}
+          isDarkMode={isDarkMode}
+          toggleTheme={toggleTheme}
+          cartItemCount={cartCount}
+          cartTotal={cartTotal}
+          onOpenCart={() => setIsCartOpen(true)}
+          onSearch={setGlobalSearchTerm}
+          searchValue={globalSearchTerm}
+          searchLoading={searchLoading}
+          searchResults={searchResults}
+          onSearchSelectStore={handleSearchSelectStore}
+          onSearchSelectProduct={handleSearchSelectProduct}
+        />
+      )}
 
-      <div className="fixed bottom-6 right-6 z-40 flex flex-col gap-3">
+      {!isTabletMode && (
+        <div className="fixed bottom-6 right-6 z-40 flex flex-col gap-3">
           {user?.role === 'ADMIN' || user?.role === 'BUSINESS' ? (
             <button 
                 onClick={() => setCurrentView(ViewState.ADMIN)}
@@ -742,7 +773,8 @@ const MenuFazApp: React.FC = () => {
                   <ClipboardList size={20} /> Meus Pedidos
               </button>
           ))}
-      </div>
+        </div>
+      )}
       
       <CartDrawer 
           isOpen={isCartOpen}

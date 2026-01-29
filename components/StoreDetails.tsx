@@ -7,7 +7,7 @@ import { formatCurrencyBRL } from '../utils/format';
 import { imageKitUrl } from '../utils/imagekit';
 import StoreReviews from './StoreReviews';
 import { useAuth } from '../contexts/AuthContext';
-import { calculateDistance } from '../utils/geo';
+import { calculateDistance, isPointInPolygon } from '../utils/geo';
 
 const PIZZA_SIZE_KEYS = ['brotinho', 'pequena', 'media', 'grande', 'familia'] as const;
 const PIZZA_SIZE_ID_MAP: Record<string, string> = {
@@ -32,7 +32,7 @@ const normalizeCoords = (coords?: Coordinates | null): Coordinates | null => {
 };
 
 const normalizeText = (value: string) =>
-    value
+    (value || '')
         .toString()
         .toLowerCase()
         .normalize('NFD')
@@ -721,7 +721,18 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   const deliveryFeeInfo = useMemo(() => {
       const fallbackFee = Number(store.deliveryFee) || 0;
       if (deliveryFeeMode === 'BY_RADIUS') {
-          const activeZones = deliveryZones.filter((zone) => zone && zone.enabled !== false);
+          const activeZones = deliveryZones.filter((zone) => {
+              if (!zone || zone.enabled === false) return false;
+              const type = zone.type || 'RADIUS';
+              if (type === 'POLYGON') {
+                  return Array.isArray(zone.polygonPath) && zone.polygonPath.length >= 3;
+              }
+              return (
+                  Number(zone.radiusMeters || 0) > 0 &&
+                  Number.isFinite(Number(zone.centerLat)) &&
+                  Number.isFinite(Number(zone.centerLng))
+              );
+          });
           if (activeZones.length === 0) {
               return { fee: fallbackFee, label: fallbackFee > 0 ? formatCurrencyBRL(fallbackFee) : 'Consultar loja' };
           }
@@ -735,13 +746,20 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
           }
           const matches = activeZones
               .map((zone) => {
+                  const type = zone.type || 'RADIUS';
+                  if (type === 'POLYGON') {
+                      if (!isPointInPolygon(coords, zone.polygonPath || [])) return null;
+                      return { zone, distanceMeters: 0, typeRank: 0 };
+                  }
                   const distanceKm = calculateDistance(
                       { lat: Number(zone.centerLat), lng: Number(zone.centerLng) },
                       coords
                   );
-                  return { zone, distanceMeters: distanceKm * 1000 };
+                  const distanceMeters = distanceKm * 1000;
+                  if (distanceMeters > Number(zone.radiusMeters || 0)) return null;
+                  return { zone, distanceMeters, typeRank: 1 };
               })
-              .filter((item) => item.distanceMeters <= Number(item.zone.radiusMeters || 0));
+              .filter(Boolean);
           if (matches.length === 0) {
               return { fee: 0, label: 'Fora da área' };
           }
@@ -749,6 +767,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
               const priorityA = Number(a.zone.priority || 0);
               const priorityB = Number(b.zone.priority || 0);
               if (priorityA !== priorityB) return priorityB - priorityA;
+              if (a.typeRank !== b.typeRank) return a.typeRank - b.typeRank;
               const radiusA = Number(a.zone.radiusMeters || 0);
               const radiusB = Number(b.zone.radiusMeters || 0);
               if (radiusA !== radiusB) return radiusA - radiusB;
@@ -843,6 +862,700 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   }, [isBuildableFlow, orderedOptionGroups, selectedProduct]);
 
   const buildableCurrent = buildableSteps[buildableStep];
+  const productModal = selectedProduct && (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-6">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fade-in" onClick={handleCloseProduct} />
+          <div
+              ref={productModalRef}
+              className="bg-white dark:bg-slate-900 w-full max-w-xl max-h-[90vh] rounded-3xl relative z-10 flex flex-col overflow-hidden animate-scale-in shadow-2xl min-h-0 overscroll-contain"
+              onWheel={(event) => event.stopPropagation()}
+          >
+              
+              {/* Main Scroll Area */}
+              <div className="flex-1 overflow-y-auto scrollbar-hide relative min-h-0 overscroll-contain">
+                   {/* Image Header */}
+                   <div className="relative h-64">
+                      <img
+                          src={imageKitUrl(selectedProduct.imageUrl, { width: 960, quality: 75 })}
+                          alt={selectedProduct.name}
+                          loading="eager"
+                          decoding="async"
+                          className="w-full h-full object-cover login-blur-image"
+                      />
+                      <button 
+                          onClick={handleCloseProduct} 
+                          className="absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white p-2 rounded-full transition-colors shadow-lg"
+                          aria-label="Fechar"
+                      >
+                          <X size={20}/>
+                      </button>
+                   </div>
+                   
+                   <div className="p-6 -mt-6 bg-white dark:bg-slate-900 rounded-t-3xl relative z-10">
+                       {useBuildableWizard ? (
+                           <div className="space-y-6">
+                               <div>
+                                   <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
+                                   <p className="text-gray-500 dark:text-gray-400 text-sm leading-relaxed">{selectedProduct.description}</p>
+                               </div>
+
+                               <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
+                                   {buildableSteps.map((step, idx) => (
+                                       <span
+                                           key={`buildable-step-${idx}`}
+                                           className={`px-3 py-1 rounded-full border ${idx === buildableStep ? 'border-emerald-500 text-emerald-700 bg-emerald-50' : 'border-slate-200 text-slate-400'}`}
+                                       >
+                                           {step.type === 'GROUP' && step.group ? step.group.name : step.type === 'NOTES' ? 'Observações' : 'Revisão'}
+                                       </span>
+                                   ))}
+                               </div>
+
+                               {buildableCurrent?.type === 'GROUP' && buildableCurrent.group && (() => {
+                                   const group = buildableCurrent.group;
+                                   const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
+                                   const filteredOptions = isSizeGroup
+                                       ? group.options.filter((opt) => opt.isAvailable !== false)
+                                       : group.options;
+                                   const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
+                                   const minRequired = group.min > 0 ? group.min : 0;
+                                   const selectedCount = (selectedOptions[group.id] || []).length;
+                                   const remainingMin = Math.max(minRequired - selectedCount, 0);
+                                   const isMaxed = selectedCount >= maxAllowed;
+                                   const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
+                                   return (
+                                       <div className="space-y-4">
+                                           <div className="flex flex-wrap items-center justify-between gap-2 bg-emerald-50 dark:bg-emerald-900/10 p-4 rounded-2xl border border-emerald-100 dark:border-emerald-900/30">
+                                               <div>
+                                                   <h3 className="text-lg font-extrabold text-emerald-700 dark:text-emerald-400">{group.name}</h3>
+                                                   <p className="text-xs text-emerald-600/80">
+                                                       {maxAllowed === 1 ? 'Escolha 1 opção' : `Você escolheu ${selectedCount} de ${maxAllowed}`}
+                                                   </p>
+                                                   {remainingMin > 0 && (
+                                                       <p className="text-xs text-emerald-700 mt-1">Escolha mais {remainingMin} para continuar.</p>
+                                                   )}
+                                                   {maxAllowed === 1 && selectedCount > 0 && (
+                                                       <p className="text-xs text-emerald-700/90 mt-1">Toque novamente para desmarcar.</p>
+                                                   )}
+                                               </div>
+                                               {minRequired > 0 && (
+                                                   <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-1 rounded font-bold uppercase">
+                                                       Obrigatório
+                                                   </span>
+                                               )}
+                                           </div>
+
+                                           {group.extraChargeAmount && group.extraChargeAfter !== undefined && group.extraChargeAfter > 0 && (
+                                               <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-3 rounded-lg">
+                                                   <Info size={14} />
+                                                   <span>Acima de {group.extraChargeAfter} itens: +{formatCurrencyBRL(group.extraChargeAmount)} cada.</span>
+                                               </div>
+                                           )}
+
+                                           <div className="space-y-3">
+                                               {orderedOptions.map(opt => {
+                                                   const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
+                                                   const isDisabled = !isSelected && isMaxed && maxAllowed > 1;
+                                                   return (
+                                                       <div 
+                                                          key={opt.id} 
+                                                          onClick={() => opt.isAvailable && !isDisabled && handleOptionToggle(group.id, opt.id, maxAllowed)}
+                                                          className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 ring-1 ring-emerald-400' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable || isDisabled ? 'opacity-50 pointer-events-none grayscale' : ''}`}
+                                                       >
+                                                           <div className="flex items-center gap-4">
+                                                               <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-emerald-500' : 'border-gray-300 dark:border-slate-600'}`}>
+                                                                   {isSelected && <Check size={14} className="text-emerald-600" />}
+                                                               </div>
+                                                               <div className="flex flex-col">
+                                                                   <span className={`font-bold text-sm ${isSelected ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
+                                                                   {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
+                                                               </div>
+                                                           </div>
+                                                           <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                                                              {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
+                                                           </span>
+                                                       </div>
+                                                   );
+                                               })}
+                                           </div>
+                                       </div>
+                                   );
+                               })()}
+
+                               {buildableCurrent?.type === 'NOTES' && (
+                                   <div className="space-y-4">
+                                       <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                           <h3 className="font-bold text-slate-800 dark:text-white">Observações</h3>
+                                           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Opcional. Ex: sem cebola, bem passado.</p>
+                                       </div>
+                                       <textarea 
+                                          value={notes}
+                                          onChange={(e) => setNotes(e.target.value)}
+                                          placeholder="Ex: Tirar a cebola, maionese à parte..."
+                                          className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm dark:text-white transition-all"
+                                          rows={4}
+                                       />
+                                   </div>
+                               )}
+
+                               {buildableCurrent?.type === 'REVIEW' && (
+                                   <div className="space-y-4">
+                                       <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                           <h3 className="font-bold text-slate-800 dark:text-white">Revisão rápida</h3>
+                                           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Confirme itens, adicionais e prazo antes de continuar.</p>
+                                       </div>
+
+                                       <div className="space-y-3">
+                                           {orderedOptionGroups.map(group => {
+                                               const selectedIds = selectedOptions[group.id] || [];
+                                               if (selectedIds.length === 0) return null;
+                                               return (
+                                                   <div key={`review-${group.id}`} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+                                                       <p className="text-xs font-bold text-slate-500 uppercase">{group.name}</p>
+                                                       <div className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-200">
+                                                           {selectedIds.map(optId => {
+                                                               const opt = group.options.find(option => option.id === optId);
+                                                               if (!opt) return null;
+                                                               return (
+                                                                   <div key={optId} className="flex items-center justify-between">
+                                                                       <span>{opt.name}</span>
+                                                                       <span className="text-slate-500">{opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}</span>
+                                                                   </div>
+                                                               );
+                                                           })}
+                                                       </div>
+                                                   </div>
+                                               );
+                                           })}
+                                       </div>
+
+                                       {notes && (
+                                           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
+                                               <p className="text-xs font-bold text-slate-500 uppercase">Observações</p>
+                                               <p className="text-sm text-slate-700 dark:text-slate-200 mt-2">{notes}</p>
+                                           </div>
+                                       )}
+
+                                       <div className="bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-100 dark:border-emerald-900/30 rounded-2xl p-4 text-sm text-emerald-800 dark:text-emerald-200 space-y-2">
+                                           <div className="flex items-center justify-between">
+                                               <span>Previsão</span>
+                                               <span className="font-bold">{store.deliveryTime || store.pickupTime || 'Consultar loja'}</span>
+                                           </div>
+                                          <div className="flex items-center justify-between">
+                                              <span>Entrega</span>
+                                              <span className="font-bold">{deliveryFeeInfo.label}</span>
+                                          </div>
+                                           {store.minOrderValue ? (
+                                               <div className="flex items-center justify-between">
+                                                   <span>Pedido mínimo</span>
+                                                   <span className="font-bold">{formatCurrencyBRL(store.minOrderValue)}</span>
+                                               </div>
+                                           ) : null}
+                                       </div>
+                                   </div>
+                               )}
+
+                               {buildableAlert && (
+                                   <div className="p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
+                                       {buildableAlert}
+                                   </div>
+                               )}
+                           </div>
+                       ) : (
+                           <>
+                               <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
+                               <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 leading-relaxed">{selectedProduct.description}</p>
+                               
+                               <div className="flex items-center justify-between mb-8 p-4 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900/30">
+                                   <span className="text-sm font-bold text-green-800 dark:text-green-400">Preço do item</span>
+                                   <span className="text-2xl font-extrabold text-green-600">
+                                       {formatCurrencyBRL(calculateTotal())}
+                                   </span>
+                               </div>
+
+                               {/* PIZZA FLAVOR CONFIGURATION */}
+                               {selectedProduct.isPizza && (
+                                   <div className="mb-8 animate-fade-in bg-orange-50 dark:bg-orange-900/10 p-5 rounded-2xl border border-orange-100 dark:border-orange-900/30">
+                                       <div className="flex justify-between items-center mb-4">
+                                           <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2 text-lg">
+                                               <Slice size={20} className="text-orange-500"/> Dividir Pizza
+                                           </h3>
+                                       </div>
+
+                                       {/* PIZZA VISUALIZATION FOR CUSTOMER */}
+                                       <div className="flex justify-center mb-6">
+                                           <div className="w-32 h-32">
+                                                <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
+                                                    <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
+                                                    {splitCount >= 2 && <line x1="50" y1="2" x2="50" y2="98" stroke="#333" strokeWidth="2" />}
+                                                    {splitCount === 3 && (
+                                                        <>
+                                                            <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
+                                                            <line x1="50" y1="50" x2="50" y2="2" stroke="#333" strokeWidth="2" />
+                                                            <line x1="50" y1="50" x2="91.5" y2="74" stroke="#333" strokeWidth="2" />
+                                                            <line x1="50" y1="50" x2="8.5" y2="74" stroke="#333" strokeWidth="2" />
+                                                        </>
+                                                    )}
+                                                    {splitCount >= 4 && <line x1="2" y1="50" x2="98" y2="50" stroke="#333" strokeWidth="2" />}
+                                                    <circle cx="50" cy="50" r="42" fill="none" stroke="#ddd" strokeWidth="1" strokeDasharray="4 2" />
+                                                </svg>
+                                           </div>
+                                       </div>
+                                       
+                                       {/* Selector Buttons (Only show up to maxFlavors) */}
+                                       {maxFlavorsAllowed > 1 && (
+                                           <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+                                               {[1, 2, 3, 4, 5].filter(n => n <= maxFlavorsAllowed).map(n => (
+                                                   <button
+                                                       key={n}
+                                                       onClick={() => {
+                                                           setSplitCount(n);
+                                                           const newFlavorIds = [...selectedFlavorIds];
+                                                           for(let i=n; i<5; i++) newFlavorIds[i] = null;
+                                                           setSelectedFlavorIds(newFlavorIds);
+                                                       }}
+                                                       className={`flex-1 min-w-[80px] py-3 rounded-xl font-bold text-sm border transition-all ${
+                                                           splitCount === n 
+                                                           ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-500/20 transform scale-105' 
+                                                           : 'bg-white dark:bg-slate-800 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
+                                                       }`}
+                                                   >
+                                                       {n === 1 ? '1 Sabor' : `${n} Sabores`}
+                                                   </button>
+                                               ))}
+                                           </div>
+                                       )}
+
+                                       {selectedProduct.customerCanChoosePricingStrategy !== false && (
+                                           <div className="mb-6 bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+                                               <p className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-3">Regra de preco</p>
+                                               <div className="flex flex-wrap gap-2">
+                                                   {(selectedProduct.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX']).map((strategy) => (
+                                                       <button
+                                                           key={strategy}
+                                                           onClick={() => setPricingStrategy(strategy)}
+                                                           className={`px-3 py-2 rounded-full text-xs font-bold border transition-all ${
+                                                               effectivePricingStrategy === strategy
+                                                                   ? 'bg-orange-600 text-white border-orange-600'
+                                                                   : 'bg-white dark:bg-slate-900 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
+                                                           }`}
+                                                       >
+                                                           {PRICING_STRATEGIES.find((item) => item.id === strategy)?.label || strategy}
+                                                       </button>
+                                                   ))}
+                                               </div>
+                                           </div>
+                                       )}
+
+                                       {/* Flavor Slots */}
+                                       <div className="space-y-3">
+                                           {Array.from({ length: splitCount }).map((_, idx) => {
+                                               const flavorId = selectedFlavorIds[idx];
+                                               const flavor = flavorId ? storeFlavors.find(f => f.id === flavorId) : null;
+                                               const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                               const resolvedPrice = flavor ? resolveFlavorPrice(flavor) : { value: 0, found: false };
+                                               
+                                               return (
+                                                   <div key={idx} className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
+                                                       <div className="w-8 h-8 bg-orange-100 dark:bg-orange-900/20 text-orange-600 rounded-full flex items-center justify-center font-bold text-sm">
+                                                           {idx + 1}
+                                                       </div>
+                                                       <div className="flex-1">
+                                                           <p className="text-xs text-gray-400 uppercase font-bold mb-0.5">Sabor {idx + 1}</p>
+                                                           {flavor ? (
+                                                               <p className="font-bold text-slate-800 dark:text-white">
+                                                                   {flavor.name}
+                                                                   {sizeSelected && (
+                                                                       <span className="text-sm font-semibold text-slate-500 dark:text-slate-300">
+                                                                           {' — '}
+                                                                           {resolvedPrice.found ? formatCurrencyBRL(resolvedPrice.value) : 'Indisponivel para este tamanho'}
+                                                                       </span>
+                                                                   )}
+                                                               </p>
+                                                           ) : (
+                                                               <p className="text-slate-400 italic">Selecione um sabor...</p>
+                                                           )}
+                                                       </div>
+                                                       <button 
+                                                           onClick={() => setSelectingFlavorIndex(idx)}
+                                                           className="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-orange-100 hover:text-orange-700 text-slate-600 dark:text-slate-300 text-xs font-bold rounded-lg transition-colors"
+                                                       >
+                                                           {flavor ? 'Trocar' : 'Escolher'}
+                                                       </button>
+                                                   </div>
+                                               );
+                                           })}
+                                       </div>
+                                       
+                                       {splitCount > 1 && (
+                                           <div className="mt-4 flex items-center gap-2 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 p-2 rounded-lg">
+                                               <Info size={14} />
+                                              <span>Divida os sabores sem custo adicional.</span>
+                                           </div>
+                                       )}
+                                   </div>
+                               )}
+
+                               {/* Visual Separator */}
+                               {orderedOptionGroups.length > 0 && (
+                                   <div className="flex items-center gap-4 mb-6">
+                                       <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
+                                       <h4 className="font-bold text-gray-400 uppercase text-xs flex items-center gap-2">
+                                           <Layers size={14}/> Adicionais
+                                       </h4>
+                                       <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
+                                   </div>
+                               )}
+
+                               {/* Options Groups */}
+                               <div className="space-y-8">
+                                   {orderedOptionGroups.map(group => {
+                                       const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
+                                       const filteredOptions = isSizeGroup
+                                           ? group.options.filter((opt) => opt.isAvailable !== false)
+                                           : group.options;
+                                       const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
+                                       const selectedCount = (selectedOptions[group.id] || []).length;
+                                       const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
+                                       return (
+                                           <div key={group.id}>
+                                               <div className="flex justify-between items-end mb-4 bg-gray-50 dark:bg-slate-800 p-3 rounded-lg">
+                                                   <div>
+                                                       <h3 className="font-bold text-slate-800 dark:text-white text-base uppercase tracking-wide">{group.name}</h3>
+                                                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                           {maxAllowed === 1 ? 'Selecione 1 opção' : `Selecione até ${maxAllowed} opções`}
+                                                       </p>
+                                                       {maxAllowed === 1 && selectedCount > 0 && (
+                                                           <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Toque novamente para desmarcar.</p>
+                                                       )}
+                                                   </div>
+                                                   {group.min > 0 && (
+                                                       <span className="text-[10px] bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-gray-300 px-2 py-1 rounded font-bold uppercase">
+                                                           Obrigatório
+                                                       </span>
+                                                   )}
+                                               </div>
+                                               
+                                               <div className="space-y-3">
+                                                   {orderedOptions.map(opt => {
+                                                       const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
+                                                       return (
+                                                           <div 
+                                                              key={opt.id} 
+                                                              onClick={() => opt.isAvailable && handleOptionToggle(group.id, opt.id, maxAllowed)}
+                                                              className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-red-500 bg-red-50 dark:bg-red-900/10 ring-1 ring-red-500' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable ? 'opacity-50 pointer-events-none grayscale' : ''}`}
+                                                           >
+                                                               <div className="flex items-center gap-4">
+                                                                   <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-red-500' : 'border-gray-300 dark:border-slate-600'}`}>
+                                                                       {isSelected && <div className="w-3 h-3 bg-red-500 rounded-full" />}
+                                                                   </div>
+                                                                   <div className="flex flex-col">
+                                                                       <span className={`font-bold text-sm ${isSelected ? 'text-red-700 dark:text-red-400' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
+                                                                       {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
+                                                                   </div>
+                                                               </div>
+                                                               <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                                                                  {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
+                                                               </span>
+                                                           </div>
+                                                       );
+                                                   })}
+                                               </div>
+                                           </div>
+                                       );
+                                   })}
+                               </div>
+
+                               {isBuildableFlow && buildableAlert && (
+                                   <div className="mt-6 p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
+                                       {buildableAlert}
+                                   </div>
+                               )}
+
+                               <div className="mt-8">
+                                   <label className="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-gray-300 mb-3">
+                                       <Info size={16} className="text-gray-400" /> Alguma observação?
+                                   </label>
+                                   <textarea 
+                                      value={notes}
+                                      onChange={(e) => setNotes(e.target.value)}
+                                      placeholder="Ex: Tirar a cebola, maionese à parte..."
+                                      className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 text-sm dark:text-white transition-all"
+                                      rows={3}
+                                   />
+                               </div>
+                           </>
+                       )}
+                   </div>
+              </div>
+
+              {/* Flavor Selection View (Overlay inside Modal) */}
+              {selectingFlavorIndex !== null && (
+                  <div className="absolute inset-0 bg-white dark:bg-slate-900 z-30 flex flex-col animate-slide-up">
+                      <div className="p-4 border-b border-gray-100 dark:border-slate-800 flex items-center gap-3 bg-white dark:bg-slate-900">
+                          <button onClick={() => setSelectingFlavorIndex(null)} className="p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full">
+                              <ArrowLeft size={20} className="text-slate-700 dark:text-white"/>
+                          </button>
+                          <h3 className="font-bold text-lg text-slate-800 dark:text-white">Escolher Sabor {selectingFlavorIndex + 1}</h3>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-white dark:bg-slate-900">
+                          {validFlavorsForCurrentProduct.map(flavor => (
+                              <div 
+                                  key={flavor.id}
+                                  onClick={() => {
+                                      const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                      const resolvedPrice = resolveFlavorPrice(flavor);
+                                      if (sizeSelected && !resolvedPrice.found) return;
+                                      handleSelectFlavor(flavor.id);
+                                  }}
+                                  className={`flex items-center gap-4 p-3 rounded-xl border border-gray-100 dark:border-slate-800 cursor-pointer transition-all ${
+                                      Boolean(selectedSizeKey || selectedSizeOption?.id) && !resolveFlavorPrice(flavor).found
+                                          ? 'opacity-50 grayscale pointer-events-none'
+                                          : 'hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-slate-800'
+                                  }`}
+                              >
+                                  <div className="w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900/20 flex items-center justify-center text-orange-600">
+                                      <Slice size={18} />
+                                  </div>
+                                  <div className="flex-1">
+                                      <h4 className="font-bold text-slate-800 dark:text-white">{flavor.name}</h4>
+                                      <p className="text-xs text-gray-500 line-clamp-1">{flavor.description}</p>
+                                  </div>
+                                  <div className="text-sm font-bold text-slate-700 dark:text-gray-300">
+                                      {(() => {
+                                          const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
+                                          const resolvedPrice = resolveFlavorPrice(flavor);
+                                          if (!sizeSelected) {
+                                              return <span className="text-xs text-gray-400">Escolha tamanho</span>;
+                                          }
+                                          return resolvedPrice.found
+                                              ? formatCurrencyBRL(resolvedPrice.value)
+                                              : <span className="text-xs text-gray-400">Indisponivel para este tamanho</span>;
+                                      })()}
+                                  </div>
+                              </div>
+                          ))}
+                          {validFlavorsForCurrentProduct.length === 0 && (
+                              <p className="text-center text-gray-400 mt-10">Nenhum sabor disponível para esta pizza.</p>
+                          )}
+                      </div>
+                  </div>
+              )}
+
+              <div className="p-4 md:p-6 border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col sm:flex-row items-center gap-4 shadow-[0_-10px_40px_rgba(0,0,0,0.05)] z-20">
+                   {store.isActive ? (
+                       <>
+                          <div className="flex items-center border border-gray-200 dark:border-slate-700 rounded-xl h-14 w-full sm:w-auto">
+                              <button 
+                                  onClick={() => setQuantity(q => Math.max(1, q - 1))}
+                                  className="w-14 h-full flex items-center justify-center text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-l-xl transition-colors"
+                              >
+                                  <Minus size={20} />
+                              </button>
+                              <span className="font-bold w-10 text-center text-lg text-slate-900 dark:text-white">{quantity}</span>
+                              <button 
+                                  onClick={() => setQuantity(q => q + 1)}
+                                  className="w-14 h-full flex items-center justify-center text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-r-xl transition-colors"
+                              >
+                                  <Plus size={20} />
+                              </button>
+                          </div>
+                          {useBuildableWizard && buildableStep > 0 ? (
+                              <button
+                                  onClick={handleBuildableBack}
+                                  className="w-full sm:w-auto h-14 px-6 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-bold"
+                              >
+                                  Voltar
+                              </button>
+                          ) : null}
+                          <button 
+                              onClick={useBuildableWizard ? handleBuildableNext : handleConfirmAdd}
+                              className="flex-1 w-full h-16 sm:h-14 rounded-2xl font-bold flex items-center gap-4 px-6 transition-all shadow-lg bg-red-600 hover:bg-red-700 text-white shadow-red-600/20 moving-border"
+                              style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
+                          >
+                              {!useBuildableWizard && (
+                                  <span className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
+                                      <ShoppingBag size={20} />
+                                  </span>
+                              )}
+                              <span className="text-left leading-tight">
+                                  <span className="block text-base sm:text-sm">{useBuildableWizard ? (buildableCurrent?.type === 'REVIEW' ? 'Confirmar pedido' : 'Continuar') : 'Adicionar'}</span>
+                              </span>
+                              <span className="ml-auto bg-white/20 px-3 py-1.5 rounded-full text-sm sm:text-xs">
+                                  {formatCurrencyBRL(calculateTotal())}
+                              </span>
+                          </button>
+                       </>
+                   ) : (
+                       <div className="w-full bg-gray-200 dark:bg-slate-800 text-gray-500 dark:text-gray-400 h-14 rounded-xl font-bold flex items-center justify-center cursor-not-allowed">
+                           Loja Fechada
+                       </div>
+                   )}
+              </div>
+
+          </div>
+      </div>
+  );
+  const isTablet = new URLSearchParams(window.location.search).get('tablet') === '1';
+
+  if (isTablet) {
+      return (
+          <div className="min-h-screen bg-slate-950 text-white flex font-sans">
+              <aside className="w-72 xl:w-80 bg-slate-900 border-r border-slate-800 flex flex-col">
+                  <div className="p-6 border-b border-slate-800">
+                      {store.logoUrl ? (
+                          <div className="w-20 h-20 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center p-2">
+                              <img
+                                  src={imageKitUrl(store.logoUrl || '', { width: 200, quality: 70 })}
+                                  alt={`Logo ${store.name}`}
+                                  loading="lazy"
+                                  decoding="async"
+                                  className="w-full h-full object-contain"
+                              />
+                          </div>
+                      ) : (
+                          <div className="w-20 h-20 rounded-2xl bg-slate-800 flex items-center justify-center text-slate-400">
+                              <Utensils />
+                          </div>
+                      )}
+                      <h1 className="mt-4 text-xl font-extrabold text-white leading-tight">
+                          {store.name}
+                      </h1>
+                      {tableNumber && (
+                          <p className="text-xs text-slate-400 mt-1">Mesa {tableNumber}</p>
+                      )}
+                  </div>
+                  <div className="p-6 pt-4">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400 font-bold">Buscar</p>
+                      <div className="relative mt-3">
+                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                          <input
+                              type="text"
+                              value={searchTerm}
+                              onChange={(e) => setSearchTerm(e.target.value)}
+                              placeholder="Digite o nome do produto"
+                              className="w-full pl-11 pr-4 py-3 rounded-2xl border border-slate-800 bg-slate-950 text-white focus:ring-2 focus:ring-red-500 outline-none"
+                          />
+                      </div>
+                  </div>
+                  <div className="flex-1 overflow-y-auto px-4 pb-6">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-slate-500 font-bold px-2">Categorias</p>
+                      <div className="mt-3 space-y-2">
+                          {categories.map(cat => (
+                              <button
+                                  key={cat}
+                                  onClick={() => scrollToSection(`cat-${cat}`)}
+                                  className="w-full text-left px-4 py-3 rounded-xl bg-slate-900/60 hover:bg-slate-800 text-sm font-semibold text-slate-200 transition-colors"
+                              >
+                                  {cat}
+                              </button>
+                          ))}
+                      </div>
+                  </div>
+              </aside>
+
+              <div className="flex-1 min-w-0">
+                  <header className="sticky top-0 z-30 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+                      <div className="text-xs uppercase tracking-[0.25em] text-slate-400 font-bold">Cardápio</div>
+                      <button
+                          onClick={onOpenCart}
+                          className="relative flex items-center justify-center w-11 h-11 rounded-full bg-slate-900 border border-slate-800 hover:bg-slate-800"
+                          aria-label="Abrir sacola"
+                      >
+                          <ShoppingBag size={18} />
+                          {cartItems.length > 0 && (
+                              <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                  {cartItems.reduce((acc, item) => acc + item.quantity, 0)}
+                              </span>
+                          )}
+                      </button>
+                  </header>
+
+                  <div className="px-6 py-6 space-y-10">
+                      {loadingProducts ? (
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
+                              {Array.from({ length: 6 }).map((_, idx) => (
+                                  <div key={idx} className="rounded-2xl border border-slate-800 bg-slate-900 p-4 flex gap-4">
+                                      <div className="flex-1 space-y-3">
+                                          <div className="h-4 w-2/3 rounded-full skeleton-shimmer" />
+                                          <div className="h-3 w-full rounded-full skeleton-shimmer" />
+                                          <div className="h-3 w-4/5 rounded-full skeleton-shimmer" />
+                                          <div className="h-4 w-24 rounded-full skeleton-shimmer" />
+                                      </div>
+                                      <div className="w-28 h-28 rounded-xl skeleton-shimmer" />
+                                  </div>
+                              ))}
+                          </div>
+                      ) : (
+                          categories.map(cat => {
+                              const catProducts = displayProducts.filter(
+                                  p => p.category === cat && (p.isAvailable ?? true)
+                              );
+                              if (catProducts.length === 0) return null;
+
+                              return (
+                                  <div key={cat} id={`cat-${cat}`} className="scroll-mt-24">
+                                      <h2 className="text-lg font-bold text-white mb-4 pb-2 border-b border-slate-800">
+                                          {cat}
+                                      </h2>
+                                      <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
+                                          {catProducts.map(product => (
+                                              <div
+                                                  key={product.id}
+                                                  onClick={() => handleOpenProduct(product)}
+                                                  className="bg-slate-900 rounded-2xl p-4 flex gap-4 cursor-pointer border border-slate-800 hover:border-red-600 shadow-sm transition-all group"
+                                              >
+                                                  <div className="flex-1 flex flex-col">
+                                                      <h3 className="font-bold text-white mb-1 text-base group-hover:text-red-400 transition-colors">
+                                                          {product.name}
+                                                      </h3>
+                                                      <p className="text-sm text-slate-400 line-clamp-2 mb-3 flex-grow leading-relaxed">
+                                                          {product.description}
+                                                      </p>
+                                                      <div className="flex items-center gap-2 mt-auto">
+                                                          {product.promoPrice ? (
+                                                              <>
+                                                                  <span className="text-green-400 font-bold">{formatCurrencyBRL(product.promoPrice)}</span>
+                                                                  <span className="text-xs text-slate-500 line-through">{formatCurrencyBRL(product.price)}</span>
+                                                              </>
+                                                          ) : (
+                                                              <span className="text-slate-200 font-medium">{formatCurrencyBRL(product.price)}</span>
+                                                          )}
+                                                          {product.isPizza && product.maxFlavors && product.maxFlavors > 1 && (
+                                                              <span className="text-[10px] bg-orange-900/40 text-orange-300 px-2 py-0.5 rounded-full flex items-center gap-1 font-bold">
+                                                                  <Slice size={10} /> Até {product.maxFlavors} Sabores
+                                                              </span>
+                                                          )}
+                                                      </div>
+                                                  </div>
+                                                  <div className="w-28 h-28 flex-shrink-0 rounded-xl overflow-hidden relative bg-slate-800">
+                                                      {product.imageUrl ? (
+                                                          <img
+                                                              src={imageKitUrl(product.imageUrl, { width: 520, quality: 70 })}
+                                                              alt={product.name}
+                                                              loading="lazy"
+                                                              decoding="async"
+                                                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 login-blur-image"
+                                                          />
+                                                      ) : (
+                                                          <div className="w-full h-full flex items-center justify-center text-slate-500">
+                                                              <ShoppingBag />
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              </div>
+                                          ))}
+                                      </div>
+                                  </div>
+                              );
+                          })
+                      )}
+                  </div>
+              </div>
+
+              {productModal}
+          </div>
+      );
+  }
 
   return (
     <div className="bg-gray-50 dark:bg-slate-950 min-h-screen pb-24 font-sans">
@@ -1206,540 +1919,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
             </div>
         )}
 
-        {/* Product Detail Modal */}
-        {selectedProduct && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-6">
-                <div className="absolute inset-0 bg-black/70 backdrop-blur-sm animate-fade-in" onClick={handleCloseProduct} />
-                <div
-                    ref={productModalRef}
-                    className="bg-white dark:bg-slate-900 w-full max-w-xl max-h-[90vh] rounded-3xl relative z-10 flex flex-col overflow-hidden animate-scale-in shadow-2xl min-h-0 overscroll-contain"
-                    onWheel={(event) => event.stopPropagation()}
-                >
-                    
-                    {/* Main Scroll Area */}
-                    <div className="flex-1 overflow-y-auto scrollbar-hide relative min-h-0 overscroll-contain">
-                         {/* Image Header */}
-                         <div className="relative h-64">
-                            <img
-                                src={imageKitUrl(selectedProduct.imageUrl, { width: 960, quality: 75 })}
-                                alt={selectedProduct.name}
-                                loading="eager"
-                                decoding="async"
-                                className="w-full h-full object-cover login-blur-image"
-                            />
-                            <button 
-                                onClick={handleCloseProduct} 
-                                className="absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white p-2 rounded-full transition-colors shadow-lg"
-                                aria-label="Fechar"
-                            >
-                                <X size={20}/>
-                            </button>
-                         </div>
-                         
-                         <div className="p-6 -mt-6 bg-white dark:bg-slate-900 rounded-t-3xl relative z-10">
-                             {useBuildableWizard ? (
-                                 <div className="space-y-6">
-                                     <div>
-                                         <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
-                                         <p className="text-gray-500 dark:text-gray-400 text-sm leading-relaxed">{selectedProduct.description}</p>
-                                     </div>
-
-                                     <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
-                                         {buildableSteps.map((step, idx) => (
-                                             <span
-                                                 key={`buildable-step-${idx}`}
-                                                 className={`px-3 py-1 rounded-full border ${idx === buildableStep ? 'border-emerald-500 text-emerald-700 bg-emerald-50' : 'border-slate-200 text-slate-400'}`}
-                                             >
-                                                 {step.type === 'GROUP' && step.group ? step.group.name : step.type === 'NOTES' ? 'Observações' : 'Revisão'}
-                                             </span>
-                                         ))}
-                                     </div>
-
-                                     {buildableCurrent?.type === 'GROUP' && buildableCurrent.group && (() => {
-                                         const group = buildableCurrent.group;
-                                         const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
-                                         const filteredOptions = isSizeGroup
-                                             ? group.options.filter((opt) => opt.isAvailable !== false)
-                                             : group.options;
-                                         const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
-                                         const minRequired = group.min > 0 ? group.min : 0;
-                                         const selectedCount = (selectedOptions[group.id] || []).length;
-                                         const remainingMin = Math.max(minRequired - selectedCount, 0);
-                                         const isMaxed = selectedCount >= maxAllowed;
-                                         const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
-                                         return (
-                                             <div className="space-y-4">
-                                                 <div className="flex flex-wrap items-center justify-between gap-2 bg-emerald-50 dark:bg-emerald-900/10 p-4 rounded-2xl border border-emerald-100 dark:border-emerald-900/30">
-                                                     <div>
-                                                         <h3 className="text-lg font-extrabold text-emerald-700 dark:text-emerald-400">{group.name}</h3>
-                                                         <p className="text-xs text-emerald-600/80">
-                                                             {maxAllowed === 1 ? 'Escolha 1 opção' : `Você escolheu ${selectedCount} de ${maxAllowed}`}
-                                                         </p>
-                                                         {remainingMin > 0 && (
-                                                             <p className="text-xs text-emerald-700 mt-1">Escolha mais {remainingMin} para continuar.</p>
-                                                         )}
-                                                         {maxAllowed === 1 && selectedCount > 0 && (
-                                                             <p className="text-xs text-emerald-700/90 mt-1">Toque novamente para desmarcar.</p>
-                                                         )}
-                                                     </div>
-                                                     {minRequired > 0 && (
-                                                         <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-1 rounded font-bold uppercase">
-                                                             Obrigatório
-                                                         </span>
-                                                     )}
-                                                 </div>
-
-                                                 {group.extraChargeAmount && group.extraChargeAfter !== undefined && group.extraChargeAfter > 0 && (
-                                                     <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 p-3 rounded-lg">
-                                                         <Info size={14} />
-                                                         <span>Acima de {group.extraChargeAfter} itens: +{formatCurrencyBRL(group.extraChargeAmount)} cada.</span>
-                                                     </div>
-                                                 )}
-
-                                                 <div className="space-y-3">
-                                                     {orderedOptions.map(opt => {
-                                                         const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
-                                                         const isDisabled = !isSelected && isMaxed && maxAllowed > 1;
-                                                         return (
-                                                             <div 
-                                                                key={opt.id} 
-                                                                onClick={() => opt.isAvailable && !isDisabled && handleOptionToggle(group.id, opt.id, maxAllowed)}
-                                                                className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 ring-1 ring-emerald-400' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable || isDisabled ? 'opacity-50 pointer-events-none grayscale' : ''}`}
-                                                             >
-                                                                 <div className="flex items-center gap-4">
-                                                                     <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-emerald-500' : 'border-gray-300 dark:border-slate-600'}`}>
-                                                                         {isSelected && <Check size={14} className="text-emerald-600" />}
-                                                                     </div>
-                                                                     <div className="flex flex-col">
-                                                                         <span className={`font-bold text-sm ${isSelected ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
-                                                                         {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
-                                                                     </div>
-                                                                 </div>
-                                                                 <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                                                                    {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
-                                                                 </span>
-                                                             </div>
-                                                         );
-                                                     })}
-                                                 </div>
-                                             </div>
-                                         );
-                                     })()}
-
-                                     {buildableCurrent?.type === 'NOTES' && (
-                                         <div className="space-y-4">
-                                             <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
-                                                 <h3 className="font-bold text-slate-800 dark:text-white">Observações</h3>
-                                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Opcional. Ex: sem cebola, bem passado.</p>
-                                             </div>
-                                             <textarea 
-                                                value={notes}
-                                                onChange={(e) => setNotes(e.target.value)}
-                                                placeholder="Ex: Tirar a cebola, maionese à parte..."
-                                                className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-sm dark:text-white transition-all"
-                                                rows={4}
-                                             />
-                                         </div>
-                                     )}
-
-                                     {buildableCurrent?.type === 'REVIEW' && (
-                                         <div className="space-y-4">
-                                             <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
-                                                 <h3 className="font-bold text-slate-800 dark:text-white">Revisão rápida</h3>
-                                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Confirme itens, adicionais e prazo antes de continuar.</p>
-                                             </div>
-
-                                             <div className="space-y-3">
-                                                 {orderedOptionGroups.map(group => {
-                                                     const selectedIds = selectedOptions[group.id] || [];
-                                                     if (selectedIds.length === 0) return null;
-                                                     return (
-                                                         <div key={`review-${group.id}`} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-                                                             <p className="text-xs font-bold text-slate-500 uppercase">{group.name}</p>
-                                                             <div className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-200">
-                                                                 {selectedIds.map(optId => {
-                                                                     const opt = group.options.find(option => option.id === optId);
-                                                                     if (!opt) return null;
-                                                                     return (
-                                                                         <div key={optId} className="flex items-center justify-between">
-                                                                             <span>{opt.name}</span>
-                                                                             <span className="text-slate-500">{opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}</span>
-                                                                         </div>
-                                                                     );
-                                                                 })}
-                                                             </div>
-                                                         </div>
-                                                     );
-                                                 })}
-                                             </div>
-
-                                             {notes && (
-                                                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-                                                     <p className="text-xs font-bold text-slate-500 uppercase">Observações</p>
-                                                     <p className="text-sm text-slate-700 dark:text-slate-200 mt-2">{notes}</p>
-                                                 </div>
-                                             )}
-
-                                             <div className="bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-100 dark:border-emerald-900/30 rounded-2xl p-4 text-sm text-emerald-800 dark:text-emerald-200 space-y-2">
-                                                 <div className="flex items-center justify-between">
-                                                     <span>Previsão</span>
-                                                     <span className="font-bold">{store.deliveryTime || store.pickupTime || 'Consultar loja'}</span>
-                                                 </div>
-                                                <div className="flex items-center justify-between">
-                                                    <span>Entrega</span>
-                                                    <span className="font-bold">{deliveryFeeInfo.label}</span>
-                                                </div>
-                                                 {store.minOrderValue ? (
-                                                     <div className="flex items-center justify-between">
-                                                         <span>Pedido mínimo</span>
-                                                         <span className="font-bold">{formatCurrencyBRL(store.minOrderValue)}</span>
-                                                     </div>
-                                                 ) : null}
-                                             </div>
-                                         </div>
-                                     )}
-
-                                     {buildableAlert && (
-                                         <div className="p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
-                                             {buildableAlert}
-                                         </div>
-                                     )}
-                                 </div>
-                             ) : (
-                                 <>
-                                     <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white mb-2 leading-tight">{selectedProduct.name}</h2>
-                                     <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 leading-relaxed">{selectedProduct.description}</p>
-                                     
-                                     <div className="flex items-center justify-between mb-8 p-4 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900/30">
-                                         <span className="text-sm font-bold text-green-800 dark:text-green-400">Preço do item</span>
-                                         <span className="text-2xl font-extrabold text-green-600">
-                                             {formatCurrencyBRL(calculateTotal())}
-                                         </span>
-                                     </div>
-
-                                     {/* PIZZA FLAVOR CONFIGURATION */}
-                                     {selectedProduct.isPizza && (
-                                         <div className="mb-8 animate-fade-in bg-orange-50 dark:bg-orange-900/10 p-5 rounded-2xl border border-orange-100 dark:border-orange-900/30">
-                                             <div className="flex justify-between items-center mb-4">
-                                                 <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2 text-lg">
-                                                     <Slice size={20} className="text-orange-500"/> Dividir Pizza
-                                                 </h3>
-                                             </div>
-
-                                             {/* PIZZA VISUALIZATION FOR CUSTOMER */}
-                                             <div className="flex justify-center mb-6">
-                                                 <div className="w-32 h-32">
-                                                      <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
-                                                          <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
-                                                          {splitCount >= 2 && <line x1="50" y1="2" x2="50" y2="98" stroke="#333" strokeWidth="2" />}
-                                                          {splitCount === 3 && (
-                                                              <>
-                                                                  <circle cx="50" cy="50" r="48" fill="white" stroke="#333" strokeWidth="2" />
-                                                                  <line x1="50" y1="50" x2="50" y2="2" stroke="#333" strokeWidth="2" />
-                                                                  <line x1="50" y1="50" x2="91.5" y2="74" stroke="#333" strokeWidth="2" />
-                                                                  <line x1="50" y1="50" x2="8.5" y2="74" stroke="#333" strokeWidth="2" />
-                                                              </>
-                                                          )}
-                                                          {splitCount >= 4 && <line x1="2" y1="50" x2="98" y2="50" stroke="#333" strokeWidth="2" />}
-                                                          <circle cx="50" cy="50" r="42" fill="none" stroke="#ddd" strokeWidth="1" strokeDasharray="4 2" />
-                                                      </svg>
-                                                 </div>
-                                             </div>
-                                             
-                                             {/* Selector Buttons (Only show up to maxFlavors) */}
-                                             {maxFlavorsAllowed > 1 && (
-                                                 <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-                                                     {[1, 2, 3, 4, 5].filter(n => n <= maxFlavorsAllowed).map(n => (
-                                                         <button
-                                                             key={n}
-                                                             onClick={() => {
-                                                                 setSplitCount(n);
-                                                                 const newFlavorIds = [...selectedFlavorIds];
-                                                                 for(let i=n; i<5; i++) newFlavorIds[i] = null;
-                                                                 setSelectedFlavorIds(newFlavorIds);
-                                                             }}
-                                                             className={`flex-1 min-w-[80px] py-3 rounded-xl font-bold text-sm border transition-all ${
-                                                                 splitCount === n 
-                                                                 ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-500/20 transform scale-105' 
-                                                                 : 'bg-white dark:bg-slate-800 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
-                                                             }`}
-                                                         >
-                                                             {n === 1 ? '1 Sabor' : `${n} Sabores`}
-                                                         </button>
-                                                     ))}
-                                                 </div>
-                                             )}
-
-                                             {selectedProduct.customerCanChoosePricingStrategy !== false && (
-                                                 <div className="mb-6 bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-4">
-                                                     <p className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-3">Regra de preco</p>
-                                                     <div className="flex flex-wrap gap-2">
-                                                         {(selectedProduct.pricingStrategiesAllowed || ['NORMAL', 'PROPORCIONAL', 'MAX']).map((strategy) => (
-                                                             <button
-                                                                 key={strategy}
-                                                                 onClick={() => setPricingStrategy(strategy)}
-                                                                 className={`px-3 py-2 rounded-full text-xs font-bold border transition-all ${
-                                                                     effectivePricingStrategy === strategy
-                                                                         ? 'bg-orange-600 text-white border-orange-600'
-                                                                         : 'bg-white dark:bg-slate-900 text-gray-500 border-gray-200 dark:border-slate-700 hover:bg-orange-50'
-                                                                 }`}
-                                                             >
-                                                                 {PRICING_STRATEGIES.find((item) => item.id === strategy)?.label || strategy}
-                                                             </button>
-                                                         ))}
-                                                     </div>
-                                                 </div>
-                                             )}
-
-                                             {/* Flavor Slots */}
-                                             <div className="space-y-3">
-                                                 {Array.from({ length: splitCount }).map((_, idx) => {
-                                                     const flavorId = selectedFlavorIds[idx];
-                                                     const flavor = flavorId ? storeFlavors.find(f => f.id === flavorId) : null;
-                                                     const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
-                                                     const resolvedPrice = flavor ? resolveFlavorPrice(flavor) : { value: 0, found: false };
-                                                     
-                                                     return (
-                                                         <div key={idx} className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
-                                                             <div className="w-8 h-8 bg-orange-100 dark:bg-orange-900/20 text-orange-600 rounded-full flex items-center justify-center font-bold text-sm">
-                                                                 {idx + 1}
-                                                             </div>
-                                                             <div className="flex-1">
-                                                                 <p className="text-xs text-gray-400 uppercase font-bold mb-0.5">Sabor {idx + 1}</p>
-                                                                 {flavor ? (
-                                                                     <p className="font-bold text-slate-800 dark:text-white">
-                                                                         {flavor.name}
-                                                                         {sizeSelected && (
-                                                                             <span className="text-sm font-semibold text-slate-500 dark:text-slate-300">
-                                                                                 {' — '}
-                                                                                 {resolvedPrice.found ? formatCurrencyBRL(resolvedPrice.value) : 'Indisponivel para este tamanho'}
-                                                                             </span>
-                                                                         )}
-                                                                     </p>
-                                                                 ) : (
-                                                                     <p className="text-slate-400 italic">Selecione um sabor...</p>
-                                                                 )}
-                                                             </div>
-                                                             <button 
-                                                                 onClick={() => setSelectingFlavorIndex(idx)}
-                                                                 className="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-orange-100 hover:text-orange-700 text-slate-600 dark:text-slate-300 text-xs font-bold rounded-lg transition-colors"
-                                                             >
-                                                                 {flavor ? 'Trocar' : 'Escolher'}
-                                                             </button>
-                                                         </div>
-                                                     );
-                                                 })}
-                                             </div>
-                                             
-                                             {splitCount > 1 && (
-                                                 <div className="mt-4 flex items-center gap-2 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 p-2 rounded-lg">
-                                                     <Info size={14} />
-                                                    <span>Divida os sabores sem custo adicional.</span>
-                                                 </div>
-                                             )}
-                                         </div>
-                                     )}
-
-                                     {/* Visual Separator */}
-                                     {orderedOptionGroups.length > 0 && (
-                                         <div className="flex items-center gap-4 mb-6">
-                                             <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
-                                             <h4 className="font-bold text-gray-400 uppercase text-xs flex items-center gap-2">
-                                                 <Layers size={14}/> Adicionais
-                                             </h4>
-                                             <div className="h-px bg-gray-200 dark:bg-slate-700 flex-1"></div>
-                                         </div>
-                                     )}
-
-                                     {/* Options Groups */}
-                                     <div className="space-y-8">
-                                         {orderedOptionGroups.map(group => {
-                                             const isSizeGroup = group.id === 'size-group' || /tamanho|gramatura/i.test(group.name);
-                                             const filteredOptions = isSizeGroup
-                                                 ? group.options.filter((opt) => opt.isAvailable !== false)
-                                                 : group.options;
-                                             const maxAllowed = group.max > 0 ? group.max : filteredOptions.length;
-                                             const selectedCount = (selectedOptions[group.id] || []).length;
-                                             const orderedOptions = [...filteredOptions].sort((a, b) => (a.order || 0) - (b.order || 0));
-                                             return (
-                                                 <div key={group.id}>
-                                                     <div className="flex justify-between items-end mb-4 bg-gray-50 dark:bg-slate-800 p-3 rounded-lg">
-                                                         <div>
-                                                             <h3 className="font-bold text-slate-800 dark:text-white text-base uppercase tracking-wide">{group.name}</h3>
-                                                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                                                                 {maxAllowed === 1 ? 'Selecione 1 opção' : `Selecione até ${maxAllowed} opções`}
-                                                             </p>
-                                                             {maxAllowed === 1 && selectedCount > 0 && (
-                                                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Toque novamente para desmarcar.</p>
-                                                             )}
-                                                         </div>
-                                                         {group.min > 0 && (
-                                                             <span className="text-[10px] bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-gray-300 px-2 py-1 rounded font-bold uppercase">
-                                                                 Obrigatório
-                                                             </span>
-                                                         )}
-                                                     </div>
-                                                     
-                                                     <div className="space-y-3">
-                                                         {orderedOptions.map(opt => {
-                                                             const isSelected = (selectedOptions[group.id] || []).includes(opt.id);
-                                                             return (
-                                                                 <div 
-                                                                    key={opt.id} 
-                                                                    onClick={() => opt.isAvailable && handleOptionToggle(group.id, opt.id, maxAllowed)}
-                                                                    className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isSelected ? 'border-red-500 bg-red-50 dark:bg-red-900/10 ring-1 ring-red-500' : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'} ${!opt.isAvailable ? 'opacity-50 pointer-events-none grayscale' : ''}`}
-                                                                 >
-                                                                     <div className="flex items-center gap-4">
-                                                                         <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-red-500' : 'border-gray-300 dark:border-slate-600'}`}>
-                                                                             {isSelected && <div className="w-3 h-3 bg-red-500 rounded-full" />}
-                                                                         </div>
-                                                                         <div className="flex flex-col">
-                                                                             <span className={`font-bold text-sm ${isSelected ? 'text-red-700 dark:text-red-400' : 'text-slate-700 dark:text-gray-200'}`}>{opt.name}</span>
-                                                                             {!opt.isAvailable && <span className="text-[10px] text-red-500 font-bold">Indisponível</span>}
-                                                                         </div>
-                                                                     </div>
-                                                                     <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-                                                                        {opt.price > 0 ? `+ ${formatCurrencyBRL(opt.price)}` : 'Grátis'}
-                                                                     </span>
-                                                                 </div>
-                                                             );
-                                                         })}
-                                                     </div>
-                                                 </div>
-                                             );
-                                         })}
-                                     </div>
-
-                                     {isBuildableFlow && buildableAlert && (
-                                         <div className="mt-6 p-3 rounded-xl bg-amber-50 text-amber-700 text-sm font-bold border border-amber-200">
-                                             {buildableAlert}
-                                         </div>
-                                     )}
-
-                                     <div className="mt-8">
-                                         <label className="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-gray-300 mb-3">
-                                             <Info size={16} className="text-gray-400" /> Alguma observação?
-                                         </label>
-                                         <textarea 
-                                            value={notes}
-                                            onChange={(e) => setNotes(e.target.value)}
-                                            placeholder="Ex: Tirar a cebola, maionese à parte..."
-                                            className="w-full p-4 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-red-500 text-sm dark:text-white transition-all"
-                                            rows={3}
-                                         />
-                                     </div>
-                                 </>
-                             )}
-                         </div>
-                    </div>
-
-                    {/* Flavor Selection View (Overlay inside Modal) */}
-                    {selectingFlavorIndex !== null && (
-                        <div className="absolute inset-0 bg-white dark:bg-slate-900 z-30 flex flex-col animate-slide-up">
-                            <div className="p-4 border-b border-gray-100 dark:border-slate-800 flex items-center gap-3 bg-white dark:bg-slate-900">
-                                <button onClick={() => setSelectingFlavorIndex(null)} className="p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-full">
-                                    <ArrowLeft size={20} className="text-slate-700 dark:text-white"/>
-                                </button>
-                                <h3 className="font-bold text-lg text-slate-800 dark:text-white">Escolher Sabor {selectingFlavorIndex + 1}</h3>
-                            </div>
-                            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-white dark:bg-slate-900">
-                                {validFlavorsForCurrentProduct.map(flavor => (
-                                    <div 
-                                        key={flavor.id}
-                                        onClick={() => {
-                                            const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
-                                            const resolvedPrice = resolveFlavorPrice(flavor);
-                                            if (sizeSelected && !resolvedPrice.found) return;
-                                            handleSelectFlavor(flavor.id);
-                                        }}
-                                        className={`flex items-center gap-4 p-3 rounded-xl border border-gray-100 dark:border-slate-800 cursor-pointer transition-all ${
-                                            Boolean(selectedSizeKey || selectedSizeOption?.id) && !resolveFlavorPrice(flavor).found
-                                                ? 'opacity-50 grayscale pointer-events-none'
-                                                : 'hover:border-orange-500 hover:bg-orange-50 dark:hover:bg-slate-800'
-                                        }`}
-                                    >
-                                        <div className="w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900/20 flex items-center justify-center text-orange-600">
-                                            <Slice size={18} />
-                                        </div>
-                                        <div className="flex-1">
-                                            <h4 className="font-bold text-slate-800 dark:text-white">{flavor.name}</h4>
-                                            <p className="text-xs text-gray-500 line-clamp-1">{flavor.description}</p>
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-700 dark:text-gray-300">
-                                            {(() => {
-                                                const sizeSelected = Boolean(selectedSizeKey || selectedSizeOption?.id);
-                                                const resolvedPrice = resolveFlavorPrice(flavor);
-                                                if (!sizeSelected) {
-                                                    return <span className="text-xs text-gray-400">Escolha tamanho</span>;
-                                                }
-                                                return resolvedPrice.found
-                                                    ? formatCurrencyBRL(resolvedPrice.value)
-                                                    : <span className="text-xs text-gray-400">Indisponivel para este tamanho</span>;
-                                            })()}
-                                        </div>
-                                    </div>
-                                ))}
-                                {validFlavorsForCurrentProduct.length === 0 && (
-                                    <p className="text-center text-gray-400 mt-10">Nenhum sabor disponível para esta pizza.</p>
-                                )}
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="p-4 md:p-6 border-t border-gray-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col sm:flex-row items-center gap-4 shadow-[0_-10px_40px_rgba(0,0,0,0.05)] z-20">
-                         {store.isActive ? (
-                             <>
-                                <div className="flex items-center border border-gray-200 dark:border-slate-700 rounded-xl h-14 w-full sm:w-auto">
-                                    <button 
-                                        onClick={() => setQuantity(q => Math.max(1, q - 1))}
-                                        className="w-14 h-full flex items-center justify-center text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-l-xl transition-colors"
-                                    >
-                                        <Minus size={20} />
-                                    </button>
-                                    <span className="font-bold w-10 text-center text-lg text-slate-900 dark:text-white">{quantity}</span>
-                                    <button 
-                                        onClick={() => setQuantity(q => q + 1)}
-                                        className="w-14 h-full flex items-center justify-center text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-r-xl transition-colors"
-                                    >
-                                        <Plus size={20} />
-                                    </button>
-                                </div>
-                                {useBuildableWizard && buildableStep > 0 ? (
-                                    <button
-                                        onClick={handleBuildableBack}
-                                        className="w-full sm:w-auto h-14 px-6 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-bold"
-                                    >
-                                        Voltar
-                                    </button>
-                                ) : null}
-                                <button 
-                                    onClick={useBuildableWizard ? handleBuildableNext : handleConfirmAdd}
-                                    className="flex-1 w-full h-16 sm:h-14 rounded-2xl font-bold flex items-center gap-4 px-6 transition-all shadow-lg bg-red-600 hover:bg-red-700 text-white shadow-red-600/20 moving-border"
-                                    style={{ '--moving-border-bg': '#dc2626' } as React.CSSProperties}
-                                >
-                                    {!useBuildableWizard && (
-                                        <span className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
-                                            <ShoppingBag size={20} />
-                                        </span>
-                                    )}
-                                    <span className="text-left leading-tight">
-                                        <span className="block text-base sm:text-sm">{useBuildableWizard ? (buildableCurrent?.type === 'REVIEW' ? 'Confirmar pedido' : 'Continuar') : 'Adicionar'}</span>
-                                    </span>
-                                    <span className="ml-auto bg-white/20 px-3 py-1.5 rounded-full text-sm sm:text-xs">
-                                        {formatCurrencyBRL(calculateTotal())}
-                                    </span>
-                                </button>
-                             </>
-                         ) : (
-                             <div className="w-full bg-gray-200 dark:bg-slate-800 text-gray-500 dark:text-gray-400 h-14 rounded-xl font-bold flex items-center justify-center cursor-not-allowed">
-                                 Loja Fechada
-                             </div>
-                         )}
-                    </div>
-
-                </div>
-            </div>
-        )}
+        {productModal}
 
     </div>
   );
