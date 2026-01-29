@@ -39,6 +39,7 @@ const TableTracking: React.FC<TableTrackingProps> = ({
   const [pixExpiresAt, setPixExpiresAt] = useState<string | null>(null);
   const [pixCountdown, setPixCountdown] = useState('10:00');
   const [pixStatus, setPixStatus] = useState<'PENDING' | 'PAID' | 'EXPIRED' | 'FAILED' | 'CANCELLED'>('PENDING');
+  const [pixPaidToast, setPixPaidToast] = useState(false);
 
   useEffect(() => {
     const unsubscribe = subscribeToTableOrders(store.id, tableNumber, tableSessionId, (next) => {
@@ -187,6 +188,11 @@ const TableTracking: React.FC<TableTrackingProps> = ({
         }
         if (data.status === 'PAID') {
           setPixError('');
+          setPixPaidToast(true);
+          setTimeout(() => {
+            setPixPaidToast(false);
+            setPixModalOpen(false);
+          }, 1500);
         }
         if (data.status === 'EXPIRED') {
           setPixError('PIX expirado. Gere novamente.');
@@ -218,6 +224,11 @@ const TableTracking: React.FC<TableTrackingProps> = ({
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+        {pixPaidToast && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">
+            Pagamento confirmado. Pedido marcado como PAGO.
+          </div>
+        )}
         {isTabletMode && (
           <div className="flex flex-wrap items-center gap-3">
             {pixOnlineEnabled && (
@@ -328,6 +339,18 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                     {STATUS_LABELS[order.status]}
                   </span>
                 </div>
+                <div className="text-[10px] font-bold uppercase text-slate-500 flex flex-wrap gap-2 mb-2">
+                  {order.paymentMethod && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-100/70 text-amber-700">
+                      {order.paymentMethod}
+                    </span>
+                  )}
+                  {order.paymentStatus === 'PAID' && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                      PAGO
+                    </span>
+                  )}
+                </div>
                 <div className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
                   {order.items.map((item, index) => (
                     <div key={`${order.id}-item-${index}`}>{item}</div>
@@ -351,6 +374,18 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                   <span className="text-xs font-bold text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-slate-800 px-2 py-1 rounded-full">
                     {STATUS_LABELS[order.status]}
                   </span>
+                </div>
+                <div className="text-[10px] font-bold uppercase text-slate-500 flex flex-wrap gap-2 mb-2">
+                  {order.paymentMethod && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-100/70 text-amber-700">
+                      {order.paymentMethod}
+                    </span>
+                  )}
+                  {order.paymentStatus === 'PAID' && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                      PAGO
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-1 text-sm text-gray-600 dark:text-gray-300">
                   {order.items.map((item, index) => (
