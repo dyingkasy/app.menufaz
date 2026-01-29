@@ -147,6 +147,15 @@ export const updateStoreAutoOpen = async (storeId: string, enabled: boolean) => 
 
 export const getPixRepasseConfig = async (storeId?: string) => {
   ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    return {
+      pix_enabled: false,
+      pix_hash_recebedor_01: '',
+      pix_hash_recebedor_02: '',
+      pix_identificacao_pdv: ''
+    };
+  }
   const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : '';
   return apiFetch<{
     pix_enabled: boolean;
@@ -163,6 +172,12 @@ export const updatePixRepasseConfig = async (payload: {
   pix_hash_recebedor_02?: string;
 }) => {
   ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    const error: any = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }
   return apiFetch(`/empresa/pagamentos/pix-repasse`, {
     method: 'PUT',
     body: JSON.stringify(payload)
@@ -298,11 +313,19 @@ export const deleteStore = async (storeId: string) => {
 
 export const getFavoriteStores = async (): Promise<string[]> => {
   ensureApi();
+  const token = getAuthToken();
+  if (!token) return [];
   return apiFetch<string[]>('/favorites');
 };
 
 export const addFavoriteStore = async (storeId: string) => {
   ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    const error: any = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }
   await apiFetch('/favorites', {
     method: 'POST',
     body: JSON.stringify({ storeId })
@@ -311,6 +334,12 @@ export const addFavoriteStore = async (storeId: string) => {
 
 export const removeFavoriteStore = async (storeId: string) => {
   ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    const error: any = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }
   await apiFetch(`/favorites/${storeId}`, { method: 'DELETE' });
 };
 
@@ -627,6 +656,56 @@ export const recreatePixPayment = async (
   ensureApi();
   return apiFetch(`/pedidos/${orderId}/pagamento/pix/recriar${buildPixPaymentQuery(params)}`, {
     method: 'POST'
+  });
+};
+
+export const createTabletQr = async (storeId: string, tableNumber: string) => {
+  ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    const error: any = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }
+  return apiFetch(`/tablets/qr`, {
+    method: 'POST',
+    body: JSON.stringify({ storeId, tableNumber })
+  });
+};
+
+export const listTablets = async (storeId: string) => {
+  ensureApi();
+  const token = getAuthToken();
+  if (!token) return [];
+  return apiFetch(`/tablets?storeId=${encodeURIComponent(storeId)}`);
+};
+
+export const listTabletEvents = async (storeId: string) => {
+  ensureApi();
+  const token = getAuthToken();
+  if (!token) return [];
+  return apiFetch(`/tablets/events?storeId=${encodeURIComponent(storeId)}`);
+};
+
+export const revokeTablet = async (storeId: string, tabletId: string) => {
+  ensureApi();
+  const token = getAuthToken();
+  if (!token) {
+    const error: any = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }
+  return apiFetch(`/tablets/revoke`, {
+    method: 'POST',
+    body: JSON.stringify({ storeId, tabletId })
+  });
+};
+
+export const claimTabletToken = async (token: string, deviceId: string, deviceLabel: string) => {
+  ensureApi();
+  return apiFetch(`/tablets/claim`, {
+    method: 'POST',
+    body: JSON.stringify({ token, deviceId, deviceLabel })
   });
 };
 
