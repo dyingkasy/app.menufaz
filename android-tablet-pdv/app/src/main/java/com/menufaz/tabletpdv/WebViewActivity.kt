@@ -169,7 +169,7 @@ class WebViewActivity : AppCompatActivity() {
         .toMap()
       val token = params["tablet_token"] ?: return
       val mesa = params["mesa"] ?: config?.mesa ?: ""
-      val deviceId = getDeviceId()
+      val deviceId = getTabletDeviceId()
       val label = buildDeviceLabel(mesa)
       Thread {
         StoreApi.claimTablet(token, deviceId, label)
@@ -178,7 +178,7 @@ class WebViewActivity : AppCompatActivity() {
     }
   }
 
-  private fun getDeviceId(): String {
+  private fun getTabletDeviceId(): String {
     return Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
       ?.takeIf { it.isNotBlank() }
       ?: PdvPrefs.getOrCreateDeviceId(this)
@@ -211,7 +211,7 @@ class WebViewActivity : AppCompatActivity() {
   inner class TabletBridge {
     @JavascriptInterface
     fun getDeviceId(): String {
-      return getDeviceId()
+      return getTabletDeviceId()
     }
 
     @JavascriptInterface
