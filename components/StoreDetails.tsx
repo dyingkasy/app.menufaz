@@ -1440,12 +1440,15 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
   };
 
   if (isTablet) {
-      const tabletRoot = isDarkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900';
-      const tabletSidebar = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
-      const tabletHeader = isDarkMode ? 'bg-slate-950/90 border-slate-800' : 'bg-white/90 border-slate-200';
-      const tabletCard = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+      const tabletRoot = isDarkMode
+          ? 'bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white'
+          : 'bg-gradient-to-br from-slate-50 via-white to-slate-100 text-slate-900';
+      const tabletSidebar = isDarkMode ? 'bg-slate-900/80 border-slate-800/80 backdrop-blur-xl' : 'bg-white/80 border-slate-200/80 backdrop-blur-xl';
+      const tabletHeader = isDarkMode ? 'bg-slate-950/70 border-slate-800/70' : 'bg-white/70 border-slate-200/70';
+      const tabletPanel = isDarkMode ? 'bg-slate-900/35 border-slate-800/70' : 'bg-white/70 border-slate-200/80';
+      const tabletCard = isDarkMode ? 'bg-slate-900/60 border-slate-800/70 backdrop-blur-md shadow-[0_10px_30px_rgba(0,0,0,0.25)]' : 'bg-white/70 border-slate-200/80 backdrop-blur-md shadow-[0_12px_28px_rgba(15,23,42,0.08)]';
       const tabletMuted = isDarkMode ? 'text-slate-400' : 'text-slate-500';
-      const tabletButton = isDarkMode ? 'bg-slate-900 border-slate-800 hover:bg-slate-800' : 'bg-white border-slate-200 hover:bg-slate-100';
+      const tabletButton = isDarkMode ? 'bg-slate-900/70 border-slate-800/70 hover:bg-slate-800/80' : 'bg-white/70 border-slate-200/70 hover:bg-white/90';
       return (
           <div className={`min-h-screen ${tabletRoot} flex font-sans`}>
               <aside className={`w-72 xl:w-80 ${tabletSidebar} border-r flex flex-col`}>
@@ -1489,7 +1492,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                               value={searchTerm}
                               onChange={(e) => setSearchTerm(e.target.value)}
                               placeholder="Digite o nome do produto"
-                              className={`w-full pl-11 pr-4 py-3 rounded-2xl border outline-none focus:ring-2 focus:ring-red-500 ${isDarkMode ? 'border-slate-800 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-900'}`}
+                              className={`w-full pl-11 pr-4 py-3 rounded-2xl border outline-none focus:ring-2 focus:ring-red-500 ${isDarkMode ? 'border-slate-800/80 bg-slate-950/80 text-white' : 'border-slate-200/80 bg-white/80 text-slate-900'} backdrop-blur`}
                           />
                       </div>
                   </div>
@@ -1510,7 +1513,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
               </aside>
 
               <div className="flex-1 min-w-0">
-                  <header className={`sticky top-0 z-30 backdrop-blur border-b px-6 py-4 flex items-center justify-between ${tabletHeader}`}>
+                  <header className={`sticky top-0 z-30 backdrop-blur-xl border-b px-6 py-4 flex items-center justify-between ${tabletHeader}`}>
                       <div className={`text-xs uppercase tracking-[0.25em] font-bold ${tabletMuted}`}>Cardápio</div>
                       <div className="flex items-center gap-3">
                           {tableNumber && onTrackTable && (
@@ -1551,7 +1554,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                       </div>
                   </header>
 
-                  <div className="px-6 py-6 space-y-10">
+                  <div className={`mx-6 my-6 px-6 py-6 space-y-10 border rounded-[32px] backdrop-blur-2xl ${tabletPanel}`}>
                       {loadingProducts ? (
                           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
                               {Array.from({ length: 6 }).map((_, idx) => (

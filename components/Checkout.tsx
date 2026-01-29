@@ -1083,7 +1083,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             </section>
         )}
 
-        {/* CPF Optional */}
+        {!isTabletMode && (
         <section>
             <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <User size={16} /> CPF na Nota (Opcional)
@@ -1127,6 +1127,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                 </>
             )}
         </section>
+        )}
 
         {!isTabletMode && (
         <section>
