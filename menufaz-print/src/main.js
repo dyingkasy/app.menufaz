@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electr
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const { execSync } = require('child_process');
 
 let printer = null;
 try {
@@ -148,13 +149,50 @@ const resolveConfig = (rawConfig = {}) => {
   };
 };
 
+const parsePrinterLines = (raw) => {
+  if (!raw) return [];
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && line.toLowerCase() !== 'name')
+    .map((name) => ({ name }));
+};
+
+const getSystemPrinters = () => {
+  if (process.platform !== 'win32') return [];
+  const commands = [
+    'powershell.exe -NoProfile -Command "Get-Printer | Select-Object -ExpandProperty Name"',
+    'wmic printer get name'
+  ];
+  for (const cmd of commands) {
+    try {
+      const output = execSync(cmd, { encoding: 'utf8' });
+      const printers = parsePrinterLines(output);
+      if (printers.length) {
+        logInfo('fallback printer list', { count: printers.length, source: cmd.split(' ')[0] });
+        return printers;
+      }
+    } catch (error) {
+      logError('fallback printer list error', { source: cmd.split(' ')[0], error: String(error.message || error) });
+    }
+  }
+  return [];
+};
+
 const getPrinters = () => {
-  if (!printer || typeof printer.getPrinters !== 'function') return [];
+  if (!printer || typeof printer.getPrinters !== 'function') {
+    return getSystemPrinters();
+  }
   try {
-    return printer.getPrinters() || [];
+    const list = printer.getPrinters() || [];
+    if (!list.length) {
+      const fallback = getSystemPrinters();
+      if (fallback.length) return fallback;
+    }
+    return list;
   } catch (error) {
     logError('printer list error', { error: String(error.message || error) });
-    return [];
+    return getSystemPrinters();
   }
 };
 
