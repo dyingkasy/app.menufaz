@@ -5,7 +5,7 @@ import { createOrder, getCouponsByStore } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCurrencyBRL } from '../utils/format';
 import { imageKitUrl } from '../utils/imagekit';
-import { searchAddress, calculateDistance } from '../utils/geo';
+import { searchAddress, calculateDistance, isPointInPolygon } from '../utils/geo';
 
 interface CheckoutProps {
   store: Store;
@@ -19,6 +19,7 @@ interface CheckoutProps {
     tableNumber: string;
     sessionId: string;
   };
+  isTabletMode?: boolean;
 }
 
 // --- Validation Helpers ---
@@ -72,12 +73,21 @@ const Checkout: React.FC<CheckoutProps> = ({
   onOrderPlaced,
   onChangeAddress,
   onPixPayment,
-  tableContext
+  tableContext,
+  isTabletMode = false
 }) => {
   const { user } = useAuth();
-  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(
-    tableContext ? 'MONEY' : store.acceptsCardOnDelivery ? 'CREDIT' : 'MONEY'
-  );
+  const storePaymentMethods = Array.isArray(store.paymentMethods) ? store.paymentMethods : [];
+  const pixOnlineEnabled =
+      store.pix_enabled === true && store.pix_hashes_configured === true;
+  const pixOfflineEnabled = storePaymentMethods.some((pm) => pm?.active !== false && pm?.type === 'PIX');
+  const pixAvailable = pixOnlineEnabled || pixOfflineEnabled;
+  const [paymentMethod, setPaymentMethod] = useState<'CREDIT' | 'PIX' | 'MONEY'>(() => {
+      if (tableContext) return 'MONEY';
+      if (store.acceptsCardOnDelivery) return 'CREDIT';
+      if (pixAvailable) return 'PIX';
+      return 'MONEY';
+  });
   const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(() => {
     if (tableContext) return 'TABLE';
     if (store.acceptsDelivery === false) {
@@ -97,9 +107,13 @@ const Checkout: React.FC<CheckoutProps> = ({
   const [neighborhoodError, setNeighborhoodError] = useState('');
   const [deliveryZoneError, setDeliveryZoneError] = useState('');
   const isTableFlow = !!tableContext;
+  const tabletNameKey = useMemo(() => {
+      if (!isTabletMode) return '';
+      const tableValue = (tableContext?.tableNumber || tableNumber || '').trim();
+      if (!tableValue) return '';
+      return `tablet_customer_name:${store.id}:${tableValue}`;
+  }, [isTabletMode, store.id, tableContext?.tableNumber, tableNumber]);
   const canUseCard = store.acceptsCardOnDelivery;
-  const pixOnlineEnabled =
-      store.pix_enabled === true && store.pix_hashes_configured === true;
   const deliveryFeeMode =
       store.deliveryFeeMode === 'BY_NEIGHBORHOOD'
           ? 'BY_NEIGHBORHOOD'
@@ -137,22 +151,30 @@ const Checkout: React.FC<CheckoutProps> = ({
               setCpf((user as any).cpf);
               setShowCpf(true);
           }
-          if ((user as any).phone && !phone) {
+          if ((user as any).phone && !phone && !isTabletMode) {
               setPhone((user as any).phone);
           }
           if ((user as any).name && !customerName) {
               setCustomerName((user as any).name);
           }
       }
-  }, [user, cpf, phone, customerName]);
+      if (isTabletMode && tabletNameKey && !customerName) {
+          try {
+              const storedName = localStorage.getItem(tabletNameKey) || '';
+              if (storedName) {
+                  setCustomerName(storedName);
+              }
+          } catch {}
+      }
+  }, [user, cpf, phone, customerName, isTabletMode, tabletNameKey]);
 
   useEffect(() => {
-      if (!pixOnlineEnabled && paymentMethod === 'PIX') {
+      if (!pixAvailable && paymentMethod === 'PIX') {
           const fallbackMethod = canUseCard ? 'CREDIT' : 'MONEY';
           setPaymentMethod(fallbackMethod);
-          alert('PIX online não está disponível para esta loja.');
+          alert('PIX não está disponível para esta loja.');
       }
-  }, [paymentMethod, pixOnlineEnabled, canUseCard]);
+  }, [paymentMethod, pixAvailable, canUseCard]);
 
   useEffect(() => {
       if (isTableFlow) return;
@@ -176,9 +198,9 @@ const Checkout: React.FC<CheckoutProps> = ({
 
   useEffect(() => {
       if (!canUseCard && paymentMethod === 'CREDIT') {
-          setPaymentMethod('PIX');
+          setPaymentMethod(pixAvailable ? 'PIX' : 'MONEY');
       }
-  }, [canUseCard, paymentMethod]);
+  }, [canUseCard, paymentMethod, pixAvailable]);
 
   useEffect(() => {
       const normalized = normalizeCoords(address?.coordinates);
@@ -254,19 +276,37 @@ const Checkout: React.FC<CheckoutProps> = ({
       if (!resolvedDeliveryCoords) {
           return { error: 'Informe um endereço válido para calcular o frete.' };
       }
-      const activeZones = deliveryZones.filter((zone) => zone && zone.enabled !== false);
+      const activeZones = deliveryZones.filter((zone) => {
+          if (!zone || zone.enabled === false) return false;
+          const type = zone.type || 'RADIUS';
+          if (type === 'POLYGON') {
+              return Array.isArray(zone.polygonPath) && zone.polygonPath.length >= 3;
+          }
+          return (
+              Number(zone.radiusMeters || 0) > 0 &&
+              Number.isFinite(Number(zone.centerLat)) &&
+              Number.isFinite(Number(zone.centerLng))
+          );
+      });
       if (activeZones.length === 0) {
           return { error: 'Nenhuma área de entrega configurada.' };
       }
       const matches = activeZones
           .map((zone) => {
+              const type = zone.type || 'RADIUS';
+              if (type === 'POLYGON') {
+                  if (!isPointInPolygon(resolvedDeliveryCoords, zone.polygonPath || [])) return null;
+                  return { zone, distanceMeters: 0, typeRank: 0 };
+              }
               const distanceKm = calculateDistance(
                   { lat: zone.centerLat, lng: zone.centerLng },
                   resolvedDeliveryCoords
               );
-              return { zone, distanceMeters: distanceKm * 1000 };
+              const distanceMeters = distanceKm * 1000;
+              if (distanceMeters > Number(zone.radiusMeters || 0)) return null;
+              return { zone, distanceMeters, typeRank: 1 };
           })
-          .filter((item) => item.distanceMeters <= Number(item.zone.radiusMeters || 0));
+          .filter(Boolean);
       if (matches.length === 0) {
           return { error: 'Esta loja não entrega no seu endereço.' };
       }
@@ -274,6 +314,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           const priorityA = Number(a.zone.priority || 0);
           const priorityB = Number(b.zone.priority || 0);
           if (priorityA !== priorityB) return priorityB - priorityA;
+          if (a.typeRank !== b.typeRank) return a.typeRank - b.typeRank;
           const radiusA = Number(a.zone.radiusMeters || 0);
           const radiusB = Number(b.zone.radiusMeters || 0);
           if (radiusA !== radiusB) return radiusA - radiusB;
@@ -472,14 +513,16 @@ const Checkout: React.FC<CheckoutProps> = ({
       alert('Informe o número da mesa.');
       return;
     }
-    const phoneDigits = phone.replace(/\D/g, '');
-    if (!phoneDigits) {
-      alert('Informe um telefone para contato.');
-      return;
-    }
-    if (phoneDigits.length < 10 || phoneDigits.length > 11) {
-      alert('Telefone inválido. Informe DDD + número.');
-      return;
+    const phoneDigits = isTabletMode ? '' : phone.replace(/\D/g, '');
+    if (!isTabletMode) {
+      if (!phoneDigits) {
+        alert('Informe um telefone para contato.');
+        return;
+      }
+      if (phoneDigits.length < 10 || phoneDigits.length > 11) {
+        alert('Telefone inválido. Informe DDD + número.');
+        return;
+      }
     }
 
     // Validação CPF
@@ -604,7 +647,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             tableNumber: orderType === 'TABLE' ? tableValue : undefined,
             tableSessionId: orderType === 'TABLE' ? tableContext?.sessionId : undefined,
             cpf: showCpf ? cpf : '',
-            customerPhone: phoneDigits,
+            customerPhone: phoneDigits || undefined,
             couponCode: selectedCoupon?.code,
             couponId: selectedCoupon?.id,
             couponDiscount: discount > 0 ? discount : undefined
@@ -614,6 +657,11 @@ const Checkout: React.FC<CheckoutProps> = ({
         }
         if (phoneDigits) {
             localStorage.setItem('customerPhone', phoneDigits);
+        }
+        if (isTabletMode && customerName.trim() && tabletNameKey) {
+            try {
+                localStorage.setItem(tabletNameKey, customerName.trim());
+            } catch {}
         }
         if (createdOrder?.id) {
             localStorage.setItem('lastOrderId', createdOrder.id);
@@ -1005,31 +1053,33 @@ const Checkout: React.FC<CheckoutProps> = ({
             {customerNameError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{customerNameError}</p>}
         </section>
 
-        <section>
-            <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-                <User size={16} /> Telefone para contato
-            </h3>
-            <input
-                type="tel"
-                placeholder="(11) 99999-9999"
-                value={phone}
-                onChange={(e) => {
-                    let v = e.target.value.replace(/\D/g, '');
-                    if (v.length > 11) v = v.slice(0, 11);
-                    v = v.replace(/(\d{2})(\d)/, '($1) $2');
-                    v = v.replace(/(\d{5})(\d)/, '$1-$2');
-                    setPhone(v);
-                    const digits = v.replace(/\D/g, '');
-                    if (digits.length > 0 && digits.length < 10) {
-                        setPhoneError('Informe DDD + número.');
-                    } else {
-                        setPhoneError('');
-                    }
-                }}
-                className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${phoneError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
-            />
-            {phoneError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{phoneError}</p>}
-        </section>
+        {!isTabletMode && (
+            <section>
+                <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                    <User size={16} /> Telefone para contato
+                </h3>
+                <input
+                    type="tel"
+                    placeholder="(11) 99999-9999"
+                    value={phone}
+                    onChange={(e) => {
+                        let v = e.target.value.replace(/\D/g, '');
+                        if (v.length > 11) v = v.slice(0, 11);
+                        v = v.replace(/(\d{2})(\d)/, '($1) $2');
+                        v = v.replace(/(\d{5})(\d)/, '$1-$2');
+                        setPhone(v);
+                        const digits = v.replace(/\D/g, '');
+                        if (digits.length > 0 && digits.length < 10) {
+                            setPhoneError('Informe DDD + número.');
+                        } else {
+                            setPhoneError('');
+                        }
+                    }}
+                    className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${phoneError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
+                />
+                {phoneError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{phoneError}</p>}
+            </section>
+        )}
 
         {/* CPF Optional */}
         <section>
@@ -1085,7 +1135,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                     {canUseCard && (
                         <button onClick={() => setPaymentMethod('CREDIT')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'CREDIT' ? 'text-red-600 bg-red-50 dark:bg-red-900/10 border-b-2 border-red-600' : 'text-gray-500'}`}><CreditCard size={18} /> Cartão</button>
                     )}
-                    {pixOnlineEnabled && (
+                    {pixAvailable && (
                         <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><div className="w-4 h-4 rounded rotate-45 border-2 border-current"></div> Pix</button>
                     )}
                     <button onClick={() => setPaymentMethod('MONEY')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'MONEY' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/10 border-b-2 border-blue-600' : 'text-gray-500'}`}><Banknote size={18} /> Dinheiro</button>
@@ -1108,6 +1158,11 @@ const Checkout: React.FC<CheckoutProps> = ({
                             <p className="text-sm text-gray-500">
                                 Pagamento online com QR Code e copia e cola.
                             </p>
+                        </div>
+                    )}
+                    {paymentMethod === 'PIX' && !pixOnlineEnabled && pixAvailable && (
+                        <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 p-4 text-sm text-gray-600 dark:text-gray-300">
+                            Pagamento via PIX será combinado com a loja após o pedido.
                         </div>
                     )}
                 </div>

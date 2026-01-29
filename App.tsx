@@ -671,6 +671,10 @@ const MenuFazApp: React.FC = () => {
 
   const handleOrderPlaced = () => {
       setCartItems([]);
+      if (isTabletMode) {
+          setCurrentView(ViewState.TABLE_TRACKING);
+          return;
+      }
       setCurrentView(tableContext ? ViewState.TABLE_TRACKING : ViewState.CLIENT_ORDERS);
   };
 
@@ -866,6 +870,7 @@ const MenuFazApp: React.FC = () => {
                 onPixPayment={handlePixPayment}
                 onChangeAddress={() => setIsLocationModalOpen(true)}
                 tableContext={activeTableContext}
+                isTabletMode={isTabletMode}
               />
               <LocationModal 
                 isOpen={isLocationModalOpen} 
@@ -886,6 +891,7 @@ const MenuFazApp: React.FC = () => {
               tableNumber={tableContext.tableNumber}
               tableSessionId={tableContext.sessionId}
               onBack={() => setCurrentView(ViewState.STORE_DETAILS)}
+              isTabletMode={isTabletMode}
           />
       );
   }
