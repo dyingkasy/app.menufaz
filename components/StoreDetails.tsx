@@ -1049,10 +1049,12 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                                <span>Previsão</span>
                                                <span className="font-bold">{store.deliveryTime || store.pickupTime || 'Consultar loja'}</span>
                                            </div>
-                                          <div className="flex items-center justify-between">
-                                              <span>Entrega</span>
-                                              <span className="font-bold">{deliveryFeeInfo.label}</span>
-                                          </div>
+                                           {!isTablet && (
+                                               <div className="flex items-center justify-between">
+                                                   <span>Entrega</span>
+                                                   <span className="font-bold">{deliveryFeeInfo.label}</span>
+                                               </div>
+                                           )}
                                            {store.minOrderValue ? (
                                                <div className="flex items-center justify-between">
                                                    <span>Pedido mínimo</span>
@@ -1448,12 +1450,14 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
           : 'bg-gradient-to-br from-slate-50 via-white to-slate-100 text-slate-900';
       const tabletSidebar = isDarkMode ? 'bg-slate-900/80 border-slate-800/80 backdrop-blur-xl' : 'bg-white/80 border-slate-200/80 backdrop-blur-xl';
       const tabletHeader = isDarkMode ? 'bg-slate-950/70 border-slate-800/70' : 'bg-white/70 border-slate-200/70';
-      const tabletPanel = isDarkMode ? 'bg-slate-900/35 border-slate-800/70' : 'bg-white/70 border-slate-200/80';
-      const tabletCard = isDarkMode ? 'bg-slate-900/60 border-slate-800/70 backdrop-blur-md shadow-[0_10px_30px_rgba(0,0,0,0.25)]' : 'bg-white/70 border-slate-200/80 backdrop-blur-md shadow-[0_12px_28px_rgba(15,23,42,0.08)]';
+      const tabletPanel = isDarkMode ? 'bg-slate-900/40 border-slate-800/60' : 'bg-white/70 border-slate-200/70';
+      const tabletCard = isDarkMode ? 'bg-slate-900/60 border-slate-800/60 backdrop-blur-md shadow-[0_14px_36px_rgba(0,0,0,0.28)]' : 'bg-white/75 border-slate-200/70 backdrop-blur-md shadow-[0_16px_32px_rgba(15,23,42,0.08)]';
       const tabletMuted = isDarkMode ? 'text-slate-400' : 'text-slate-500';
       const tabletButton = isDarkMode ? 'bg-slate-900/70 border-slate-800/70 hover:bg-slate-800/80' : 'bg-white/70 border-slate-200/70 hover:bg-white/90';
       return (
-          <div className={`min-h-screen ${tabletRoot} flex font-sans`}>
+          <div className={`min-h-screen ${tabletRoot} flex font-sans relative overflow-hidden`}>
+              <div className="pointer-events-none absolute -top-32 -right-24 h-96 w-96 rounded-full bg-rose-500/15 blur-[140px]" />
+              <div className="pointer-events-none absolute -bottom-40 left-0 h-[28rem] w-[28rem] rounded-full bg-amber-400/15 blur-[160px]" />
               <aside className={`w-72 xl:w-80 ${tabletSidebar} border-r flex flex-col`}>
                   <div className={`p-6 border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
                       {store.logoUrl ? (
@@ -1506,7 +1510,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                               <button
                                   key={cat}
                                   onClick={() => scrollToSection(`cat-${cat}`)}
-                                  className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold transition-colors ${isDarkMode ? 'bg-slate-900/60 hover:bg-slate-800 text-slate-200' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
+                                  className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold transition-all ${isDarkMode ? 'bg-slate-900/60 hover:bg-slate-800 text-slate-200' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'} hover:-translate-y-0.5`}
                               >
                                   {cat}
                               </button>
@@ -1557,7 +1561,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                       </div>
                   </header>
 
-                  <div className={`mx-6 my-6 px-6 py-6 space-y-10 border rounded-[32px] backdrop-blur-2xl ${tabletPanel}`}>
+                  <div className={`mx-6 my-6 px-6 py-6 space-y-10 border rounded-[32px] backdrop-blur-2xl ${tabletPanel} ${isDarkMode ? 'shadow-[0_20px_60px_rgba(0,0,0,0.35)]' : 'shadow-[0_20px_60px_rgba(15,23,42,0.12)]'}`}>
                       {loadingProducts ? (
                           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
                               {Array.from({ length: 6 }).map((_, idx) => (
@@ -1589,7 +1593,7 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                                               <div
                                                   key={product.id}
                                                   onClick={() => handleOpenProduct(product)}
-                                                  className={`rounded-2xl p-4 flex gap-4 cursor-pointer border shadow-sm transition-all group ${tabletCard} ${isDarkMode ? 'hover:border-red-600' : 'hover:border-red-500'}`}
+                                                  className={`rounded-2xl p-4 flex gap-4 cursor-pointer border transition-all group ${tabletCard} ${isDarkMode ? 'hover:border-red-500/80 hover:-translate-y-0.5' : 'hover:border-red-500/80 hover:-translate-y-0.5'}`}
                                               >
                                                   <div className="flex-1 flex flex-col">
                                                       <h3 className={`font-bold mb-1 text-base transition-colors ${isDarkMode ? 'text-white group-hover:text-red-400' : 'text-slate-900 group-hover:text-red-600'}`}>
