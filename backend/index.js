@@ -223,6 +223,31 @@ const ensurePaymentTables = async () => {
   await query('CREATE INDEX IF NOT EXISTS idx_order_payments_status ON order_payments(status_local)');
 };
 
+const ensureTablePaymentTables = async () => {
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS table_payments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      store_id UUID NOT NULL,
+      table_number TEXT NOT NULL,
+      table_session_id TEXT NOT NULL,
+      order_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      valor NUMERIC(18,2),
+      id_solicitacao UUID,
+      timestamp_limite TIMESTAMP WITH TIME ZONE,
+      qr_code TEXT,
+      status_local TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+    `
+  );
+  await query('CREATE INDEX IF NOT EXISTS idx_table_payments_store ON table_payments(store_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_table_payments_table ON table_payments(store_id, table_number)');
+  await query('CREATE INDEX IF NOT EXISTS idx_table_payments_session ON table_payments(table_session_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_table_payments_status ON table_payments(status_local)');
+};
+
 const ensureTabletTables = async () => {
   await query(
     `
@@ -279,6 +304,10 @@ ensurePrintTables().catch((error) => {
 
 ensurePaymentTables().catch((error) => {
   console.error('Failed to initialize payment tables', error);
+});
+
+ensureTablePaymentTables().catch((error) => {
+  console.error('Failed to initialize table payment tables', error);
 });
 
 ensureTabletTables().catch((error) => {
@@ -2334,6 +2363,109 @@ app.get('/api/tablets/events', async (req, res) => {
     [storeId]
   );
   res.json(rows);
+});
+
+app.post('/api/tablet/bill/pay/pix', async (req, res) => {
+  const storeId = (req.body?.storeId || req.query?.storeId || '').toString().trim();
+  const tableNumber = (req.body?.tableNumber || req.query?.tableNumber || '').toString().trim();
+  const tableSessionId = (req.body?.tableSessionId || req.query?.tableSessionId || '').toString().trim();
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  if (!tableNumber) return res.status(400).json({ error: 'tableNumber required' });
+  if (!tableSessionId) return res.status(400).json({ error: 'tableSessionId required' });
+
+  const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [storeId]);
+  const storeData = storeRows[0]?.data || {};
+  if (!storeData?.pix_enabled) {
+    return res.status(400).json({ error: 'PIX Repasse não habilitado para esta loja.' });
+  }
+  if (!storeData.pix_hash_recebedor_01 || !storeData.pix_hash_recebedor_02) {
+    return res.status(400).json({ error: 'PIX Repasse sem hashes configurados.' });
+  }
+  if (!storeData.pix_identificacao_pdv) {
+    return res.status(422).json({ error: 'PIX Repasse sem identificacao PDV configurada.' });
+  }
+
+  const { rows: orderRows } = await query(
+    `
+    SELECT id, data, status
+    FROM orders
+    WHERE store_id = $1
+      AND data->>'tableNumber' = $2
+      AND data->>'tableSessionId' = $3
+      AND status NOT IN ('COMPLETED', 'CANCELLED')
+    `,
+    [storeId, tableNumber, tableSessionId]
+  );
+
+  if (orderRows.length === 0) {
+    return res.status(404).json({ error: 'Nenhum pedido ativo para esta mesa.' });
+  }
+
+  const orderIds = orderRows.map((row) => row.id);
+  const total = orderRows.reduce((sum, row) => sum + Number(row.data?.total || 0), 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return res.status(400).json({ error: 'Valor inválido para cobrança.' });
+  }
+
+  const { rows: existingRows } = await query(
+    `
+    SELECT id, valor, qr_code, id_solicitacao, timestamp_limite, status_local
+    FROM table_payments
+    WHERE store_id = $1
+      AND table_number = $2
+      AND table_session_id = $3
+      AND status_local = 'PENDING'
+      AND timestamp_limite > NOW()
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [storeId, tableNumber, tableSessionId]
+  );
+  if (existingRows.length > 0) {
+    const existing = existingRows[0];
+    return res.json({
+      paymentId: existing.id,
+      total,
+      qrCode: existing.qr_code,
+      expiresAt: existing.timestamp_limite,
+      idSolicitacao: existing.id_solicitacao,
+      status: existing.status_local
+    });
+  }
+
+  const timestampLimiteSolicitacao = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const paymentResult = await createSolicitacaoPixRepasse({
+    identificacaoPDV: storeData.pix_identificacao_pdv,
+    timestampLimiteSolicitacao,
+    valorSolicitacao: Number(total.toFixed(2)),
+    hashIdentificadorRecebedor01: storeData.pix_hash_recebedor_01,
+    hashIdentificadorRecebedor02: storeData.pix_hash_recebedor_02,
+    baseUrl: pixRepasseBaseUrl,
+    tokenApiExterna: pixRepasseToken
+  });
+
+  if (!paymentResult?.ok) {
+    return res.status(502).json({ error: paymentResult?.message || 'Falha ao criar cobrança PIX.' });
+  }
+
+  const mapped = mapPixRepasseResponse(paymentResult.data || {});
+  const idSolicitacao = mapped.idSolicitacao || null;
+  const qrCode = mapped.qrCode || null;
+  await query(
+    `
+    INSERT INTO table_payments (store_id, table_number, table_session_id, order_ids, valor, id_solicitacao, timestamp_limite, qr_code)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `,
+    [storeId, tableNumber, tableSessionId, JSON.stringify(orderIds), total, idSolicitacao, timestampLimiteSolicitacao, qrCode]
+  );
+
+  res.json({
+    total,
+    qrCode,
+    expiresAt: timestampLimiteSolicitacao,
+    idSolicitacao,
+    status: 'PENDING'
+  });
 });
 
 app.post('/api/tablets/revoke', async (req, res) => {

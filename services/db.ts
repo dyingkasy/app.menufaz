@@ -721,6 +721,25 @@ export const listTabletEvents = async (storeId: string) => {
   }
 };
 
+export const createTablePixPayment = async (payload: {
+  storeId: string;
+  tableNumber: string;
+  tableSessionId: string;
+}): Promise<{
+  total: number;
+  qrCode?: string | null;
+  expiresAt?: string | null;
+  idSolicitacao?: string | null;
+  paymentId?: string;
+  status?: string;
+}> => {
+  ensureApi();
+  return apiFetch(`/tablet/bill/pay/pix`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+};
+
 export const revokeTablet = async (storeId: string, tabletId: string) => {
   ensureApi();
   const token = getAuthToken();

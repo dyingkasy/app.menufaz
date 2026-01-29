@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Utensils, ShoppingBag, CreditCard, QrCode, Banknote } from 'lucide-react';
+import { ArrowLeft, Utensils, ShoppingBag, CreditCard, QrCode, Banknote, Loader2, Copy } from 'lucide-react';
 import { Order, Store } from '../types';
 import { formatCurrencyBRL } from '../utils/format';
-import { subscribeToTableOrders } from '../services/db';
+import { subscribeToTableOrders, createTablePixPayment } from '../services/db';
+import QRCode from 'qrcode';
 
 interface TableTrackingProps {
   store: Store;
@@ -30,6 +31,13 @@ const TableTracking: React.FC<TableTrackingProps> = ({
 }) => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [showAccount, setShowAccount] = useState(false);
+  const [pixModalOpen, setPixModalOpen] = useState(false);
+  const [pixLoading, setPixLoading] = useState(false);
+  const [pixError, setPixError] = useState('');
+  const [pixQrCode, setPixQrCode] = useState<string | null>(null);
+  const [pixQrImage, setPixQrImage] = useState<string | null>(null);
+  const [pixExpiresAt, setPixExpiresAt] = useState<string | null>(null);
+  const [pixCountdown, setPixCountdown] = useState('10:00');
 
   useEffect(() => {
     const unsubscribe = subscribeToTableOrders(store.id, tableNumber, tableSessionId, (next) => {
@@ -101,6 +109,59 @@ const TableTracking: React.FC<TableTrackingProps> = ({
     }
     return options;
   }, [store]);
+  const pixOnlineEnabled =
+    store.pix_enabled === true && store.pix_hashes_configured === true;
+
+  useEffect(() => {
+    if (!pixModalOpen || !pixExpiresAt) return;
+    const update = () => {
+      const diff = new Date(pixExpiresAt).getTime() - Date.now();
+      if (Number.isNaN(diff)) {
+        setPixCountdown('--:--');
+        return;
+      }
+      if (diff <= 0) {
+        setPixCountdown('00:00');
+        return;
+      }
+      const minutes = Math.floor(diff / 60000);
+      const seconds = Math.floor((diff % 60000) / 1000);
+      setPixCountdown(`${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`);
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [pixModalOpen, pixExpiresAt]);
+
+  useEffect(() => {
+    if (!pixQrCode) {
+      setPixQrImage(null);
+      return;
+    }
+    QRCode.toDataURL(pixQrCode, { margin: 1, width: 320 })
+      .then((url) => setPixQrImage(url))
+      .catch(() => setPixQrImage(null));
+  }, [pixQrCode]);
+
+  const handleCloseAccount = async () => {
+    if (!pixOnlineEnabled) return;
+    setPixLoading(true);
+    setPixError('');
+    try {
+      const data = await createTablePixPayment({
+        storeId: store.id,
+        tableNumber,
+        tableSessionId
+      });
+      setPixQrCode(data.qrCode || null);
+      setPixExpiresAt(data.expiresAt || null);
+      setPixModalOpen(true);
+    } catch (error: any) {
+      setPixError(error?.message || 'Erro ao gerar cobrança PIX.');
+    } finally {
+      setPixLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-950 font-sans pb-20">
@@ -118,6 +179,24 @@ const TableTracking: React.FC<TableTrackingProps> = ({
 
       <main className="max-w-3xl mx-auto px-4 py-6 space-y-6">
         {isTabletMode && (
+          <div className="flex flex-wrap items-center gap-3">
+            {pixOnlineEnabled && (
+              <button
+                type="button"
+                onClick={handleCloseAccount}
+                disabled={pixLoading}
+                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 disabled:opacity-60"
+              >
+                {pixLoading ? <Loader2 className="animate-spin" size={16} /> : <QrCode size={16} />}
+                Fechar conta (PIX)
+              </button>
+            )}
+            {pixError && (
+              <span className="text-xs font-semibold text-red-600">{pixError}</span>
+            )}
+          </div>
+        )}
+        {isTabletMode && (
           <section className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 p-5 shadow-sm">
             <h2 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3">Formas de pagamento</h2>
             <div className="flex flex-wrap gap-3">
@@ -132,6 +211,54 @@ const TableTracking: React.FC<TableTrackingProps> = ({
               ))}
             </div>
           </section>
+        )}
+        {isTabletMode && pixModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-lg rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 shadow-xl">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-800 dark:text-white">Fechar conta da mesa</h3>
+                  <p className="text-xs text-gray-500">Mesa {tableNumber} • Expira em {pixCountdown}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPixModalOpen(false)}
+                  className="text-xs font-bold text-slate-500 hover:text-slate-700"
+                >
+                  Fechar
+                </button>
+              </div>
+              <div className="flex flex-col items-center gap-4">
+                {pixQrImage ? (
+                  <img src={pixQrImage} alt="QR Code Pix" className="w-56 h-56" />
+                ) : (
+                  <div className="w-56 h-56 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400">
+                    QR Code indisponível
+                  </div>
+                )}
+                {pixQrCode && (
+                  <div className="w-full">
+                    <p className="text-xs text-slate-500 mb-2">PIX copia e cola</p>
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-3 text-xs break-all text-slate-600 dark:text-slate-200">
+                      {pixQrCode}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!pixQrCode) return;
+                        navigator.clipboard?.writeText(pixQrCode).then(() => {
+                          // no-op
+                        });
+                      }}
+                      className="mt-3 inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 text-xs font-bold text-slate-600 dark:text-slate-200 hover:border-emerald-300"
+                    >
+                      <Copy size={14} /> Copiar código PIX
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         )}
         {orders.length === 0 && (
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 p-6 text-center text-gray-500 dark:text-gray-400">
