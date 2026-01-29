@@ -30,7 +30,9 @@ import {
     PizzaFlavor,
     Address,
     DeliveryNeighborhood,
-    DeliveryZone
+    DeliveryZone,
+    TabletDevice,
+    TabletDeviceEvent
 } from '../types';
 import { formatCurrencyBRL } from '../utils/format';
 import { compressImageFile } from '../utils/image';
@@ -74,7 +76,11 @@ import {
     getPixRepasseConfig,
     updatePixRepasseConfig,
     getMerchantProductsWithStock,
-    updateProductStock
+    updateProductStock,
+    createTabletQr,
+    listTablets,
+    listTabletEvents,
+    revokeTablet
 } from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
 import { searchAddress, GEO_API_ENABLED, fetchCepData, ensureGoogleMapsLoaded } from '../utils/geo';
@@ -349,8 +355,28 @@ const SortableCategoryItem: React.FC<{
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targetStoreId, isDarkMode, toggleTheme }) => {
   const { user } = useAuth();
   const storeId = targetStoreId || user?.storeId;
+  const fallbackDashboardKey = 'admin_dashboard_state';
+  const dashboardStorageKey = storeId ? `admin_dashboard_state_${storeId}` : fallbackDashboardKey;
+  const readDashboardState = (key: string) => {
+      if (typeof window === 'undefined') return null;
+      try {
+          const raw = localStorage.getItem(key);
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+          return null;
+      }
+  };
+  const getStoredDashboardState = () => {
+      const primary = storeId ? readDashboardState(dashboardStorageKey) : null;
+      return primary || readDashboardState(fallbackDashboardKey);
+  };
 
-  const [activeSection, setActiveSection] = useState<DashboardSection>('OVERVIEW');
+  const [activeSection, setActiveSection] = useState<DashboardSection>(() => {
+      const stored = getStoredDashboardState();
+      return (stored?.activeSection as DashboardSection) || 'OVERVIEW';
+  });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -392,7 +418,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isSavingCategories, setIsSavingCategories] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY' | 'HOMOLOGATION'>('STORE');
+  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY' | 'HOMOLOGATION'>(() => {
+      const stored = getStoredDashboardState();
+      return stored?.settingsTab || 'STORE';
+  });
   const [merchantActionLoading, setMerchantActionLoading] = useState(false);
   
   // Endereço Local State (para edição)
@@ -558,11 +587,79 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       : [];
   const selectedDeliveryZone = deliveryZones.find((zone) => zone.id === selectedDeliveryZoneId) || null;
   const [isDownloadingTables, setIsDownloadingTables] = useState(false);
+  const [tabletDevices, setTabletDevices] = useState<TabletDevice[]>([]);
+  const [tabletLoading, setTabletLoading] = useState(false);
+  const [tabletError, setTabletError] = useState('');
+  const [tabletEvents, setTabletEvents] = useState<TabletDeviceEvent[]>([]);
+  const [tabletEventsLoading, setTabletEventsLoading] = useState(false);
+  const [tabletEventsError, setTabletEventsError] = useState('');
   const [downloadingTable, setDownloadingTable] = useState<number | null>(null);
+  const [downloadingTabletTable, setDownloadingTabletTable] = useState<number | null>(null);
+  const [tabletQrOpen, setTabletQrOpen] = useState(false);
+  const [tabletQrTable, setTabletQrTable] = useState<number | null>(null);
+  const [tabletQrDataUrl, setTabletQrDataUrl] = useState<string | null>(null);
+  const [tabletQrUrl, setTabletQrUrl] = useState<string | null>(null);
+  const [tabletQrExpiresAt, setTabletQrExpiresAt] = useState<string | null>(null);
+  const [tabletQrCountdown, setTabletQrCountdown] = useState('05:00');
+  const [tabletQrToken, setTabletQrToken] = useState<string | null>(null);
+  const [tabletQrSuccess, setTabletQrSuccess] = useState<string | null>(null);
   const [selectedTableKey, setSelectedTableKey] = useState<string | null>(null);
   const [selectedTablePayment, setSelectedTablePayment] = useState('');
   const [paymentOrderTarget, setPaymentOrderTarget] = useState<Order | null>(null);
   const [paymentOrderMethod, setPaymentOrderMethod] = useState('');
+  const formatTabletDate = (value?: string | null) => {
+      if (!value) return '--';
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return '--';
+      return parsed.toLocaleString('pt-BR');
+  };
+  const loadTabletDevices = useCallback(async () => {
+      if (!storeId || !storeProfile.acceptsTableOrders) return;
+      setTabletLoading(true);
+      setTabletError('');
+      try {
+          const data = await listTablets(storeId);
+          setTabletDevices(Array.isArray(data) ? data : []);
+      } catch (error) {
+          setTabletError('Nao foi possivel carregar tablets conectados.');
+      } finally {
+          setTabletLoading(false);
+      }
+  }, [storeId, storeProfile.acceptsTableOrders]);
+  const loadTabletEvents = useCallback(async () => {
+      if (!storeId || !storeProfile.acceptsTableOrders) return;
+      setTabletEventsLoading(true);
+      setTabletEventsError('');
+      try {
+          const data = await listTabletEvents(storeId);
+          setTabletEvents(Array.isArray(data) ? data : []);
+      } catch (error) {
+          setTabletEventsError('Nao foi possivel carregar logs dos tablets.');
+      } finally {
+          setTabletEventsLoading(false);
+      }
+  }, [storeId, storeProfile.acceptsTableOrders]);
+
+  useEffect(() => {
+      const stored = getStoredDashboardState();
+      if (!stored) return;
+      if (stored.activeSection) {
+          setActiveSection(stored.activeSection as DashboardSection);
+      }
+      if (stored.settingsTab) {
+          setSettingsTab(stored.settingsTab);
+      }
+  }, [dashboardStorageKey]);
+
+  useEffect(() => {
+      if (typeof window === 'undefined') return;
+      const payload = {
+          activeSection,
+          settingsTab
+      };
+      localStorage.setItem(dashboardStorageKey, JSON.stringify(payload));
+      localStorage.setItem(fallbackDashboardKey, JSON.stringify(payload));
+  }, [dashboardStorageKey, activeSection, settingsTab]);
 
   // --- INITIAL DATA LOADING ---
   useEffect(() => {
@@ -836,6 +933,74 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           cancelled = true;
       };
   }, [settingsTab, deliveryFeeMode, storeProfile.coordinates?.lat, storeProfile.coordinates?.lng]);
+
+  useEffect(() => {
+      if (settingsTab !== 'DELIVERY' || !storeProfile.acceptsTableOrders) return;
+      let active = true;
+      const run = async () => {
+          if (!active) return;
+          await Promise.all([loadTabletDevices(), loadTabletEvents()]);
+      };
+      run();
+      const interval = setInterval(run, 30000);
+      return () => {
+          active = false;
+          clearInterval(interval);
+      };
+  }, [settingsTab, storeProfile.acceptsTableOrders, loadTabletDevices, loadTabletEvents]);
+
+  useEffect(() => {
+      if (!tabletQrOpen || !tabletQrExpiresAt) return;
+      const update = () => {
+          const diff = new Date(tabletQrExpiresAt).getTime() - Date.now();
+          if (Number.isNaN(diff)) {
+              setTabletQrCountdown('--:--');
+              return;
+          }
+          if (diff <= 0) {
+              setTabletQrCountdown('00:00');
+              setTabletQrOpen(false);
+              return;
+          }
+          const minutes = Math.floor(diff / 60000);
+          const seconds = Math.floor((diff % 60000) / 1000);
+          setTabletQrCountdown(`${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`);
+      };
+      update();
+      const interval = setInterval(update, 1000);
+      return () => clearInterval(interval);
+  }, [tabletQrOpen, tabletQrExpiresAt]);
+  useEffect(() => {
+      if (!tabletQrOpen || !tabletQrToken || !storeId) return;
+      let active = true;
+      const poll = async () => {
+          try {
+              const devices = await listTablets(storeId);
+              if (!active) return;
+              setTabletDevices(Array.isArray(devices) ? devices : []);
+              const matched = devices.find((device) => device.token === tabletQrToken && device.device_id);
+              if (matched) {
+                  setTabletQrOpen(false);
+                  setTabletQrSuccess(`Tablet conectado com sucesso na Mesa ${matched.table_number || '--'}.`);
+                  return;
+              }
+          } catch {}
+          if (active) {
+              setTimeout(poll, 3000);
+          }
+      };
+      poll();
+      return () => {
+          active = false;
+      };
+  }, [tabletQrOpen, tabletQrToken, storeId]);
+  useEffect(() => {
+      if (!tabletQrSuccess) return;
+      const timer = setTimeout(() => {
+          setTabletQrSuccess(null);
+      }, 6000);
+      return () => clearTimeout(timer);
+  }, [tabletQrSuccess]);
 
   useEffect(() => {
       if (deliveryFeeMode !== 'BY_RADIUS') return;
@@ -2682,11 +2847,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const split = dataUrl.split(',');
       return split.length > 1 ? split[1] : dataUrl;
   };
-  const buildTableQrDataUrl = async (tableNumber: number) => {
+  const buildTableQrDataUrl = async (
+      tableNumber: number,
+      options?: { label?: string; url?: string }
+  ) => {
       const qrCanvas = document.createElement('canvas');
-      await QRCode.toCanvas(qrCanvas, getTableQrUrl(tableNumber), { width: 512, margin: 2 });
+      await QRCode.toCanvas(qrCanvas, options?.url || getTableQrUrl(tableNumber), { width: 512, margin: 2 });
 
-      const label = `${tableNumber}`;
+      const label = options?.label || `Mesa ${tableNumber}`;
       const fontSize = 32;
       const labelPadding = 24;
       const labelOffset = 8;
@@ -2756,6 +2924,34 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           alert('Erro ao gerar QR Code da mesa.');
       } finally {
           setDownloadingTable(null);
+      }
+  };
+  const handleShowTabletQr = async (tableNumber: number) => {
+      if (!storeId) return;
+      try {
+          setDownloadingTabletTable(tableNumber);
+          const response = await createTabletQr(storeId, tableNumber.toString());
+          const qrUrl = response?.qrUrl || '';
+          const expiresAt = response?.expiresAt || null;
+          const token = response?.token || '';
+          if (!qrUrl) {
+              throw new Error('qrUrl missing');
+          }
+          const dataUrl = await buildTableQrDataUrl(tableNumber, {
+              url: qrUrl,
+              label: `Mesa ${tableNumber} • QR TABLET`
+          });
+          setTabletQrTable(tableNumber);
+          setTabletQrDataUrl(dataUrl);
+          setTabletQrUrl(qrUrl);
+          setTabletQrExpiresAt(expiresAt);
+          setTabletQrToken(token || null);
+          setTabletQrOpen(true);
+          await loadTabletDevices();
+      } catch (e) {
+          alert('Erro ao gerar QR Code do tablet.');
+      } finally {
+          setDownloadingTabletTable(null);
       }
   };
   const handleDownloadAllTableQrs = async () => {
@@ -5503,23 +5699,248 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
                                        {Array.from({ length: Math.min(tableCountValue, 40) }, (_, index) => {
                                            const tableLabel = index + 1;
+                                           const isDownloading = downloadingTable === tableLabel;
+                                           const isDownloadingTablet = downloadingTabletTable === tableLabel;
                                            return (
-                                               <button
+                                               <div
                                                    key={tableLabel}
-                                                   onClick={() => handleDownloadTableQr(tableLabel)}
-                                                   className="flex flex-col items-center justify-center gap-1 p-2 rounded-xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 shadow-sm hover:border-red-400 transition-colors"
+                                                   className="flex flex-col items-center justify-center gap-1 p-2 rounded-xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 shadow-sm"
                                                >
-                                                   <Table size={18} className="text-slate-600 dark:text-slate-200" />
-                                                   <span className="text-[10px] font-bold text-gray-500">Mesa {tableLabel}</span>
-                                               </button>
+                                                   <button
+                                                       onClick={() => handleDownloadTableQr(tableLabel)}
+                                                       disabled={isDownloading}
+                                                       type="button"
+                                                       className="flex flex-col items-center justify-center gap-1 w-full hover:border-red-400 transition-colors"
+                                                   >
+                                                       <Table size={18} className="text-slate-600 dark:text-slate-200" />
+                                                       <span className="text-[10px] font-bold text-gray-500">Mesa {tableLabel}</span>
+                                                   </button>
+                                                   <button
+                                                       onClick={() => handleShowTabletQr(tableLabel)}
+                                                       disabled={isDownloadingTablet}
+                                                       type="button"
+                                                       className="px-2 py-1 rounded-full text-[9px] font-bold tracking-wide uppercase bg-sky-100 text-sky-700 border border-sky-200 hover:bg-sky-200 disabled:opacity-60"
+                                                   >
+                                                       {isDownloadingTablet ? 'Gerando...' : 'QR TABLET'}
+                                                   </button>
+                                               </div>
                                            );
                                        })}
                                    </div>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                                      QR TABLET expira em 5 minutos e registra o tablet conectado.
+                                  </p>
+                                  {tabletQrSuccess && (
+                                      <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-white">✓</span>
+                                          <span>{tabletQrSuccess}</span>
+                                      </div>
+                                  )}
                                    {tableCountValue > 40 && (
                                        <p className="text-xs text-gray-400">Exibindo as 40 primeiras mesas.</p>
                                    )}
+                                   <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-4 space-y-3">
+                                       <div className="flex flex-wrap items-center justify-between gap-2">
+                                           <div>
+                                               <p className="font-bold text-slate-700 dark:text-white">Tablets conectados</p>
+                                               <p className="text-xs text-gray-500 dark:text-gray-400">Atualiza automaticamente a cada 30s.</p>
+                                           </div>
+                                           <button
+                                               onClick={loadTabletDevices}
+                                               type="button"
+                                               className="text-xs font-bold px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 hover:border-red-300"
+                                           >
+                                               Atualizar
+                                           </button>
+                                       </div>
+                                       {tabletLoading && (
+                                           <div className="flex items-center gap-2 text-sm text-gray-500">
+                                               <Loader2 className="animate-spin" size={16} />
+                                               Carregando tablets...
+                                           </div>
+                                       )}
+                                       {tabletError && <p className="text-xs text-red-600">{tabletError}</p>}
+                                       {!tabletLoading && !tabletError && tabletDevices.length === 0 && (
+                                           <p className="text-xs text-gray-500">Nenhum tablet conectado ainda.</p>
+                                       )}
+                                      {!tabletLoading && tabletDevices.length > 0 && (
+                                          <div className="space-y-3">
+                                               {Object.entries(
+                                                   tabletDevices.reduce<Record<string, TabletDevice[]>>((acc, tablet) => {
+                                                       const tableKey = tablet.table_number || 'Sem mesa';
+                                                       if (!acc[tableKey]) acc[tableKey] = [];
+                                                       acc[tableKey].push(tablet);
+                                                       return acc;
+                                                   }, {})
+                                               ).map(([tableKey, devices]) => (
+                                                   <div key={tableKey} className="rounded-lg border border-gray-100 dark:border-slate-800 p-3 space-y-2">
+                                                       <div className="text-xs font-bold text-gray-500 uppercase">Mesa {tableKey}</div>
+                                                       <div className="space-y-2">
+                                                           {devices
+                                                               .filter((device) => {
+                                                                   if (device.revoked_at) return false;
+                                                                   if (!device.device_id) return false;
+                                                                   if (device.expires_at && new Date(device.expires_at).getTime() <= Date.now()) return false;
+                                                                   return true;
+                                                               })
+                                                               .map((device) => {
+                                                                   return (
+                                                                       <div
+                                                                           key={device.id}
+                                                                           className="flex flex-wrap items-center justify-between gap-2 text-xs"
+                                                                       >
+                                                                           <div className="space-y-1">
+                                                                               <div className="font-semibold text-slate-700 dark:text-slate-200">
+                                                                                   {device.device_label || device.device_id || 'Tablet'}
+                                                                               </div>
+                                                                               <div className="text-[11px] text-gray-500">
+                                                                                   Status: Ativo • Criado: {formatTabletDate(device.created_at)} • Ultimo ping:{' '}
+                                                                                   {formatTabletDate(device.last_seen)}
+                                                                               </div>
+                                                                               <div className="text-[11px] text-gray-500">
+                                                                                   Android ID: {device.device_id || '--'}
+                                                                               </div>
+                                                                               <div className="text-[11px] text-gray-500">
+                                                                                   Expira em: {formatTabletDate(device.expires_at)}
+                                                                               </div>
+                                                                           </div>
+                                                                           <button
+                                                                               onClick={() => storeId && revokeTablet(storeId, device.id).then(loadTabletDevices)}
+                                                                               disabled={!storeId}
+                                                                               type="button"
+                                                                               className="px-3 py-1 rounded-full border border-gray-200 dark:border-slate-700 text-[10px] font-bold uppercase text-red-600 hover:border-red-300 disabled:opacity-60"
+                                                                           >
+                                                                               Revogar
+                                                                           </button>
+                                                                       </div>
+                                                                   );
+                                                               })}
+                                                           {devices.filter((device) => !device.device_id && !device.revoked_at).length > 0 && (
+                                                               <div className="text-[11px] text-gray-500">
+                                                                   Tokens pendentes: {devices.filter((device) => !device.device_id && !device.revoked_at).length}
+                                                               </div>
+                                                           )}
+                                                       </div>
+                                                   </div>
+                                               ))}
+                                          </div>
+                                      )}
+                                   </div>
+                                   <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-4 space-y-3">
+                                       <div className="flex flex-wrap items-center justify-between gap-2">
+                                           <div>
+                                               <p className="font-bold text-slate-700 dark:text-white">Logs do QR Tablet</p>
+                                               <p className="text-xs text-gray-500 dark:text-gray-400">Ultimos 50 eventos.</p>
+                                           </div>
+                                           <button
+                                               onClick={loadTabletEvents}
+                                               type="button"
+                                               className="text-xs font-bold px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 hover:border-red-300"
+                                           >
+                                               Atualizar
+                                           </button>
+                                       </div>
+                                       {tabletEventsLoading && (
+                                           <div className="flex items-center gap-2 text-sm text-gray-500">
+                                               <Loader2 className="animate-spin" size={16} />
+                                               Carregando logs...
+                                           </div>
+                                       )}
+                                       {tabletEventsError && <p className="text-xs text-red-600">{tabletEventsError}</p>}
+                                       {!tabletEventsLoading && tabletEvents.length === 0 && (
+                                           <p className="text-xs text-gray-500">Nenhum evento registrado ainda.</p>
+                                       )}
+                                       {!tabletEventsLoading && tabletEvents.length > 0 && (
+                                           <div className="space-y-2 max-h-64 overflow-auto">
+                                               {tabletEvents.map((event) => (
+                                                   <div key={event.id} className="text-[11px] text-gray-600 dark:text-gray-300">
+                                                       <span className="font-semibold">{event.event_type}</span>
+                                                       {' • '}
+                                                       Mesa {event.table_number}
+                                                       {' • '}
+                                                       {formatTabletDate(event.created_at)}
+                                                       {' • '}
+                                                       Android ID: {event.device_id || '--'}
+                                                       {' • '}
+                                                       IP: {event.ip_address || '--'}
+                                                   </div>
+                                               ))}
+                                           </div>
+                                       )}
+                                   </div>
                                </div>
                            )}
+                       </div>
+                   </div>
+               )}
+
+               {tabletQrOpen && (
+                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                       <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 shadow-xl p-5 space-y-4">
+                           <div className="flex items-center justify-between">
+                               <div>
+                                   <p className="text-sm font-bold text-slate-700 dark:text-white">QR TABLET</p>
+                                   <p className="text-xs text-gray-500">Mesa {tabletQrTable}</p>
+                               </div>
+                               <button
+                                   type="button"
+                                   onClick={() => setTabletQrOpen(false)}
+                                   className="w-9 h-9 rounded-full border border-gray-200 dark:border-slate-700 flex items-center justify-center"
+                               >
+                                   <X size={16} />
+                               </button>
+                           </div>
+                           <div className="flex flex-col items-center gap-2">
+                               {tabletQrDataUrl ? (
+                                   <img
+                                       src={tabletQrDataUrl}
+                                       alt={`QR Tablet Mesa ${tabletQrTable}`}
+                                       className="w-64 h-64 rounded-xl border border-gray-200 dark:border-slate-700 bg-white"
+                                   />
+                               ) : (
+                                   <div className="w-64 h-64 rounded-xl border border-gray-200 dark:border-slate-700 flex items-center justify-center text-gray-400">
+                                       Sem QR
+                                   </div>
+                               )}
+                               {tabletQrUrl && (
+                                   <div className="w-full rounded-lg border border-gray-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-2 text-[10px] text-gray-600 break-all">
+                                       {tabletQrUrl}
+                                   </div>
+                               )}
+                               {tabletQrUrl && (
+                                   <button
+                                       type="button"
+                                       onClick={() => {
+                                           navigator.clipboard.writeText(tabletQrUrl).catch(() => {});
+                                       }}
+                                       className="text-[10px] font-bold uppercase text-sky-600"
+                                   >
+                                       Copiar link do QR
+                                   </button>
+                               )}
+                               <div className="text-sm font-bold text-slate-700 dark:text-white">
+                                   Expira em: {tabletQrCountdown}
+                               </div>
+                               <div className="text-xs text-gray-500">
+                                   O tablet deve escanear antes de expirar.
+                               </div>
+                           </div>
+                           <div className="flex items-center justify-between gap-2">
+                               <button
+                                   type="button"
+                                   onClick={() => tabletQrTable && handleShowTabletQr(tabletQrTable)}
+                                   className="flex-1 px-4 py-2 rounded-lg text-xs font-bold uppercase bg-sky-600 text-white hover:opacity-90"
+                               >
+                                   Gerar novo QR
+                               </button>
+                               <button
+                                   type="button"
+                                   onClick={() => setTabletQrOpen(false)}
+                                   className="px-4 py-2 rounded-lg text-xs font-bold uppercase border border-gray-200 dark:border-slate-700"
+                               >
+                                   Fechar
+                               </button>
+                           </div>
                        </div>
                    </div>
                )}

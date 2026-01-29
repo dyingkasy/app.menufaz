@@ -128,7 +128,7 @@ class ScannerActivity : AppCompatActivity() {
         }
         return@Thread
       }
-      val finalUrl = UrlUtils.buildClaimUrl(parsed.slug, parsed.mesa, parsed.token, deviceId, deviceLabel)
+      val finalUrl = UrlUtils.buildFinalUrl(parsed.slug, parsed.mesa, parsed.token, deviceId)
       val adminPin = StoreApi.fetchAdminPin(parsed.slug)
       val config = PdvConfig(parsed.slug, parsed.mesa, finalUrl, adminPin)
       PdvPrefs.save(this, config)
