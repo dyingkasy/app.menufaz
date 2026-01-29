@@ -385,15 +385,26 @@ const MenuFazApp: React.FC = () => {
       };
       clear();
   }, [isTabletMode]);
-  useEffect(() => {
-      if (!tabletToken) return;
-      const stored = localStorage.getItem('tablet_device_id');
-      let deviceId =
-          tabletDeviceParam ||
-          stored ||
-          (typeof crypto !== 'undefined' && 'randomUUID' in crypto
-              ? crypto.randomUUID()
-              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+  const requestTabletReset = () => {
+      try {
+          localStorage.removeItem('tablet_device_id');
+          localStorage.removeItem('tablet_mode');
+      } catch {}
+      try {
+          const bridge = (window as any).MenufazTablet;
+          if (bridge && typeof bridge.requestReset === 'function') {
+              bridge.requestReset();
+              return;
+          }
+          window.location.href = 'menufaz://reset';
+      } catch {}
+  };
+  const ensureTabletDeviceId = () => {
+      let stored = '';
+      try {
+          stored = localStorage.getItem('tablet_device_id') || '';
+      } catch {}
+      let deviceId = stored || tabletDeviceParam || '';
       try {
           const bridge = (window as any).MenufazTablet;
           if (bridge && typeof bridge.getDeviceId === 'function') {
@@ -401,21 +412,50 @@ const MenuFazApp: React.FC = () => {
               if (nativeId) deviceId = nativeId;
           }
       } catch {}
-      if (!stored || (tabletDeviceParam && stored !== tabletDeviceParam)) {
-          localStorage.setItem('tablet_device_id', deviceId);
+      if (!deviceId) {
+          deviceId =
+              typeof crypto !== 'undefined' && 'randomUUID' in crypto
+                  ? `tab-${crypto.randomUUID()}`
+                  : `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
       }
+      if (deviceId && deviceId !== stored) {
+          try {
+              localStorage.setItem('tablet_device_id', deviceId);
+          } catch {}
+      }
+      return deviceId;
+  };
+  useEffect(() => {
+      if (!tabletToken) return;
+      const deviceId = ensureTabletDeviceId();
+      if (!deviceId) return;
       const label = tableContext?.tableNumber ? `Mesa ${tableContext.tableNumber}` : 'Tablet';
+      const apiBase = (() => {
+          const base = import.meta.env.VITE_API_BASE_URL || '';
+          if (!base) return window.location.origin;
+          if (base.startsWith('http')) return base;
+          return `${window.location.origin}${base}`;
+      })();
       const ping = () => {
-          claimTabletToken(tabletToken, deviceId, label).catch(() => {});
+          claimTabletToken(tabletToken, deviceId, label)
+              .catch((error) => {
+                  if (String(error?.message || '').includes('revoked')) {
+                      requestTabletReset();
+                  }
+              });
           if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
               try {
                   const payload = JSON.stringify({ token: tabletToken, deviceId, deviceLabel: label });
-                  const base = import.meta.env.VITE_API_BASE_URL || '';
-                  const url = `${base}/tablets/claim`;
+                  const url = `${apiBase}/tablets/claim`;
                   const blob = new Blob([payload], { type: 'application/json' });
                   navigator.sendBeacon(url, blob);
               } catch {}
           }
+          try {
+              const img = new Image();
+              const url = `${apiBase}/tablets/claim?token=${encodeURIComponent(tabletToken)}&deviceId=${encodeURIComponent(deviceId)}&deviceLabel=${encodeURIComponent(label)}`;
+              img.src = url;
+          } catch {}
       };
       ping();
       const interval = setInterval(ping, 60000);

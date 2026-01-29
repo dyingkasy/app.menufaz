@@ -38,7 +38,7 @@ object PdvPrefs {
     val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val existing = prefs.getString(KEY_DEVICE_ID, null)
     if (!existing.isNullOrBlank()) return existing
-    val generated = "${System.currentTimeMillis().toString(36)}-${kotlin.random.Random.nextLong().toString(36)}"
+    val generated = "tab-${System.currentTimeMillis().toString(36)}-${kotlin.random.Random.nextLong().toString(36)}"
     prefs.edit().putString(KEY_DEVICE_ID, generated).apply()
     return generated
   }

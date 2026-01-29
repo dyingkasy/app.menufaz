@@ -40,7 +40,8 @@ const isValidUuid = (value) => {
 };
 
 const allowedOrigins = new Set([
-  'https://app.menufaz.com'
+  'https://app.menufaz.com',
+  'https://appassets.androidplatform.net'
 ]);
 
 app.use((req, res, next) => {
@@ -222,6 +223,48 @@ const ensurePaymentTables = async () => {
   await query('CREATE INDEX IF NOT EXISTS idx_order_payments_status ON order_payments(status_local)');
 };
 
+const ensureTabletTables = async () => {
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS tablet_devices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+      table_number TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      device_id TEXT,
+      device_label TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      expires_at TIMESTAMP WITH TIME ZONE,
+      last_seen TIMESTAMP WITH TIME ZONE,
+      revoked_at TIMESTAMP WITH TIME ZONE
+    )
+    `
+  );
+  await query(
+    `
+    CREATE TABLE IF NOT EXISTS tablet_device_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+      table_number TEXT NOT NULL,
+      token TEXT NOT NULL,
+      device_id TEXT,
+      device_label TEXT,
+      event_type TEXT NOT NULL,
+      user_agent TEXT,
+      ip_address TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+    `
+  );
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_devices_store_id ON tablet_devices(store_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_devices_table ON tablet_devices(store_id, table_number)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_devices_token ON tablet_devices(token)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_devices_device_id ON tablet_devices(device_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_device_events_store ON tablet_device_events(store_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_device_events_table ON tablet_device_events(store_id, table_number)');
+  await query('CREATE INDEX IF NOT EXISTS idx_tablet_device_events_token ON tablet_device_events(token)');
+};
+
 initErrorLogTable().catch((error) => {
   console.error('Failed to initialize error log table', error);
 });
@@ -238,15 +281,19 @@ ensurePaymentTables().catch((error) => {
   console.error('Failed to initialize payment tables', error);
 });
 
+ensureTabletTables().catch((error) => {
+  console.error('Failed to initialize tablet tables', error);
+});
+
 app.use((req, res, next) => {
   const startedAt = Date.now();
   res.on('finish', () => {
-    if (res.statusCode < 400) return;
+    if (res.statusCode < 500) return;
     const durationMs = Date.now() - startedAt;
     const safePath = req.originalUrl.split('?')[0];
     logError({
       source: 'server',
-      level: res.statusCode >= 500 ? 'error' : 'warning',
+      level: 'error',
       message: `${req.method} ${safePath} -> ${res.statusCode}`,
       context: {
         status: res.statusCode,
@@ -455,6 +502,14 @@ const stripSplitSurcharge = (payload) => {
   if (!payload || typeof payload !== 'object') return payload;
   const { splitSurcharge, ...rest } = payload;
   return rest;
+};
+
+const TABLET_QR_TTL_MINUTES = 5;
+const buildTabletQrUrl = ({ slug, tableNumber, token }) => {
+  const safeSlug = (slug || '').toString().trim();
+  const safeMesa = (tableNumber || '').toString().trim();
+  const safeToken = (token || '').toString().trim();
+  return `https://app.menufaz.com/${safeSlug}?mesa=${encodeURIComponent(safeMesa)}&tablet=1&tablet_token=${encodeURIComponent(safeToken)}`;
 };
 
 const extractPixResponseValue = (payload, keys) => {
@@ -1286,9 +1341,11 @@ const ensurePixPaymentForOrder = async ({ orderId, storeData, valor, forceNew = 
         Date.now() + pixRepasseTtlMinutes * 60 * 1000
       ).toISOString();
       const pixResponse = await createSolicitacaoPixRepasse({
-        empresa: storeData,
-        valor,
+        identificacaoPDV: storeData.pix_identificacao_pdv,
         timestampLimiteSolicitacao,
+        valorSolicitacao: Number(valor || 0),
+        hashIdentificadorRecebedor01: storeData.pix_hash_recebedor_01,
+        hashIdentificadorRecebedor02: storeData.pix_hash_recebedor_02,
         baseUrl: pixRepasseBaseUrl,
         tokenApiExterna: pixRepasseToken
       });
@@ -1574,14 +1631,18 @@ const resolveDeliveryNeighborhood = (storeData = {}, deliveryAddress = null) => 
 
 const resolveDeliveryZone = (storeData = {}, deliveryCoordinates = null) => {
   const zones = Array.isArray(storeData.deliveryZones) ? storeData.deliveryZones : [];
-  const activeZones = zones.filter(
-    (zone) =>
-      zone &&
-      zone.enabled !== false &&
+  const activeZones = zones.filter((zone) => {
+    if (!zone || zone.enabled === false) return false;
+    const type = zone.type || 'RADIUS';
+    if (type === 'POLYGON') {
+      return Array.isArray(zone.polygonPath) && zone.polygonPath.length >= 3;
+    }
+    return (
       Number(zone.radiusMeters || 0) > 0 &&
       Number.isFinite(Number(zone.centerLat)) &&
       Number.isFinite(Number(zone.centerLng))
-  );
+    );
+  });
 
   if (activeZones.length === 0) {
     return { error: 'Nenhuma área de entrega configurada.' };
@@ -1593,13 +1654,19 @@ const resolveDeliveryZone = (storeData = {}, deliveryCoordinates = null) => {
 
   const matches = activeZones
     .map((zone) => {
+      const type = zone.type || 'RADIUS';
+      if (type === 'POLYGON') {
+        if (!isPointInPolygon(deliveryCoordinates, zone.polygonPath)) return null;
+        return { zone, distance: 0, typeRank: 0 };
+      }
       const distance = haversineDistanceMeters(
         { lat: Number(zone.centerLat), lng: Number(zone.centerLng) },
         deliveryCoordinates
       );
-      return { zone, distance };
+      if (distance > Number(zone.radiusMeters || 0)) return null;
+      return { zone, distance, typeRank: 1 };
     })
-    .filter((item) => item.distance <= Number(item.zone.radiusMeters || 0));
+    .filter(Boolean);
 
   if (matches.length === 0) {
     return { error: 'Esta loja não entrega no seu endereço.' };
@@ -1609,6 +1676,7 @@ const resolveDeliveryZone = (storeData = {}, deliveryCoordinates = null) => {
     const priorityA = Number(a.zone.priority || 0);
     const priorityB = Number(b.zone.priority || 0);
     if (priorityA !== priorityB) return priorityB - priorityA;
+    if (a.typeRank !== b.typeRank) return a.typeRank - b.typeRank;
     const radiusA = Number(a.zone.radiusMeters || 0);
     const radiusB = Number(b.zone.radiusMeters || 0);
     if (radiusA !== radiusB) return radiusA - radiusB;
@@ -2041,6 +2109,236 @@ app.get('/api/stores/:id', async (req, res) => {
   const store = mapStoreRowWithStatus(rows[0], getZonedNow());
   if (!store) return res.status(404).json({ error: 'not found' });
   res.json(store);
+});
+
+app.post('/api/tablets/qr', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.body?.storeId || req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  const tableNumber = (req.body?.tableNumber || '').toString().trim();
+  if (!tableNumber) return res.status(400).json({ error: 'tableNumber required' });
+
+  const { rows } = await query('SELECT id, data FROM stores WHERE id = $1', [storeId]);
+  if (rows.length === 0) return res.status(404).json({ error: 'store not found' });
+  const storeData = rows[0].data || {};
+  const custom = (storeData.customUrl || '').toString().trim();
+  const name = (storeData.name || '').toString().trim();
+  const slug = custom || name || storeId;
+
+  const token = crypto.randomBytes(18).toString('hex');
+  const expiresAt = new Date(Date.now() + TABLET_QR_TTL_MINUTES * 60 * 1000).toISOString();
+  await query(
+    `
+    UPDATE tablet_devices
+    SET revoked_at = NOW()
+    WHERE store_id = $1
+      AND table_number = $2
+      AND device_id IS NULL
+      AND revoked_at IS NULL
+    `,
+    [storeId, tableNumber]
+  );
+  await query(
+    `
+    INSERT INTO tablet_devices (store_id, table_number, token, expires_at)
+    VALUES ($1, $2, $3, $4)
+    `,
+    [storeId, tableNumber, token, expiresAt]
+  );
+  await query(
+    `
+    INSERT INTO tablet_device_events (store_id, table_number, token, event_type, user_agent, ip_address)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    `,
+    [
+      storeId,
+      tableNumber,
+      token,
+      'qr_created',
+      (req.headers['user-agent'] || '').toString().slice(0, 300),
+      (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+    ]
+  );
+
+  return res.json({
+    token,
+    tableNumber,
+    expiresAt,
+    qrUrl: buildTabletQrUrl({ slug, tableNumber, token })
+  });
+});
+
+const handleTabletClaim = async (req, res) => {
+  const token = (req.body?.token || req.query?.token || '').toString().trim();
+  const deviceId = (req.body?.deviceId || req.query?.deviceId || '').toString().trim();
+  const deviceLabel = (req.body?.deviceLabel || req.query?.deviceLabel || '').toString().trim();
+  if (!token) return res.status(400).json({ error: 'token required' });
+  if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
+
+  const { rows } = await query('SELECT * FROM tablet_devices WHERE token = $1', [token]);
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const row = rows[0];
+  if (row.revoked_at) {
+    await query(
+      `
+      INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        row.store_id,
+        row.table_number,
+        token,
+        deviceId || null,
+        deviceLabel || null,
+        'claim_failed_revoked',
+        (req.headers['user-agent'] || '').toString().slice(0, 300),
+        (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+      ]
+    );
+    return res.status(403).json({ error: 'revoked', action: 'reset' });
+  }
+
+  const now = new Date();
+  const expired = row.expires_at && new Date(row.expires_at).getTime() <= now.getTime();
+  if (expired && row.device_id && deviceId && row.device_id !== deviceId) {
+    await query(
+      `
+      INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        row.store_id,
+        row.table_number,
+        token,
+        deviceId || null,
+        deviceLabel || null,
+        'claim_failed_expired',
+        (req.headers['user-agent'] || '').toString().slice(0, 300),
+        (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+      ]
+    );
+    return res.status(403).json({ error: 'expired' });
+  }
+  if (expired && !row.device_id) {
+    await query(
+      `
+      INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        row.store_id,
+        row.table_number,
+        token,
+        deviceId || null,
+        deviceLabel || null,
+        'claim_failed_expired',
+        (req.headers['user-agent'] || '').toString().slice(0, 300),
+        (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+      ]
+    );
+    return res.status(403).json({ error: 'expired' });
+  }
+
+  const nextDeviceId = row.device_id || deviceId || null;
+  const nextDeviceLabel = deviceLabel || row.device_label || null;
+
+  await query(
+    `
+    UPDATE tablet_devices
+    SET device_id = $1,
+        device_label = $2,
+        last_seen = NOW(),
+        expires_at = NULL
+    WHERE token = $3
+    `,
+    [nextDeviceId, nextDeviceLabel, token]
+  );
+  await query(
+    `
+    INSERT INTO tablet_device_events (store_id, table_number, token, device_id, device_label, event_type, user_agent, ip_address)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `,
+    [
+      row.store_id,
+      row.table_number,
+      token,
+      nextDeviceId,
+      nextDeviceLabel,
+      'claimed',
+      (req.headers['user-agent'] || '').toString().slice(0, 300),
+      (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().slice(0, 120)
+    ]
+  );
+
+  res.json({
+    ok: true,
+    storeId: row.store_id,
+    tableNumber: row.table_number,
+    expiresAt: row.expires_at
+  });
+};
+
+app.post('/api/tablets/claim', handleTabletClaim);
+app.get('/api/tablets/claim', handleTabletClaim);
+
+app.get('/api/tablets', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+
+  const { rows } = await query(
+    `
+    SELECT id, table_number, token, device_id, device_label, created_at, expires_at, last_seen, revoked_at
+    FROM tablet_devices
+    WHERE store_id = $1
+    ORDER BY created_at DESC
+    `,
+    [storeId]
+  );
+  res.json(rows);
+});
+
+app.get('/api/tablets/events', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+
+  const { rows } = await query(
+    `
+    SELECT id, table_number, token, device_id, device_label, event_type, user_agent, ip_address, created_at
+    FROM tablet_device_events
+    WHERE store_id = $1
+    ORDER BY created_at DESC
+    LIMIT 50
+    `,
+    [storeId]
+  );
+  res.json(rows);
+});
+
+app.post('/api/tablets/revoke', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.body?.storeId || req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+  const tabletId = (req.body?.tabletId || '').toString().trim();
+  if (!tabletId) return res.status(400).json({ error: 'tabletId required' });
+
+  const { rowCount } = await query(
+    `
+    UPDATE tablet_devices
+    SET revoked_at = NOW()
+    WHERE id = $1
+      AND store_id = $2
+      AND revoked_at IS NULL
+    `,
+    [tabletId, storeId]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
 });
 
 app.get('/api/empresa/pagamentos/pix-repasse', async (req, res) => {
@@ -3441,6 +3739,24 @@ const haversineDistanceMeters = (coord1, coord2) => {
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+};
+
+const isPointInPolygon = (point, polygon = []) => {
+  if (!isValidCoords(point) || !Array.isArray(polygon) || polygon.length < 3) return false;
+  const x = Number(point.lng);
+  const y = Number(point.lat);
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = Number(polygon[i].lng);
+    const yi = Number(polygon[i].lat);
+    const xj = Number(polygon[j].lng);
+    const yj = Number(polygon[j].lat);
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi + Number.EPSILON) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
 };
 
 const isFallbackCoords = (coords) =>

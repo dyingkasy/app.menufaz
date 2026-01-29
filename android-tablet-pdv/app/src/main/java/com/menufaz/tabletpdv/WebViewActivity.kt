@@ -179,9 +179,7 @@ class WebViewActivity : AppCompatActivity() {
   }
 
   private fun getTabletDeviceId(): String {
-    return Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
-      ?.takeIf { it.isNotBlank() }
-      ?: PdvPrefs.getOrCreateDeviceId(this)
+    return PdvPrefs.getOrCreateDeviceId(this)
   }
 
   private fun buildDeviceLabel(mesa: String): String {
