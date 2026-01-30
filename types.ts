@@ -101,6 +101,7 @@ export interface Store {
   coordinates: Coordinates;
   phone?: string;
   whatsapp?: string;
+  whatsappOrderRequired?: boolean;
   email?: string;
   cep?: string;
   street?: string;

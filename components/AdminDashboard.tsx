@@ -433,7 +433,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       complement: '',
       cnpj: '',
       phone: '',
-      email: ''
+      email: '',
+      whatsappOrderRequired: false
   });
   
   // Payment Methods State
@@ -704,7 +705,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           complement: extendedData.complement || '',
                           cnpj: extendedData.cnpj || '',
                           phone: extendedData.phone || '',
-                          email: extendedData.email || ''
+                          email: extendedData.email || '',
+                          whatsappOrderRequired: Boolean(extendedData.whatsappOrderRequired)
                       });
                       
                       if (extendedData.paymentMethods) {
@@ -5217,6 +5219,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Número</label><input type="text" value={addressForm.number} onChange={(e) => setAddressForm({...addressForm, number: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Bairro</label><input type="text" value={addressForm.district} onChange={(e) => setAddressForm({...addressForm, district: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Telefone / WhatsApp</label><input type="text" value={addressForm.phone} onChange={(e) => setAddressForm({...addressForm, phone: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
+                       <div className="md:col-span-2">
+                           <label className="flex items-center gap-3 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                               <input
+                                   type="checkbox"
+                                   checked={addressForm.whatsappOrderRequired}
+                                   onChange={(e) => setAddressForm({ ...addressForm, whatsappOrderRequired: e.target.checked })}
+                                   className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                               />
+                               Obrigar envio do pedido via WhatsApp
+                           </label>
+                           <p className="text-xs text-gray-500 mt-1">
+                               Ao finalizar o pedido, o WhatsApp da loja será aberto automaticamente com os dados completos do pedido.
+                           </p>
+                       </div>
                    </div>
                )}
 

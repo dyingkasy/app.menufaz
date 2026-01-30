@@ -76,6 +76,54 @@ const Checkout: React.FC<CheckoutProps> = ({
   tableContext,
   isTabletMode = false
 }) => {
+  const normalizeWhatsappNumber = (raw: string) => {
+      const digits = (raw || '').replace(/\D/g, '');
+      if (!digits) return '';
+      if (digits.startsWith('55')) return digits;
+      if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+      return digits;
+  };
+
+  const buildWhatsappMessage = ({
+      orderNumber,
+      itemsText,
+      totalText,
+      deliveryFeeText,
+      paymentText,
+      orderTypeLabel,
+      addressText,
+      tableText,
+      customerNameText,
+      customerPhoneText
+  }: {
+      orderNumber: string;
+      itemsText: string;
+      totalText: string;
+      deliveryFeeText?: string;
+      paymentText: string;
+      orderTypeLabel: string;
+      addressText?: string;
+      tableText?: string;
+      customerNameText: string;
+      customerPhoneText?: string;
+  }) => {
+      const lines = [
+          `Pedido #${orderNumber}`,
+          `Cliente: ${customerNameText || 'Cliente'}`,
+          customerPhoneText ? `Telefone: ${customerPhoneText}` : null,
+          `Tipo: ${orderTypeLabel}`,
+          tableText ? `Mesa: ${tableText}` : null,
+          addressText ? `Endereco: ${addressText}` : null,
+          '',
+          'Itens:',
+          itemsText,
+          '',
+          deliveryFeeText ? `Taxa: ${deliveryFeeText}` : null,
+          `Total: ${totalText}`,
+          `Pagamento: ${paymentText}`
+      ].filter(Boolean);
+      return lines.join('\n');
+  };
   const { user } = useAuth();
   const storePaymentMethods = Array.isArray(store.paymentMethods) ? store.paymentMethods : [];
   const pixOnlineEnabled =
@@ -605,6 +653,14 @@ const Checkout: React.FC<CheckoutProps> = ({
             pizza: item.pizza
         }));
 
+        const storePhoneRaw = store.whatsapp || store.phone || '';
+        const whatsappNumber = normalizeWhatsappNumber(storePhoneRaw);
+        if (store.whatsappOrderRequired && !whatsappNumber) {
+            alert('Esta loja exige envio pelo WhatsApp, mas não possui número configurado.');
+            setIsProcessing(false);
+            return;
+        }
+
         const createdOrder = await createOrder({
             storeId: store.id,
             storeName: store.name,
@@ -675,6 +731,33 @@ const Checkout: React.FC<CheckoutProps> = ({
         }
         if (createdOrder?.id) {
             localStorage.setItem('lastOrderId', createdOrder.id);
+        }
+
+        if (store.whatsappOrderRequired && whatsappNumber) {
+            const orderNumberValue =
+                createdOrder?.orderNumber ||
+                (createdOrder?.id ? createdOrder.id.slice(0, 5) : '');
+            const orderTypeLabel =
+                orderType === 'DELIVERY' ? 'Entrega' : orderType === 'PICKUP' ? 'Retirada' : 'Mesa';
+            const addressText =
+                orderType === 'DELIVERY' && address
+                    ? `${address.street}, ${address.number} - ${address.district || ''} ${address.city || ''}`.trim()
+                    : '';
+            const itemsText = itemsDescription.join('\n');
+            const message = buildWhatsappMessage({
+                orderNumber: String(orderNumberValue || '--'),
+                itemsText: itemsText || '-',
+                totalText: formatCurrencyBRL(total),
+                deliveryFeeText: orderType === 'DELIVERY' ? formatCurrencyBRL(deliveryFee) : '',
+                paymentText: paymentDescription,
+                orderTypeLabel,
+                addressText: addressText || undefined,
+                tableText: orderType === 'TABLE' ? tableValue : undefined,
+                customerNameText: customerName.trim(),
+                customerPhoneText: phoneDigits || undefined
+            });
+            const waUrl = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`;
+            window.open(waUrl, '_blank');
         }
 
         if (createdOrder?.payment?.provider === 'PIX_REPASSE' && createdOrder?.id && onPixPayment) {
