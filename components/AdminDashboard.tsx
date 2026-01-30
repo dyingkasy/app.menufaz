@@ -31,8 +31,7 @@ import {
     Address,
     DeliveryNeighborhood,
     DeliveryZone,
-    TabletDevice,
-    TabletDeviceEvent
+    TabletDevice
 } from '../types';
 import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 import { compressImageFile } from '../utils/image';
@@ -79,7 +78,6 @@ import {
     updateProductStock,
     createTabletQr,
     listTablets,
-    listTabletEvents,
     revokeTablet
 } from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
@@ -590,9 +588,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [tabletDevices, setTabletDevices] = useState<TabletDevice[]>([]);
   const [tabletLoading, setTabletLoading] = useState(false);
   const [tabletError, setTabletError] = useState('');
-  const [tabletEvents, setTabletEvents] = useState<TabletDeviceEvent[]>([]);
-  const [tabletEventsLoading, setTabletEventsLoading] = useState(false);
-  const [tabletEventsError, setTabletEventsError] = useState('');
   const [downloadingTable, setDownloadingTable] = useState<number | null>(null);
   const [downloadingTabletTable, setDownloadingTabletTable] = useState<number | null>(null);
   const [tabletQrOpen, setTabletQrOpen] = useState(false);
@@ -624,19 +619,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           setTabletError('Nao foi possivel carregar tablets conectados.');
       } finally {
           setTabletLoading(false);
-      }
-  }, [storeId, storeProfile.acceptsTableOrders]);
-  const loadTabletEvents = useCallback(async () => {
-      if (!storeId || !storeProfile.acceptsTableOrders) return;
-      setTabletEventsLoading(true);
-      setTabletEventsError('');
-      try {
-          const data = await listTabletEvents(storeId);
-          setTabletEvents(Array.isArray(data) ? data : []);
-      } catch (error) {
-          setTabletEventsError('Nao foi possivel carregar logs dos tablets.');
-      } finally {
-          setTabletEventsLoading(false);
       }
   }, [storeId, storeProfile.acceptsTableOrders]);
 
@@ -939,7 +921,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       let active = true;
       const run = async () => {
           if (!active) return;
-          await Promise.all([loadTabletDevices(), loadTabletEvents()]);
+          await loadTabletDevices();
       };
       run();
       const interval = setInterval(run, 30000);
@@ -947,7 +929,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           active = false;
           clearInterval(interval);
       };
-  }, [settingsTab, storeProfile.acceptsTableOrders, loadTabletDevices, loadTabletEvents]);
+  }, [settingsTab, storeProfile.acceptsTableOrders, loadTabletDevices]);
 
   useEffect(() => {
       if (!tabletQrOpen || !tabletQrExpiresAt) return;
@@ -5826,48 +5808,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           </div>
                                       )}
                                    </div>
-                                   <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-4 space-y-3">
-                                       <div className="flex flex-wrap items-center justify-between gap-2">
-                                           <div>
-                                               <p className="font-bold text-slate-700 dark:text-white">Logs do QR Tablet</p>
-                                               <p className="text-xs text-gray-500 dark:text-gray-400">Ultimos 50 eventos.</p>
-                                           </div>
-                                           <button
-                                               onClick={loadTabletEvents}
-                                               type="button"
-                                               className="text-xs font-bold px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 hover:border-red-300"
-                                           >
-                                               Atualizar
-                                           </button>
-                                       </div>
-                                       {tabletEventsLoading && (
-                                           <div className="flex items-center gap-2 text-sm text-gray-500">
-                                               <Loader2 className="animate-spin" size={16} />
-                                               Carregando logs...
-                                           </div>
-                                       )}
-                                       {tabletEventsError && <p className="text-xs text-red-600">{tabletEventsError}</p>}
-                                       {!tabletEventsLoading && tabletEvents.length === 0 && (
-                                           <p className="text-xs text-gray-500">Nenhum evento registrado ainda.</p>
-                                       )}
-                                       {!tabletEventsLoading && tabletEvents.length > 0 && (
-                                           <div className="space-y-2 max-h-64 overflow-auto">
-                                               {tabletEvents.map((event) => (
-                                                   <div key={event.id} className="text-[11px] text-gray-600 dark:text-gray-300">
-                                                       <span className="font-semibold">{event.event_type}</span>
-                                                       {' • '}
-                                                       Mesa {event.table_number}
-                                                       {' • '}
-                                                       {formatTabletDate(event.created_at)}
-                                                       {' • '}
-                                                       Android ID: {event.device_id || '--'}
-                                                       {' • '}
-                                                       IP: {event.ip_address || '--'}
-                                                   </div>
-                                               ))}
-                                           </div>
-                                       )}
-                                   </div>
+                                   {/* Logs do QR Tablet removidos */}
                                </div>
                            )}
                        </div>
