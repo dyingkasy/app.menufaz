@@ -629,13 +629,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
       // Soft bell-like double chime
       gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.42, now + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
       hit(784, 0, 0.6);
       hit(988, 0.05, 0.5);
 
       gain.gain.setValueAtTime(0.0001, now + 1.3);
-      gain.gain.exponentialRampToValueAtTime(0.12, now + 1.32);
+      gain.gain.exponentialRampToValueAtTime(0.36, now + 1.32);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
       hit(659, 1.3, 0.6);
       hit(784, 1.35, 0.5);
