@@ -5409,6 +5409,64 @@ app.get('/api/orders', async (req, res) => {
   res.json(parseOrderRows(rows));
 });
 
+// --- Customers ---
+app.get('/api/customers', requireAuth, async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+  const storeId = await getStoreIdFromAuth(authPayload, String(req.query?.storeId || ''));
+  if (!storeId) return res.status(400).json({ error: 'storeId required' });
+
+  const { rows } = await query(
+    `
+    WITH customer_orders AS (
+      SELECT
+        c.id,
+        c.name,
+        c.phone,
+        c.street,
+        c.number,
+        c.district,
+        c.city,
+        c.state,
+        c.complement,
+        c.created_at,
+        c.updated_at,
+        COUNT(o.id)::int AS order_count,
+        COALESCE(SUM((o.data->>'total')::numeric), 0) AS total_spent,
+        MAX(o.created_at) AS last_order_at
+      FROM customers c
+      JOIN orders o ON o.data->>'customerId' = c.id::text
+      WHERE o.store_id = $1
+      GROUP BY c.id
+    ),
+    latest_orders AS (
+      SELECT DISTINCT ON (o.data->>'customerId')
+        o.data->>'customerId' AS customer_id,
+        o.id AS order_id,
+        o.order_number,
+        o.status,
+        o.created_at,
+        o.data
+      FROM orders o
+      WHERE o.store_id = $1 AND o.data->>'customerId' IS NOT NULL
+      ORDER BY o.data->>'customerId', o.created_at DESC
+    )
+    SELECT
+      co.*,
+      lo.order_id,
+      lo.order_number,
+      lo.status AS last_order_status,
+      lo.created_at AS last_order_created_at,
+      COALESCE((lo.data->>'total')::numeric, 0) AS last_order_total
+    FROM customer_orders co
+    LEFT JOIN latest_orders lo ON lo.customer_id = co.id::text
+    ORDER BY co.last_order_at DESC
+    `,
+    [storeId]
+  );
+  res.json(rows);
+});
+
 app.post('/api/orders', async (req, res) => {
   const payload = req.body || {};
   let status = payload.status || 'PENDING';

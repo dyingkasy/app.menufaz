@@ -152,6 +152,33 @@ export const updateStoreAutoOpen = async (storeId: string, enabled: boolean) => 
   });
 };
 
+export interface CustomerSummary {
+  id: string;
+  name?: string;
+  phone?: string;
+  street?: string;
+  number?: string;
+  district?: string;
+  city?: string;
+  state?: string;
+  complement?: string;
+  created_at?: string;
+  updated_at?: string;
+  order_count?: number;
+  total_spent?: number;
+  last_order_at?: string;
+  order_id?: string;
+  order_number?: number;
+  last_order_status?: string;
+  last_order_created_at?: string;
+  last_order_total?: number;
+}
+
+export const listCustomers = async (storeId: string): Promise<CustomerSummary[]> => {
+  ensureApi();
+  return apiFetch<CustomerSummary[]>(`/customers?storeId=${encodeURIComponent(storeId)}`);
+};
+
 export const getPixRepasseConfig = async (storeId?: string) => {
   ensureApi();
   const token = getAuthToken();

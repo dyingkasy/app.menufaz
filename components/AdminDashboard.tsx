@@ -31,7 +31,8 @@ import {
     Address,
     DeliveryNeighborhood,
     DeliveryZone,
-    TabletDevice
+    TabletDevice,
+    Customer
 } from '../types';
 import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 import { compressImageFile } from '../utils/image';
@@ -78,7 +79,8 @@ import {
     updateProductStock,
     createTabletQr,
     listTablets,
-    revokeTablet
+    revokeTablet,
+    listCustomers
 } from '../services/db';
 import { DEFAULT_PAYMENT_METHODS } from '../constants';
 import { searchAddress, GEO_API_ENABLED, fetchCepData, ensureGoogleMapsLoaded } from '../utils/geo';
@@ -581,6 +583,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               return (item.name || '').toLowerCase().includes(search);
           });
   }, [deliveryNeighborhoodSearch, deliveryNeighborhoods]);
+  const filteredCustomers = useMemo(() => {
+      const term = customerSearch.trim().toLowerCase();
+      if (!term) return customers;
+      return customers.filter((customer) => {
+          const name = (customer.name || '').toLowerCase();
+          const phone = (customer.phone || '').toLowerCase();
+          const city = (customer.city || '').toLowerCase();
+          const district = (customer.district || '').toLowerCase();
+          const street = (customer.street || '').toLowerCase();
+          return [name, phone, city, district, street].some((value) => value.includes(term));
+      });
+  }, [customers, customerSearch]);
   const deliveryZones = Array.isArray(storeProfile.deliveryZones)
       ? (storeProfile.deliveryZones as DeliveryZone[])
       : [];
@@ -603,6 +617,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [selectedTablePayment, setSelectedTablePayment] = useState('');
   const [paymentOrderTarget, setPaymentOrderTarget] = useState<Order | null>(null);
   const [paymentOrderMethod, setPaymentOrderMethod] = useState('');
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersLoading, setCustomersLoading] = useState(false);
+  const [customersError, setCustomersError] = useState('');
+  const [customerSearch, setCustomerSearch] = useState('');
   const formatTabletDate = (value?: string | null) => {
       if (!value) return '--';
       const parsed = new Date(value);
@@ -622,6 +640,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           setTabletLoading(false);
       }
   }, [storeId, storeProfile.acceptsTableOrders]);
+
+  const loadCustomers = useCallback(async () => {
+      if (!storeId) return;
+      setCustomersLoading(true);
+      setCustomersError('');
+      try {
+          const data = await listCustomers(storeId);
+          setCustomers(Array.isArray(data) ? data : []);
+      } catch (error) {
+          setCustomersError('Nao foi possivel carregar clientes.');
+      } finally {
+          setCustomersLoading(false);
+      }
+  }, [storeId]);
 
   useEffect(() => {
       const stored = getStoredDashboardState();
@@ -780,6 +812,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           };
       }
   }, [storeId]);
+
+  useEffect(() => {
+      if (activeSection !== 'CUSTOMERS') return;
+      loadCustomers();
+  }, [activeSection, loadCustomers]);
 
   const loadStockProducts = useCallback(async () => {
       if (!storeId) return;
@@ -4703,6 +4740,128 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       </div>
   );
 
+  const renderCustomers = () => {
+      const totalCustomers = customers.length;
+      const totalOrders = customers.reduce((acc, item) => acc + (Number(item.order_count) || 0), 0);
+      const totalSpent = customers.reduce((acc, item) => acc + (Number(item.total_spent) || 0), 0);
+      const avgTicket = totalOrders > 0 ? totalSpent / totalOrders : 0;
+      const formatAddress = (customer: Customer) => {
+          const parts = [
+              customer.street,
+              customer.number,
+              customer.district,
+              customer.city,
+              customer.state
+          ]
+              .map((value) => (value || '').toString().trim())
+              .filter(Boolean);
+          return parts.join(', ');
+      };
+      return (
+          <div className="animate-fade-in space-y-6">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-br from-white via-white to-emerald-50/70 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 p-6 md:p-8 shadow-sm">
+                  <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-emerald-200/40 blur-3xl dark:bg-emerald-900/20" />
+                  <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-teal-200/30 blur-3xl dark:bg-teal-900/20" />
+                  <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                      <div>
+                          <span className="text-xs font-bold tracking-[0.2em] text-emerald-600 uppercase">Clientes</span>
+                          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 dark:text-white mt-2">Sua base de clientes em um lugar</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xl">
+                              Veja quem compra mais, últimos pedidos e principais endereços para fidelização.
+                          </p>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-3">
+                          <div className="bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-2xl px-4 py-3">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Clientes</p>
+                              <p className="text-2xl font-extrabold text-slate-800 dark:text-white">{totalCustomers}</p>
+                          </div>
+                          <div className="bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-2xl px-4 py-3">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Pedidos</p>
+                              <p className="text-2xl font-extrabold text-slate-800 dark:text-white">{totalOrders}</p>
+                          </div>
+                          <div className="bg-white/80 dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-800 rounded-2xl px-4 py-3">
+                              <p className="text-xs text-slate-500 uppercase font-bold">Ticket Médio</p>
+                              <p className="text-2xl font-extrabold text-slate-800 dark:text-white">{formatCurrencyBRL(avgTicket)}</p>
+                          </div>
+                      </div>
+                  </div>
+                  <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                      <div className="flex-1 relative">
+                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                          <input
+                              type="text"
+                              value={customerSearch}
+                              onChange={(e) => setCustomerSearch(e.target.value)}
+                              placeholder="Buscar por nome, telefone ou bairro"
+                              className="w-full pl-11 pr-4 py-3 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 dark:text-white"
+                          />
+                      </div>
+                      <button
+                          onClick={loadCustomers}
+                          className="px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-200 font-bold hover:bg-slate-50 dark:hover:bg-slate-800"
+                      >
+                          Atualizar
+                      </button>
+                  </div>
+              </div>
+
+              {customersLoading && (
+                  <div className="flex items-center gap-2 text-sm text-slate-500">
+                      <Loader2 size={16} className="animate-spin" />
+                      Carregando clientes...
+                  </div>
+              )}
+              {customersError && <p className="text-sm text-red-600">{customersError}</p>}
+              {!customersLoading && filteredCustomers.length === 0 && (
+                  <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 text-center text-slate-500 dark:text-slate-400">
+                      Nenhum cliente encontrado para esta loja ainda.
+                  </div>
+              )}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {filteredCustomers.map((customer) => {
+                      const address = formatAddress(customer);
+                      return (
+                          <div key={customer.id} className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
+                              <div className="flex items-start justify-between gap-4">
+                                  <div>
+                                      <h3 className="text-lg font-extrabold text-slate-800 dark:text-white">{customer.name || 'Cliente'}</h3>
+                                      <p className="text-sm text-slate-500">{customer.phone || 'Telefone não informado'}</p>
+                                      {address && <p className="text-xs text-slate-400 mt-1">{address}</p>}
+                                  </div>
+                                  <div className="text-right">
+                                      <p className="text-xs text-slate-400 uppercase font-bold">Total gasto</p>
+                                      <p className="text-lg font-extrabold text-emerald-600">{formatCurrencyBRL(Number(customer.total_spent) || 0)}</p>
+                                      <p className="text-xs text-slate-500 mt-1">{Number(customer.order_count) || 0} pedidos</p>
+                                  </div>
+                              </div>
+                              <div className="mt-4 grid grid-cols-2 gap-3">
+                                  <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3">
+                                      <p className="text-[10px] text-slate-400 uppercase font-bold">Último pedido</p>
+                                      <p className="text-sm font-bold text-slate-800 dark:text-white">
+                                          #{customer.order_number || '--'}
+                                      </p>
+                                      <p className="text-xs text-slate-500">
+                                          {customer.last_order_created_at ? new Date(customer.last_order_created_at).toLocaleString('pt-BR') : '--'}
+                                      </p>
+                                  </div>
+                                  <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3">
+                                      <p className="text-[10px] text-slate-400 uppercase font-bold">Status</p>
+                                      <p className="text-sm font-bold text-slate-800 dark:text-white">
+                                          {customer.last_order_status || '--'}
+                                      </p>
+                                      <p className="text-xs text-slate-500">
+                                          Último valor {formatCurrencyBRL(Number(customer.last_order_total) || 0)}
+                                      </p>
+                                  </div>
+                              </div>
+                          </div>
+                      );
+                  })}
+              </div>
+          </div>
+      );
+  };
+
   const renderFinance = () => {
       // Dados calculados no hook useMemo (financialSummary)
       const { totalRevenue, totalExpenses, netProfit, orderSales, manualIncome } = financialSummary;
@@ -6406,6 +6565,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                     { id: 'BUILDABLE_PRODUCTS', icon: Layers, label: 'Cadastro Produto Montável' },
                     { id: 'COUPONS', icon: Ticket, label: 'Cupons' },
                     { id: 'COURIERS', icon: Bike, label: 'Entregadores' },
+                    { id: 'CUSTOMERS', icon: Users, label: 'Clientes' },
                     { id: 'SETTINGS', icon: Settings, label: 'Configurações' }
                 ].map((item) => (
                     <button 
@@ -6447,6 +6607,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        activeSection === 'BUILDABLE_PRODUCTS' ? 'Cadastro de Produto Montável' :
                        activeSection === 'COUPONS' ? 'Cupons' :
                        activeSection === 'COURIERS' ? 'Frota de Entregas' :
+                       activeSection === 'CUSTOMERS' ? 'Clientes' :
                        activeSection === 'FINANCE' ? 'Financeiro' :
                        activeSection === 'EXPENSES' ? 'Retirada / Entrada' :
                        activeSection === 'STOCK' ? 'Estoque' :
@@ -6511,6 +6672,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               {activeSection === 'ORDERS' && renderOrders()}
               {activeSection === 'COUPONS' && renderCoupons()}
               {activeSection === 'COURIERS' && renderCouriers()}
+              {activeSection === 'CUSTOMERS' && renderCustomers()}
               {activeSection === 'FINANCE' && renderFinance()}
               {activeSection === 'EXPENSES' && renderExpenses()}
               {activeSection === 'SALES' && renderSales()}
