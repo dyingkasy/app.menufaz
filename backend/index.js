@@ -1752,6 +1752,16 @@ const resolveDeliveryZone = (storeData = {}, deliveryCoordinates = null) => {
   }
 
   matches.sort((a, b) => {
+    if (a.typeRank === 1 && b.typeRank === 1) {
+      const radiusA = Number(a.zone.radiusMeters || 0);
+      const radiusB = Number(b.zone.radiusMeters || 0);
+      if (radiusA !== radiusB) return radiusA - radiusB;
+      const distance = a.distance - b.distance;
+      if (distance !== 0) return distance;
+      const priorityA = Number(a.zone.priority || 0);
+      const priorityB = Number(b.zone.priority || 0);
+      return priorityB - priorityA;
+    }
     const priorityA = Number(a.zone.priority || 0);
     const priorityB = Number(b.zone.priority || 0);
     if (priorityA !== priorityB) return priorityB - priorityA;
