@@ -5,7 +5,7 @@ import { Order, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { getOpenOrdersForCity, acceptOrder, getCourierActiveOrders, updateCourierLocation, getCourierHistory, updateCourierCity, updateOrderCourierStage } from '../services/db';
 import { calculateDistance, GEO_API_ENABLED } from '../utils/geo';
-import { formatCurrencyBRL } from '../utils/format';
+import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 
 interface CourierDashboardProps {
     onLogout: () => void;
@@ -267,7 +267,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                                     <div key={order.id} className="bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 relative overflow-hidden">
                                         <div className="flex justify-between items-start mb-3">
                                             <div>
-                                                <h3 className="font-bold text-slate-800 dark:text-white">Pedido #{order.id.slice(0,4)}</h3>
+                                                <h3 className="font-bold text-slate-800 dark:text-white">Pedido #{formatOrderNumber(order)}</h3>
                                                 <p className="text-sm text-gray-500">{order.storeCity} • {distance} km da loja</p>
                                             </div>
                                             <div className="text-right">
@@ -321,7 +321,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                                 <div key={order.id} className="bg-white dark:bg-slate-900 p-5 rounded-2xl shadow-md border-l-4 border-green-500">
                                     <div className="flex justify-between items-start mb-2">
                                         <span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">EM ANDAMENTO</span>
-                                        <span className="font-mono text-xs text-gray-400">#{order.id.slice(0,4)}</span>
+                                        <span className="font-mono text-xs text-gray-400">#{formatOrderNumber(order)}</span>
                                     </div>
                                     <h3 className="font-bold text-lg text-slate-800 dark:text-white mb-2">{order.customerName}</h3>
                                     <div className="text-sm text-gray-500 space-y-2 mb-4">
@@ -385,7 +385,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                              {historyOrders.slice(0, 5).map(order => (
                                  <div key={order.id} className="p-4 flex justify-between items-center">
                                      <div>
-                                         <p className="font-bold text-slate-800 dark:text-white text-sm">Entrega #{order.id.slice(0,4)}</p>
+                                         <p className="font-bold text-slate-800 dark:text-white text-sm">Entrega #{formatOrderNumber(order)}</p>
                                          <p className="text-xs text-gray-400">{new Date(order.createdAt!).toLocaleDateString()}</p>
                                      </div>
                                      <span className="text-green-600 font-bold text-sm">+ R$ 5.00</span>
@@ -413,7 +413,7 @@ const CourierDashboard: React.FC<CourierDashboardProps> = ({ onLogout }) => {
                             </div>
                             <div className="flex items-center gap-4">
                                 <div className="w-14 h-14 rounded-2xl bg-red-600 text-white flex items-center justify-center font-bold text-xl">
-                                    {user?.name?.charAt(0) || 'M'}
+                                    {String(user?.name || '').trim().charAt(0) || 'M'}
                                 </div>
                                 <div>
                                     <h2 className="font-bold text-slate-800 dark:text-white text-lg">{user?.name || 'Motoboy'}</h2>

@@ -125,6 +125,7 @@ export interface Store {
   ownerId?: string;
   customUrl?: string;
   menuCategories?: string[];
+  paymentMethods?: PaymentMethod[];
 
   // Dados de Bloqueio Administrativo
   blockReason?: string;
@@ -161,6 +162,8 @@ export interface DeliveryNeighborhood {
   fee: number;
 }
 
+export type DeliveryZoneType = 'RADIUS' | 'POLYGON';
+
 export interface DeliveryZone {
   id: string;
   name: string;
@@ -171,6 +174,8 @@ export interface DeliveryZone {
   etaMinutes?: number;
   enabled: boolean;
   priority?: number;
+  type?: DeliveryZoneType;
+  polygonPath?: Coordinates[];
 }
 
 export interface StoreRequest {
@@ -327,6 +332,7 @@ export interface OrderLineItem {
 
 export interface Order {
     id: string;
+    orderNumber?: number;
     storeId?: string;
     storeName?: string;
     userId?: string;
@@ -395,6 +401,30 @@ export interface Order {
         idSolicitacao?: string | null;
     };
     redirectUrl?: string;
+}
+
+export interface TabletDevice {
+    id: string;
+    table_number: string;
+    token: string;
+    device_id?: string | null;
+    device_label?: string | null;
+    created_at?: string;
+    expires_at?: string | null;
+    last_seen?: string | null;
+    revoked_at?: string | null;
+}
+
+export interface TabletDeviceEvent {
+    id: string;
+    table_number: string;
+    token: string;
+    device_id?: string | null;
+    device_label?: string | null;
+    event_type: string;
+    user_agent?: string | null;
+    ip_address?: string | null;
+    created_at?: string;
 }
 
 export interface Courier {

@@ -128,6 +128,15 @@ const ensureCoreTables = async () => {
   await safeQuery('ALTER TABLE store_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
+  await safeQuery('ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_number INT');
+  await safeQuery(
+    `CREATE TABLE IF NOT EXISTS order_counters (
+      store_id UUID PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+      next_number INT NOT NULL DEFAULT 1,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )`
+  );
+  await safeQuery('CREATE UNIQUE INDEX IF NOT EXISTS orders_store_number ON orders (store_id, order_number)');
   await safeQuery('ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
@@ -1072,6 +1081,7 @@ const buildOrderPrintText = ({ order, store, flavorMap }) => {
   const storeAddress = formatAddressLine(store);
   const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
   const orderIdShort = order.id ? order.id.slice(0, 6) : '';
+  const orderNumber = Number(order.orderNumber || 0);
   const orderType = order.type === 'TABLE' ? 'Mesa' : order.type === 'PICKUP' ? 'Retirada' : 'Delivery';
 
   const lines = [];
@@ -1080,7 +1090,11 @@ const buildOrderPrintText = ({ order, store, flavorMap }) => {
   if (storeAddress) lines.push(storeAddress);
   lines.push(divider);
   lines.push('PEDIDO');
-  if (orderIdShort) lines.push(`Pedido: #${orderIdShort}`);
+  if (Number.isFinite(orderNumber) && orderNumber > 0) {
+    lines.push(`Pedido: #${orderNumber}`);
+  } else if (orderIdShort) {
+    lines.push(`Pedido: #${orderIdShort}`);
+  }
   lines.push(`Data: ${createdAt.toLocaleString('pt-BR')}`);
   lines.push(`Tipo: ${orderType}`);
   if (order.type === 'TABLE' && order.tableNumber) {
@@ -1794,18 +1808,44 @@ const ensureOrderItems = (data = {}) => {
   return { ...data, items: derivedItems };
 };
 
+const getNextOrderNumber = async (storeId) => {
+  if (!storeId) return null;
+  try {
+    const { rows } = await query(
+      `
+      INSERT INTO order_counters (store_id, next_number)
+      VALUES ($1, 1)
+      ON CONFLICT (store_id)
+      DO UPDATE SET next_number = order_counters.next_number + 1, updated_at = NOW()
+      RETURNING next_number
+      `,
+      [storeId]
+    );
+    const next = Number(rows?.[0]?.next_number || 0);
+    return Number.isFinite(next) && next > 0 ? next : null;
+  } catch (error) {
+    console.error('Failed to increment order counter', error?.message || error);
+    return null;
+  }
+};
+
 const parseOrderRow = (row) => {
   if (!row) return null;
   const data = ensureOrderItems(normalizeOrderPayload(row.data || {}));
   const orderType = resolveOrderTypeFromData(data);
   const normalizedStatus = normalizeStoredStatusForType(row.status, orderType);
   const storeId = data.storeId || row.store_id;
+  const rawOrderNumber = data.orderNumber ?? row.order_number ?? null;
+  const orderNumber = Number(rawOrderNumber);
+  const normalizedOrderNumber =
+    Number.isFinite(orderNumber) && orderNumber > 0 ? orderNumber : null;
   return {
     id: row.id,
     status: normalizedStatus,
     storeCity: row.store_city,
     createdAt: row.created_at,
     ...(storeId ? { storeId } : {}),
+    ...(normalizedOrderNumber ? { orderNumber: normalizedOrderNumber } : {}),
     ...data
   };
 };
@@ -5313,7 +5353,7 @@ app.get('/api/orders', async (req, res) => {
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const { rows } = await query(
-    `SELECT id, status, store_id, store_city, created_at, data FROM orders ${where} ORDER BY created_at DESC`,
+    `SELECT id, status, store_id, store_city, created_at, data, order_number FROM orders ${where} ORDER BY created_at DESC`,
     params
   );
   res.json(parseOrderRows(rows));
@@ -5728,11 +5768,15 @@ app.post('/api/orders', async (req, res) => {
       payload.autoAcceptedAt = new Date().toISOString();
     }
   }
+  const nextOrderNumber = payload.storeId ? await getNextOrderNumber(payload.storeId) : null;
+  if (nextOrderNumber) {
+    payload.orderNumber = nextOrderNumber;
+  }
   const { rows } = await query(
     `
-    INSERT INTO orders (store_id, user_id, courier_id, status, store_city, data)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id, created_at
+    INSERT INTO orders (store_id, user_id, courier_id, status, store_city, data, order_number)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    RETURNING id, created_at, order_number
     `,
     [
       payload.storeId || null,
@@ -5740,12 +5784,19 @@ app.post('/api/orders', async (req, res) => {
       payload.courierId || null,
       status,
       payload.storeCity || null,
-      payload
+      payload,
+      nextOrderNumber
     ]
   );
   const orderId = rows[0].id;
   const createdAt = rows[0].created_at;
-  const responsePayload = { id: orderId, status, createdAt, ...payload };
+  const responsePayload = {
+    id: orderId,
+    status,
+    createdAt,
+    ...(rows[0]?.order_number ? { orderNumber: Number(rows[0].order_number) } : {}),
+    ...payload
+  };
 
   if (status === 'PREPARING') {
     try {
@@ -6407,7 +6458,7 @@ app.get('/api/qualifaz/orders', async (req, res) => {
 
     const where = `WHERE ${conditions.join(' AND ')}`;
     const { rows } = await query(
-      `SELECT id, status, store_id, store_city, created_at, data FROM orders ${where} ORDER BY created_at DESC`,
+      `SELECT id, status, store_id, store_city, created_at, data, order_number FROM orders ${where} ORDER BY created_at DESC`,
       params
     );
     res.json(parseOrderRows(rows));
@@ -6436,7 +6487,7 @@ app.get('/api/qualifaz/orders/:id', async (req, res) => {
     }
 
     const { rows } = await query(
-      'SELECT id, status, store_id, store_city, created_at, data FROM orders WHERE id = $1 AND store_id = $2',
+      'SELECT id, status, store_id, store_city, created_at, data, order_number FROM orders WHERE id = $1 AND store_id = $2',
       [req.params.id, store.id]
     );
     const order = parseOrderRow(rows[0]);

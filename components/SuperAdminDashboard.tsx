@@ -3,7 +3,7 @@ import { LayoutDashboard, Building2, Users, LogOut, Search, CheckCircle, XCircle
 import { Store, StoreRequest, AppSettings, ErrorLogEntry, Product, Order } from '../types';
 import { CATEGORIES } from '../constants';
 import { getStores, toggleStoreStatus, deleteStore, getStoreRequests, approveStoreRequest, rejectStoreRequest, getAppSettings, saveAppSettings, getErrorLogs, setErrorLogResolved, clearErrorLogs, createStoreWithUser, saveProduct, importProductsBulk, getOrders, getStoreAvailability, pauseStore, resumeStorePause } from '../services/db';
-import { formatCurrencyBRL } from '../utils/format';
+import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 import { compressImageFile } from '../utils/image';
 import { uploadImageKit, deleteImageKit } from '../services/imagekit';
 import { fetchCepData } from '../utils/geo';
@@ -1185,7 +1185,7 @@ const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({ onLogout, onM
                                                         <p className="text-sm font-semibold text-slate-900 dark:text-white">
                                                             {order.customerName || 'Cliente'}
                                                         </p>
-                                                        <p className="text-xs text-slate-500">Pedido #{order.id.slice(0, 6)}</p>
+                                                        <p className="text-xs text-slate-500">Pedido #{formatOrderNumber(order)}</p>
                                                     </div>
                                                     <div className="flex items-center gap-3">
                                                         <span className={`px-3 py-1 rounded-full text-xs font-bold ${meta.className}`}>{meta.label}</span>

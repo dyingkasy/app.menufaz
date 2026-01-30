@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Utensils, ShoppingBag, CreditCard, QrCode, Banknote, Loader2, Copy } from 'lucide-react';
 import { Order, Store } from '../types';
-import { formatCurrencyBRL } from '../utils/format';
+import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 import { subscribeToTableOrders, createTablePixPayment } from '../services/db';
 import QRCode from 'qrcode';
 
@@ -346,7 +346,7 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-white">
                     <Utensils size={16} className="text-red-600" />
-                    Pedido {order.id.slice(0, 6).toUpperCase()}
+                    Pedido {formatOrderNumber(order)}
                   </div>
                   <span className="text-xs font-bold text-red-600 bg-red-50 dark:bg-red-900/20 px-2 py-1 rounded-full">
                     {STATUS_LABELS[order.status]}
@@ -382,7 +382,7 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-white">
                     <Utensils size={16} className="text-slate-500" />
-                    Pedido {order.id.slice(0, 6).toUpperCase()}
+                    Pedido {formatOrderNumber(order)}
                   </div>
                   <span className="text-xs font-bold text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-slate-800 px-2 py-1 rounded-full">
                     {STATUS_LABELS[order.status]}
@@ -432,7 +432,7 @@ const TableTracking: React.FC<TableTrackingProps> = ({
                 {orders.map((order) => (
                   <div key={order.id} className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4">
                     <div className="flex items-center justify-between text-sm font-semibold text-slate-700 dark:text-slate-200">
-                      <span>Pedido {order.id.slice(0, 6).toUpperCase()}</span>
+                      <span>Pedido {formatOrderNumber(order)}</span>
                       <span>{formatCurrencyBRL(order.total)}</span>
                     </div>
                     <div className="mt-2 space-y-1 text-xs text-slate-500">

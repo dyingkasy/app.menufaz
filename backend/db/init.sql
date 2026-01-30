@@ -81,9 +81,16 @@ CREATE TABLE IF NOT EXISTS orders (
   user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   courier_id UUID REFERENCES users(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'PENDING',
+  order_number INT,
   store_city TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   data JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS order_counters (
+  store_id UUID PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+  next_number INT NOT NULL DEFAULT 1,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS favorites (

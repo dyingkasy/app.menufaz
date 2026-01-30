@@ -34,7 +34,7 @@ import {
     TabletDevice,
     TabletDeviceEvent
 } from '../types';
-import { formatCurrencyBRL } from '../utils/format';
+import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 import { compressImageFile } from '../utils/image';
 import { uploadImageKit, deleteImageKit } from '../services/imagekit';
 import { useAuth } from '../contexts/AuthContext';
@@ -3183,7 +3183,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       recentOrders.map((order) => (
                                           <div key={order.id} className="flex items-center gap-3 pb-3 border-b border-gray-50 last:border-0">
                                               <div className="w-10 h-10 bg-slate-100 dark:bg-slate-800 rounded-xl flex items-center justify-center font-bold text-slate-500 text-xs">
-                                                  #{order.id.slice(0,4)}
+                                                  #{formatOrderNumber(order)}
                                               </div>
                                               <div className="flex-1">
                                                   <p className="font-bold text-sm text-slate-800 dark:text-white">{order.customerName}</p>
@@ -3327,7 +3327,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
                               <div>
                                   <h3 className="text-lg font-bold text-slate-800 dark:text-white">Finalizar mesa</h3>
-                                  <p className="text-xs text-gray-500 dark:text-gray-400">Pedido #{paymentOrderTarget.id.slice(0, 5)}</p>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">Pedido #{formatOrderNumber(paymentOrderTarget)}</p>
                               </div>
                               <button
                                   onClick={() => { setPaymentOrderTarget(null); setPaymentOrderMethod(''); }}
@@ -3468,7 +3468,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                       >
                                           <div className="flex items-center justify-between mb-3">
                                               <div className="flex items-center gap-2">
-                                                  <span className="font-mono text-xs text-slate-400">#{order.id.slice(0, 5)}</span>
+                                                  <span className="font-mono text-xs text-slate-400">#{formatOrderNumber(order)}</span>
                                                   <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
                                                       {order.type === 'TABLE'
                                                           ? `Mesa${order.tableNumber ? ` ${order.tableNumber}` : ''}`
@@ -3617,7 +3617,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-slate-800">
                               <div>
                                   <h3 className="text-lg font-bold text-slate-800 dark:text-white">Detalhes do pedido</h3>
-                                  <p className="text-xs text-gray-500 dark:text-gray-400">#{selectedOrderDetails.id.slice(0, 6)}</p>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">#{formatOrderNumber(selectedOrderDetails)}</p>
                               </div>
                               <button
                                   onClick={() => setSelectedOrderDetails(null)}
@@ -3846,7 +3846,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                   return `
                     <div class="order">
                       <div class="order-header">
-                        <span>Pedido #${order.id.slice(0, 5)}</span>
+                        <span>Pedido #${formatOrderNumber(order)}</span>
                         <span>${order.time}</span>
                       </div>
                       <div class="order-name">${order.customerName || ''}</div>
@@ -4009,7 +4009,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                           {grouped[key].map((order) => (
                                               <div key={order.id} className="bg-white dark:bg-slate-950 border border-slate-200/70 dark:border-slate-800 rounded-2xl p-3">
                                                   <div className="flex items-center justify-between text-xs text-slate-400">
-                                                      <span>#{order.id.slice(0, 5)}</span>
+                                                      <span>#{formatOrderNumber(order)}</span>
                                                       <span>{order.time}</span>
                                                   </div>
                                                   <p className="text-sm font-bold text-slate-800 dark:text-white mt-2">{order.customerName}</p>
@@ -4046,7 +4046,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               {selectedTableOrders.map((order) => (
                                   <div key={order.id} className="border border-slate-200/80 dark:border-slate-800 rounded-2xl p-4 bg-slate-50/70 dark:bg-slate-800/40">
                                       <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-                                          <span>#{order.id.slice(0, 5)}</span>
+                                          <span>#{formatOrderNumber(order)}</span>
                                           <span>{order.time}</span>
                                       </div>
                                       <div className="flex items-center justify-between mt-2">
@@ -4941,7 +4941,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                               {filteredOrders.map(order => (
                                   <tr key={order.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                                      <td className="px-6 py-4 font-mono text-sm text-slate-500">#{order.id.slice(0,5)}</td>
+                                      <td className="px-6 py-4 font-mono text-sm text-slate-500">#{formatOrderNumber(order)}</td>
                                       <td className="px-6 py-4 font-bold text-slate-800 dark:text-white text-sm">{order.customerName}</td>
                                       <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-400">
                                           {new Date(order.createdAt || '').toLocaleString()}

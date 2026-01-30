@@ -4,7 +4,7 @@ import { ArrowLeft, Package, Clock, CheckCircle, AlertTriangle, MessageCircle, S
 import { Order, ChatMessage, Coordinates } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { subscribeToClientOrders, subscribeToCustomerOrders, subscribeToCustomerPhoneOrders, updateOrderRefundStatus, updateOrderChat, subscribeToCourier, updateOrderStatus } from '../services/db';
-import { formatCurrencyBRL } from '../utils/format';
+import { formatCurrencyBRL, formatOrderNumber } from '../utils/format';
 
 interface ClientOrdersProps {
     onBack: () => void;
@@ -349,7 +349,7 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                             <div className="p-6 bg-gradient-to-r from-slate-50 to-white dark:from-slate-900 dark:to-slate-800 border-b border-gray-100 dark:border-slate-700">
                                 <div className="flex justify-between items-start mb-6">
                                     <div>
-                                        <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white">Pedido #{selectedOrder.id.slice(0,5)}</h2>
+                                        <h2 className="text-2xl font-extrabold text-slate-800 dark:text-white">Pedido #{formatOrderNumber(selectedOrder)}</h2>
                                         <p className="text-sm text-gray-500 mt-1 flex items-center gap-1">
                                             <Clock size={14}/> {new Date(selectedOrder.createdAt || '').toLocaleString()}
                                         </p>
@@ -566,7 +566,7 @@ const ClientOrders: React.FC<ClientOrdersProps> = ({ onBack }) => {
                                             <div>
                                                 <h3 className="font-bold text-slate-900 dark:text-white text-base">
                                                     {/* Ideally Store Name, fallback to ID */}
-                                                    Pedido #{order.id.slice(0,5)}
+                                                    Pedido #{formatOrderNumber(order)}
                                                 </h3>
                                                 <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
                                                     <Clock size={10} /> {new Date(order.createdAt || '').toLocaleDateString()} às {new Date(order.createdAt || '').toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
