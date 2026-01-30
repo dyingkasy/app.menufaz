@@ -85,6 +85,7 @@ const Checkout: React.FC<CheckoutProps> = ({
   };
 
   const buildWhatsappMessage = ({
+      storeName,
       orderNumber,
       itemsText,
       totalText,
@@ -94,8 +95,10 @@ const Checkout: React.FC<CheckoutProps> = ({
       addressText,
       tableText,
       customerNameText,
-      customerPhoneText
+      customerPhoneText,
+      createdAtText
   }: {
+      storeName: string;
       orderNumber: string;
       itemsText: string;
       totalText: string;
@@ -106,21 +109,25 @@ const Checkout: React.FC<CheckoutProps> = ({
       tableText?: string;
       customerNameText: string;
       customerPhoneText?: string;
+      createdAtText?: string;
   }) => {
       const lines = [
-          `Pedido #${orderNumber}`,
+          `Pedido #${orderNumber} - ${storeName}`,
+          createdAtText ? `Data: ${createdAtText}` : null,
           `Cliente: ${customerNameText || 'Cliente'}`,
           customerPhoneText ? `Telefone: ${customerPhoneText}` : null,
           `Tipo: ${orderTypeLabel}`,
           tableText ? `Mesa: ${tableText}` : null,
           addressText ? `Endereco: ${addressText}` : null,
           '',
-          'Itens:',
+          'Itens do pedido:',
           itemsText,
           '',
-          deliveryFeeText ? `Taxa: ${deliveryFeeText}` : null,
+          deliveryFeeText ? `Taxa de entrega: ${deliveryFeeText}` : null,
           `Total: ${totalText}`,
-          `Pagamento: ${paymentText}`
+          `Pagamento: ${paymentText}`,
+          '',
+          'Obrigado!'
       ].filter(Boolean);
       return lines.join('\n');
   };
@@ -745,6 +752,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                     : '';
             const itemsText = itemsDescription.join('\n');
             const message = buildWhatsappMessage({
+                storeName: store.name,
                 orderNumber: String(orderNumberValue || '--'),
                 itemsText: itemsText || '-',
                 totalText: formatCurrencyBRL(total),
@@ -754,7 +762,8 @@ const Checkout: React.FC<CheckoutProps> = ({
                 addressText: addressText || undefined,
                 tableText: orderType === 'TABLE' ? tableValue : undefined,
                 customerNameText: customerName.trim(),
-                customerPhoneText: phoneDigits || undefined
+                customerPhoneText: phoneDigits || undefined,
+                createdAtText: new Date().toLocaleString('pt-BR')
             });
             const waUrl = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`;
             window.open(waUrl, '_blank');
