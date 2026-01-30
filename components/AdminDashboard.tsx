@@ -583,18 +583,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
               return (item.name || '').toLowerCase().includes(search);
           });
   }, [deliveryNeighborhoodSearch, deliveryNeighborhoods]);
-  const filteredCustomers = useMemo(() => {
-      const term = customerSearch.trim().toLowerCase();
-      if (!term) return customers;
-      return customers.filter((customer) => {
-          const name = (customer.name || '').toLowerCase();
-          const phone = (customer.phone || '').toLowerCase();
-          const city = (customer.city || '').toLowerCase();
-          const district = (customer.district || '').toLowerCase();
-          const street = (customer.street || '').toLowerCase();
-          return [name, phone, city, district, street].some((value) => value.includes(term));
-      });
-  }, [customers, customerSearch]);
   const deliveryZones = Array.isArray(storeProfile.deliveryZones)
       ? (storeProfile.deliveryZones as DeliveryZone[])
       : [];
@@ -621,6 +609,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [customersLoading, setCustomersLoading] = useState(false);
   const [customersError, setCustomersError] = useState('');
   const [customerSearch, setCustomerSearch] = useState('');
+  const filteredCustomers = useMemo(() => {
+      const term = customerSearch.trim().toLowerCase();
+      if (!term) return customers;
+      return customers.filter((customer) => {
+          const name = (customer.name || '').toLowerCase();
+          const phone = (customer.phone || '').toLowerCase();
+          const city = (customer.city || '').toLowerCase();
+          const district = (customer.district || '').toLowerCase();
+          const street = (customer.street || '').toLowerCase();
+          return [name, phone, city, district, street].some((value) => value.includes(term));
+      });
+  }, [customers, customerSearch]);
   const formatTabletDate = (value?: string | null) => {
       if (!value) return '--';
       const parsed = new Date(value);
