@@ -136,7 +136,15 @@ const ensureCoreTables = async () => {
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )`
   );
+  await safeQuery(
+    `CREATE TABLE IF NOT EXISTS order_counters_global (
+      id INT PRIMARY KEY DEFAULT 1,
+      next_number INT NOT NULL DEFAULT 1,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )`
+  );
   await safeQuery('CREATE UNIQUE INDEX IF NOT EXISTS orders_store_number ON orders (store_id, order_number)');
+  await safeQuery('CREATE UNIQUE INDEX IF NOT EXISTS orders_order_number_unique ON orders (order_number)');
   await safeQuery('ALTER TABLE reviews ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
   await safeQuery('ALTER TABLE option_group_templates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()');
@@ -303,9 +311,11 @@ initErrorLogTable().catch((error) => {
   console.error('Failed to initialize error log table', error);
 });
 
-ensureCoreTables().catch((error) => {
-  console.error('Failed to initialize core tables', error);
-});
+ensureCoreTables()
+  .then(() => ensureGlobalOrderNumbers())
+  .catch((error) => {
+    console.error('Failed to initialize core tables', error);
+  });
 
 ensurePrintTables().catch((error) => {
   console.error('Failed to initialize print tables', error);
@@ -1808,24 +1818,64 @@ const ensureOrderItems = (data = {}) => {
   return { ...data, items: derivedItems };
 };
 
-const getNextOrderNumber = async (storeId) => {
-  if (!storeId) return null;
+const getNextOrderNumber = async () => {
   try {
     const { rows } = await query(
       `
-      INSERT INTO order_counters (store_id, next_number)
-      VALUES ($1, 1)
-      ON CONFLICT (store_id)
-      DO UPDATE SET next_number = order_counters.next_number + 1, updated_at = NOW()
+      INSERT INTO order_counters_global (id, next_number)
+      VALUES (1, 1)
+      ON CONFLICT (id)
+      DO UPDATE SET next_number = order_counters_global.next_number + 1, updated_at = NOW()
       RETURNING next_number
       `,
-      [storeId]
+      []
     );
     const next = Number(rows?.[0]?.next_number || 0);
     return Number.isFinite(next) && next > 0 ? next : null;
   } catch (error) {
     console.error('Failed to increment order counter', error?.message || error);
     return null;
+  }
+};
+
+const ensureGlobalOrderNumbers = async () => {
+  try {
+    await query('INSERT INTO app_settings (id, data) VALUES (1, $1) ON CONFLICT (id) DO NOTHING', [{}]);
+    const { rows } = await query('SELECT data FROM app_settings WHERE id = 1');
+    const data = rows[0]?.data || {};
+    if (data?.order_number_backfilled === true) return;
+    await query('UPDATE app_settings SET data = data || $1 WHERE id = 1', [{ order_number_backfilled: 'in_progress' }]);
+
+    await query(
+      `
+      WITH ordered AS (
+        SELECT id,
+               ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS seq
+        FROM orders
+      )
+      UPDATE orders o
+      SET order_number = ordered.seq,
+          data = jsonb_set(o.data, '{orderNumber}', to_jsonb(ordered.seq), true)
+      FROM ordered
+      WHERE o.id = ordered.id
+      `
+    );
+
+    const { rows: maxRows } = await query('SELECT COALESCE(MAX(order_number), 0) AS max FROM orders');
+    const next = Number(maxRows[0]?.max || 0) + 1;
+    await query(
+      `
+      INSERT INTO order_counters_global (id, next_number)
+      VALUES (1, $1)
+      ON CONFLICT (id)
+      DO UPDATE SET next_number = EXCLUDED.next_number, updated_at = NOW()
+      `,
+      [next]
+    );
+    await query('UPDATE app_settings SET data = data || $1 WHERE id = 1', [{ order_number_backfilled: true }]);
+  } catch (error) {
+    console.error('Failed to backfill order numbers', error?.message || error);
+    await query('UPDATE app_settings SET data = data || $1 WHERE id = 1', [{ order_number_backfilled: false }]).catch(() => {});
   }
 };
 
@@ -5768,7 +5818,7 @@ app.post('/api/orders', async (req, res) => {
       payload.autoAcceptedAt = new Date().toISOString();
     }
   }
-  const nextOrderNumber = payload.storeId ? await getNextOrderNumber(payload.storeId) : null;
+  const nextOrderNumber = await getNextOrderNumber();
   if (nextOrderNumber) {
     payload.orderNumber = nextOrderNumber;
   }
