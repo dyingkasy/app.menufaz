@@ -970,6 +970,7 @@ const MenuFazApp: React.FC = () => {
           onRemoveItem={handleRemoveFromCart}
           onClearCart={handleClearCart}
           onCheckout={handleCheckout}
+          isTabletMode={isTabletMode}
       />
 
       <LocationModal 

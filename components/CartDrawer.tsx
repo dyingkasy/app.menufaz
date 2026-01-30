@@ -12,6 +12,7 @@ interface CartDrawerProps {
   onRemoveItem: (id: string) => void;
   onClearCart: () => void;
   onCheckout: () => void; // Nova prop
+  isTabletMode?: boolean;
 }
 
 const CartDrawer: React.FC<CartDrawerProps> = ({ 
@@ -21,12 +22,13 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
   store, 
   onRemoveItem, 
   onClearCart,
-  onCheckout
+  onCheckout,
+  isTabletMode = false
 }) => {
   if (!isOpen) return null;
 
   const cartSubtotal = cartItems.reduce((sum, item) => sum + item.totalPrice, 0);
-  const deliveryFee = Number(store?.deliveryFee) || 0;
+  const deliveryFee = isTabletMode ? 0 : (Number(store?.deliveryFee) || 0);
   const cartTotal = cartSubtotal + deliveryFee;
 
   return (
@@ -117,10 +119,12 @@ const CartDrawer: React.FC<CartDrawerProps> = ({
                             <span>Subtotal</span>
                             <span>{formatCurrencyBRL(cartSubtotal)}</span>
                         </div>
-                        <div className="flex justify-between text-gray-500 dark:text-gray-400 pb-3 border-b border-gray-100 dark:border-slate-800">
-                            <span>Taxa de entrega</span>
-                            <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
-                        </div>
+                        {!isTabletMode && (
+                            <div className="flex justify-between text-gray-500 dark:text-gray-400 pb-3 border-b border-gray-100 dark:border-slate-800">
+                                <span>Taxa de entrega</span>
+                                <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
+                            </div>
+                        )}
                         <div className="flex justify-between font-bold text-xl text-slate-800 dark:text-white">
                             <span>Total</span>
                             <span>{formatCurrencyBRL(cartTotal)}</span>
