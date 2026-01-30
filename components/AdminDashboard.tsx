@@ -609,18 +609,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [customersLoading, setCustomersLoading] = useState(false);
   const [customersError, setCustomersError] = useState('');
   const [customerSearch, setCustomerSearch] = useState('');
-  const filteredCustomers = useMemo(() => {
-      const term = customerSearch.trim().toLowerCase();
-      if (!term) return customers;
-      return customers.filter((customer) => {
-          const name = (customer.name || '').toLowerCase();
-          const phone = (customer.phone || '').toLowerCase();
-          const city = (customer.city || '').toLowerCase();
-          const district = (customer.district || '').toLowerCase();
-          const street = (customer.street || '').toLowerCase();
-          return [name, phone, city, district, street].some((value) => value.includes(term));
-      });
-  }, [customers, customerSearch]);
   const formatTabletDate = (value?: string | null) => {
       if (!value) return '--';
       const parsed = new Date(value);
@@ -4745,6 +4733,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       const totalOrders = customers.reduce((acc, item) => acc + (Number(item.order_count) || 0), 0);
       const totalSpent = customers.reduce((acc, item) => acc + (Number(item.total_spent) || 0), 0);
       const avgTicket = totalOrders > 0 ? totalSpent / totalOrders : 0;
+      const term = customerSearch.trim().toLowerCase();
+      const filteredCustomers = term
+          ? customers.filter((customer) => {
+              const name = (customer.name || '').toLowerCase();
+              const phone = (customer.phone || '').toLowerCase();
+              const city = (customer.city || '').toLowerCase();
+              const district = (customer.district || '').toLowerCase();
+              const street = (customer.street || '').toLowerCase();
+              return [name, phone, city, district, street].some((value) => value.includes(term));
+          })
+          : customers;
       const formatAddress = (customer: Customer) => {
           const parts = [
               customer.street,
