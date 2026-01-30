@@ -609,6 +609,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [customersLoading, setCustomersLoading] = useState(false);
   const [customersError, setCustomersError] = useState('');
   const [customerSearch, setCustomerSearch] = useState('');
+  const orderAlertActiveRef = useRef(false);
+  const orderAlertContextRef = useRef<AudioContext | null>(null);
+  const orderAlertOscRef = useRef<OscillatorNode | null>(null);
+  const orderAlertGainRef = useRef<GainNode | null>(null);
   const formatTabletDate = (value?: string | null) => {
       if (!value) return '--';
       const parsed = new Date(value);
@@ -831,6 +835,42 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       if (activeSection !== 'STOCK') return;
       loadStockProducts();
   }, [activeSection, loadStockProducts]);
+
+  useEffect(() => {
+      const pendingCount = orders.filter((order) => order.status === 'PENDING').length;
+      if (pendingCount > 0 && !orderAlertActiveRef.current) {
+          orderAlertActiveRef.current = true;
+          try {
+              const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+              const osc = context.createOscillator();
+              const gain = context.createGain();
+              osc.type = 'square';
+              osc.frequency.value = 880;
+              gain.gain.value = 0.04;
+              osc.connect(gain);
+              gain.connect(context.destination);
+              osc.start();
+              orderAlertContextRef.current = context;
+              orderAlertOscRef.current = osc;
+              orderAlertGainRef.current = gain;
+          } catch (error) {
+              orderAlertActiveRef.current = false;
+          }
+      }
+
+      if (pendingCount === 0 && orderAlertActiveRef.current) {
+          orderAlertActiveRef.current = false;
+          try {
+              orderAlertOscRef.current?.stop();
+          } catch {}
+          try {
+              orderAlertContextRef.current?.close();
+          } catch {}
+          orderAlertOscRef.current = null;
+          orderAlertGainRef.current = null;
+          orderAlertContextRef.current = null;
+      }
+  }, [orders]);
 
   // --- AUTO ACCEPT LOGIC ---
   useEffect(() => {
