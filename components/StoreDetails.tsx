@@ -1827,26 +1827,30 @@ const StoreDetails: React.FC<StoreDetailsProps> = ({
                     </div>
 
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-4 border-t border-gray-100 dark:border-slate-800">
-                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
-                            <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Entrega</p>
-                            <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
-                                <Clock size={16} className="text-gray-400" /> {store.deliveryTime}
-                            </div>
-                        </div>
-                        {store.acceptsPickup && pickupTime && (
-                            <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
-                                <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Retirada</p>
-                                <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
-                                    <Clock size={16} className="text-gray-400" /> {pickupTime}
+                        {!isTablet && (
+                            <>
+                                <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                                    <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Entrega</p>
+                                    <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
+                                        <Clock size={16} className="text-gray-400" /> {store.deliveryTime}
+                                    </div>
                                 </div>
-                            </div>
+                                {store.acceptsPickup && pickupTime && (
+                                    <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                                        <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Retirada</p>
+                                        <div className="flex items-center gap-1 font-bold text-slate-800 dark:text-white">
+                                            <Clock size={16} className="text-gray-400" /> {pickupTime}
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
+                                    <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Taxa</p>
+                                    <div className="font-bold text-green-600">
+                                        {deliveryFeeInfo.label}
+                                    </div>
+                                </div>
+                            </>
                         )}
-                        <div className="rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 p-3">
-                            <p className="text-[10px] text-gray-400 uppercase font-bold mb-1 tracking-[0.2em]">Taxa</p>
-                            <div className="font-bold text-green-600">
-                                {deliveryFeeInfo.label}
-                            </div>
-                        </div>
                     </div>
                 </div>
             </div>
