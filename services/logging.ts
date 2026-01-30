@@ -31,8 +31,28 @@ const safeSerialize = (value: unknown) => {
 const logQueue: ClientErrorPayload[] = [];
 let isFlushing = false;
 
+const shouldIgnoreClientMessage = (message: string, context?: Record<string, unknown>) => {
+  const normalized = message.replace(/\s+/g, ' ').trim();
+  const statusValue = typeof context?.status === 'number' ? context.status : Number(context?.status);
+  if (statusValue === 401 || statusValue === 403) return true;
+  if (/Failed to fetch/i.test(normalized)) return true;
+  if (/Fetch \\d{3} error/i.test(normalized)) return true;
+  if (/Request failed: \\d{3}/i.test(normalized)) return true;
+  if (/unauthorized/i.test(normalized)) return true;
+  if (/Invalid credentials/i.test(normalized)) return true;
+  if (/Google Maps JavaScript API has been loaded directly without loading=async/i.test(normalized)) return true;
+  if (/O mapa é inicializado sem um ID de mapa válido/i.test(normalized)) return true;
+  if (/Drawing library functionality in the Maps JavaScript API is deprecated/i.test(normalized)) return true;
+  if (/The width\\(-?\\d+\\) and height\\(-?\\d+\\) of chart should be greater than 0/i.test(normalized)) return true;
+  if (context?.tagName === 'IMG' && typeof context?.resource === 'string' && context.resource.includes('ik.imagekit.io')) {
+    return true;
+  }
+  return false;
+};
+
 export const logClientError = async (payload: ClientErrorPayload) => {
   if (!API_BASE_URL) return;
+  if (payload?.message && shouldIgnoreClientMessage(payload.message, payload.context)) return;
   logQueue.push(payload);
   if (isFlushing) return;
   isFlushing = true;
@@ -48,6 +68,7 @@ export const logClientError = async (payload: ClientErrorPayload) => {
     };
 
     try {
+      if (next.message && shouldIgnoreClientMessage(next.message, context)) continue;
       await fetch(`${API_BASE_URL}/logs/client`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -74,6 +95,9 @@ export const initClientErrorLogging = () => {
           (target as HTMLLinkElement).href ||
           (target as HTMLImageElement).src ||
           '';
+        if (tagName === 'IMG' && resource.includes('ik.imagekit.io')) {
+          return;
+        }
         logClientError({
           level: 'error',
           message: 'Resource failed to load',
@@ -99,8 +123,10 @@ export const initClientErrorLogging = () => {
 
   window.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason as any;
+    const message = reason?.message || String(reason || 'Unhandled promise rejection');
+    if (shouldIgnoreClientMessage(message)) return;
     logClientError({
-      message: reason?.message || String(reason || 'Unhandled promise rejection'),
+      message,
       stack: reason?.stack,
       context: {
         reason: typeof reason === 'string' ? reason : safeSerialize(reason)
@@ -112,6 +138,9 @@ export const initClientErrorLogging = () => {
   console.error = (...args: unknown[]) => {
     const errorArg = args.find((arg) => arg instanceof Error) as Error | undefined;
     const message = errorArg?.message || (typeof args[0] === 'string' ? String(args[0]) : 'Console error');
+    if (shouldIgnoreClientMessage(message)) {
+      return;
+    }
 
     logClientError({
       message,
@@ -129,7 +158,7 @@ export const initClientErrorLogging = () => {
     const firstArg = args[0];
     if (typeof firstArg === 'string') {
       const normalized = firstArg.replace(/\s+/g, ' ').trim();
-      if (/The width\(-?\d+\) and height\(-?\d+\) of chart should be greater than 0/.test(normalized)) {
+      if (shouldIgnoreClientMessage(normalized)) {
         return;
       }
     }
