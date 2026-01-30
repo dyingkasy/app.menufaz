@@ -611,8 +611,35 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [customerSearch, setCustomerSearch] = useState('');
   const orderAlertActiveRef = useRef(false);
   const orderAlertContextRef = useRef<AudioContext | null>(null);
-  const orderAlertOscRef = useRef<OscillatorNode | null>(null);
-  const orderAlertGainRef = useRef<GainNode | null>(null);
+  const orderAlertTimerRef = useRef<number | null>(null);
+  const playOrderChime = useCallback((context: AudioContext) => {
+      const now = context.currentTime;
+      const gain = context.createGain();
+      gain.gain.value = 0.0001;
+      gain.connect(context.destination);
+
+      const hit = (freq: number, startOffset: number, duration: number) => {
+          const osc = context.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          osc.connect(gain);
+          osc.start(now + startOffset);
+          osc.stop(now + startOffset + duration);
+      };
+
+      // Soft bell-like double chime
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.06, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+      hit(784, 0, 0.6);
+      hit(988, 0.05, 0.5);
+
+      gain.gain.setValueAtTime(0.0001, now + 1.3);
+      gain.gain.exponentialRampToValueAtTime(0.05, now + 1.32);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
+      hit(659, 1.3, 0.6);
+      hit(784, 1.35, 0.5);
+  }, []);
   const formatTabletDate = (value?: string | null) => {
       if (!value) return '--';
       const parsed = new Date(value);
@@ -842,17 +869,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           orderAlertActiveRef.current = true;
           try {
               const context = new (window.AudioContext || (window as any).webkitAudioContext)();
-              const osc = context.createOscillator();
-              const gain = context.createGain();
-              osc.type = 'square';
-              osc.frequency.value = 880;
-              gain.gain.value = 0.04;
-              osc.connect(gain);
-              gain.connect(context.destination);
-              osc.start();
               orderAlertContextRef.current = context;
-              orderAlertOscRef.current = osc;
-              orderAlertGainRef.current = gain;
+              playOrderChime(context);
+              orderAlertTimerRef.current = window.setInterval(() => {
+                  playOrderChime(context);
+              }, 5000);
           } catch (error) {
               orderAlertActiveRef.current = false;
           }
@@ -860,17 +881,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
 
       if (pendingCount === 0 && orderAlertActiveRef.current) {
           orderAlertActiveRef.current = false;
-          try {
-              orderAlertOscRef.current?.stop();
-          } catch {}
+          if (orderAlertTimerRef.current) {
+              window.clearInterval(orderAlertTimerRef.current);
+              orderAlertTimerRef.current = null;
+          }
           try {
               orderAlertContextRef.current?.close();
           } catch {}
-          orderAlertOscRef.current = null;
-          orderAlertGainRef.current = null;
           orderAlertContextRef.current = null;
       }
-  }, [orders]);
+  }, [orders, playOrderChime]);
 
   // --- AUTO ACCEPT LOGIC ---
   useEffect(() => {
