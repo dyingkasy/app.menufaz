@@ -112,22 +112,23 @@ const Checkout: React.FC<CheckoutProps> = ({
       createdAtText?: string;
   }) => {
       const lines = [
-          `Pedido #${orderNumber} - ${storeName}`,
-          createdAtText ? `Data: ${createdAtText}` : null,
-          `Cliente: ${customerNameText || 'Cliente'}`,
-          customerPhoneText ? `Telefone: ${customerPhoneText}` : null,
-          `Tipo: ${orderTypeLabel}`,
-          tableText ? `Mesa: ${tableText}` : null,
-          addressText ? `Endereco: ${addressText}` : null,
-          '',
-          'Itens do pedido:',
+          `🧾 Pedido #${orderNumber} — ${storeName}`,
+          createdAtText ? `🕒 ${createdAtText}` : null,
+          '--------------------------------',
+          `👤 Cliente: ${customerNameText || 'Cliente'}`,
+          customerPhoneText ? `📞 Telefone: ${customerPhoneText}` : null,
+          `📌 Tipo: ${orderTypeLabel}`,
+          tableText ? `🍽️ Mesa: ${tableText}` : null,
+          addressText ? `📍 Endereço: ${addressText}` : null,
+          '--------------------------------',
+          '🧺 Itens do pedido:',
           itemsText,
-          '',
-          deliveryFeeText ? `Taxa de entrega: ${deliveryFeeText}` : null,
-          `Total: ${totalText}`,
-          `Pagamento: ${paymentText}`,
-          '',
-          'Obrigado!'
+          '--------------------------------',
+          deliveryFeeText ? `🚚 Taxa de entrega: ${deliveryFeeText}` : null,
+          `💰 Total: ${totalText}`,
+          `💳 Pagamento: ${paymentText}`,
+          '--------------------------------',
+          '✅ Obrigado pelo pedido!'
       ].filter(Boolean);
       return lines.join('\n');
   };
