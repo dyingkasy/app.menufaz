@@ -91,6 +91,8 @@ const Checkout: React.FC<CheckoutProps> = ({
       totalText,
       deliveryFeeText,
       paymentText,
+      paymentStatusText,
+      cashChangeText,
       orderTypeLabel,
       addressText,
       tableText,
@@ -104,6 +106,8 @@ const Checkout: React.FC<CheckoutProps> = ({
       totalText: string;
       deliveryFeeText?: string;
       paymentText: string;
+      paymentStatusText?: string;
+      cashChangeText?: string;
       orderTypeLabel: string;
       addressText?: string;
       tableText?: string;
@@ -127,6 +131,8 @@ const Checkout: React.FC<CheckoutProps> = ({
           deliveryFeeText ? `🚚 Taxa de entrega: ${deliveryFeeText}` : null,
           `💰 Total: ${totalText}`,
           `💳 Pagamento: ${paymentText}`,
+          paymentStatusText ? `✅ ${paymentStatusText}` : null,
+          cashChangeText ? `💵 ${cashChangeText}` : null,
           '--------------------------------',
           '✅ Obrigado pelo pedido!'
       ].filter(Boolean);
@@ -752,6 +758,12 @@ const Checkout: React.FC<CheckoutProps> = ({
                     ? `${address.street}, ${address.number} - ${address.district || ''} ${address.city || ''}`.trim()
                     : '';
             const itemsText = itemsDescription.join('\n');
+            const pixPaid =
+                paymentMethod === 'PIX' &&
+                createdOrder?.paymentProvider === 'PIX_REPASSE' &&
+                String(createdOrder?.paymentStatus || '').toUpperCase() === 'PAID';
+            const cashChangeText =
+                paymentMethod === 'CASH' && moneyChange ? `Troco para ${moneyChange}` : '';
             const message = buildWhatsappMessage({
                 storeName: store.name,
                 orderNumber: String(orderNumberValue || '--'),
@@ -759,6 +771,8 @@ const Checkout: React.FC<CheckoutProps> = ({
                 totalText: formatCurrencyBRL(total),
                 deliveryFeeText: orderType === 'DELIVERY' ? formatCurrencyBRL(deliveryFee) : '',
                 paymentText: paymentDescription,
+                paymentStatusText: pixPaid ? 'PIX confirmado' : '',
+                cashChangeText: cashChangeText || undefined,
                 orderTypeLabel,
                 addressText: addressText || undefined,
                 tableText: orderType === 'TABLE' ? tableValue : undefined,
