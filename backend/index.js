@@ -3661,7 +3661,7 @@ app.post('/api/ai/recommendation', async (req, res) => {
       });
     }
     if (!geminiApiKey) {
-      return res.status(503).json({
+      return res.json({
         suggestion: 'As lojas ainda estão trabalhando para atender a esse pedido.',
         recommendedProducts: []
       });

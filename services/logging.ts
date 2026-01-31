@@ -40,11 +40,15 @@ const shouldIgnoreClientMessage = (message: string, context?: Record<string, unk
   if (/Request failed: \\d{3}/i.test(normalized)) return true;
   if (/unauthorized/i.test(normalized)) return true;
   if (/Invalid credentials/i.test(normalized)) return true;
+  if (/Tentando baixa precisao/i.test(normalized)) return true;
   if (/Google Maps JavaScript API has been loaded directly without loading=async/i.test(normalized)) return true;
   if (/O mapa é inicializado sem um ID de mapa válido/i.test(normalized)) return true;
   if (/Drawing library functionality in the Maps JavaScript API is deprecated/i.test(normalized)) return true;
   if (/The width\\(-?\\d+\\) and height\\(-?\\d+\\) of chart should be greater than 0/i.test(normalized)) return true;
   if (context?.tagName === 'IMG' && typeof context?.resource === 'string' && context.resource.includes('ik.imagekit.io')) {
+    return true;
+  }
+  if (context?.tagName === 'LINK' && typeof context?.resource === 'string' && context.resource.includes('fonts.googleapis.com')) {
     return true;
   }
   return false;
