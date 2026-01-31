@@ -2562,9 +2562,34 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       setTimeout(() => setToast(null), 4000);
   };
   const handleUpdateStatus = async (orderId: string, status: string, reason?: string) => {
+      let snapshot: Order[] | null = null;
+      setOrders((prev) => {
+          snapshot = prev;
+          return prev.map((order) =>
+              order.id === orderId
+                  ? {
+                        ...order,
+                        status: status as Order['status'],
+                        cancelReason: status === 'CANCELLED' ? reason || order.cancelReason : order.cancelReason
+                    }
+                  : order
+          );
+      });
+      setSelectedOrderDetails((prev) =>
+          prev && prev.id === orderId
+              ? {
+                    ...prev,
+                    status: status as Order['status'],
+                    cancelReason: status === 'CANCELLED' ? reason || prev.cancelReason : prev.cancelReason
+                }
+              : prev
+      );
       try {
           await updateOrderStatus(orderId, status as Order['status'], reason);
       } catch (e) {
+          if (snapshot) {
+              setOrders(snapshot);
+          }
           const message = e instanceof Error ? e.message : 'Erro ao atualizar status.';
           showToast(message);
       }
