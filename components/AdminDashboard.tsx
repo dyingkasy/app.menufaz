@@ -3776,13 +3776,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                   </div>
                               </div>
                           </div>
-                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex items-center justify-end gap-3">
+                          <div className="p-5 border-t border-gray-100 dark:border-slate-800 flex flex-wrap items-center justify-end gap-3">
                               <button
                                   onClick={() => handlePrintOrder(selectedOrderDetails.id)}
                                   className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 font-bold hover:bg-slate-50"
                               >
-                                  Imprimir
+                                  Imprimir pedido
                               </button>
+                              {selectedOrderDetails.type === 'DELIVERY' && (
+                                  <button
+                                      onClick={() => handleUpdateStatus(selectedOrderDetails.id, 'DELIVERING')}
+                                      className="px-4 py-2 rounded-xl border border-emerald-200 text-emerald-700 font-bold hover:bg-emerald-50"
+                                  >
+                                      Imprimir delivery
+                                  </button>
+                              )}
                               {selectedOrderDetails.status !== 'COMPLETED' && selectedOrderDetails.status !== 'CANCELLED' && (
                                   <button
                                       onClick={() => {
