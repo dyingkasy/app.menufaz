@@ -637,7 +637,8 @@ const ORDER_PAYMENT_STATUS = {
 
 const PRINT_JOB_KIND = {
   newOrder: 'NEW_ORDER',
-  reprint: 'REPRINT'
+  reprint: 'REPRINT',
+  deliveryCourier: 'DELIVERY_COURIER'
 };
 
 const ORDER_STATUS_FLOW_BY_TYPE = {
@@ -1195,6 +1196,117 @@ const buildOrderPrintText = ({ order, store, flavorMap }) => {
   }
   lines.push(divider);
   lines.push('Obrigado pela preferencia!');
+
+  return `${lines.join('\n')}\n`;
+};
+
+const buildDeliveryCourierPrintText = ({ order, store, flavorMap }) => {
+  const lineWidth = 48;
+  const divider = '-'.repeat(lineWidth);
+  const storeName = store?.name || order.storeName || 'Loja';
+  const storePhone = store?.phone || store?.whatsapp || '';
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const orderIdShort = order.id ? order.id.slice(0, 6) : '';
+  const orderNumber = Number(order.orderNumber || 0);
+
+  const lines = [];
+  lines.push(String(storeName).toUpperCase());
+  lines.push('VIA DO ENTREGADOR');
+  if (storePhone) lines.push(formatPhone(storePhone));
+  lines.push(divider);
+  lines.push('PEDIDO');
+  if (Number.isFinite(orderNumber) && orderNumber > 0) {
+    lines.push(`Pedido: #${orderNumber}`);
+  } else if (orderIdShort) {
+    lines.push(`Pedido: #${orderIdShort}`);
+  }
+  lines.push(`Data: ${createdAt.toLocaleString('pt-BR')}`);
+  lines.push(divider);
+  lines.push('CLIENTE');
+  lines.push(`Nome: ${order.customerName || 'Cliente'}`);
+  if (order.customerPhone) lines.push(`Telefone: ${formatPhone(order.customerPhone)}`);
+  if (order.deliveryAddress) {
+    const address = formatAddressLine(order.deliveryAddress);
+    if (address) lines.push(`Endereco: ${address}`);
+  }
+  lines.push(divider);
+  lines.push('ITENS');
+
+  const lineItems = Array.isArray(order.lineItems) && order.lineItems.length > 0
+    ? order.lineItems
+    : [];
+
+  if (lineItems.length === 0 && Array.isArray(order.items)) {
+    order.items.forEach((item) => {
+      lines.push(item);
+    });
+  } else {
+    lineItems.forEach((item) => {
+      const quantity = Number(item.quantity || 1);
+      const sizeKey = item.pizza?.sizeKey;
+      const sizeLabel = sizeKey
+        ? sizeKey.charAt(0).toUpperCase() + sizeKey.slice(1)
+        : '';
+      const splitCount = Number(item.pizza?.splitCount || 1);
+      const pizzaSuffix = item.pizza ? ` (${splitCount} sabores)` : '';
+      const sizeSuffix =
+        sizeLabel && !String(item.name || '').toLowerCase().includes(sizeLabel.toLowerCase())
+          ? ` (${sizeLabel})`
+          : '';
+      lines.push(`${quantity}x ${item.name || 'Item'}${sizeSuffix}${pizzaSuffix}`);
+
+      if (item.pizza && Array.isArray(item.pizza.flavors)) {
+        item.pizza.flavors.forEach((flavor) => {
+          const flavorName = flavorMap.get(flavor.flavorId) || flavor.flavorId || 'Sabor';
+          lines.push(`  - ${flavorName}`);
+        });
+      }
+
+      if (Array.isArray(item.options) && item.options.length > 0) {
+        lines.push('  Adicionais:');
+        item.options.forEach((option) => {
+          const optionLabel = option?.optionName || option?.groupName || 'Opcao';
+          const priceLabel =
+            typeof option?.price === 'number' && option.price > 0
+              ? ` (+${formatCurrencyBRL(option.price)})`
+              : '';
+          lines.push(`   * ${optionLabel}${priceLabel}`);
+        });
+      }
+      if (item.notes) {
+        lines.push(`  Obs: ${item.notes}`);
+      }
+    });
+  }
+
+  lines.push(divider);
+  lines.push('PAGAMENTO');
+  const deliveryFee = Number(order.deliveryFee || 0);
+  const subtotalFromItems = Array.isArray(order.lineItems)
+    ? order.lineItems.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0)
+    : 0;
+  const subtotal = subtotalFromItems > 0 ? subtotalFromItems : Math.max(0, Number(order.total || 0) - deliveryFee);
+  lines.push(`Subtotal: ${formatCurrencyBRL(subtotal)}`);
+  if (deliveryFee > 0) {
+    lines.push(`Entrega: ${formatCurrencyBRL(deliveryFee)}`);
+  }
+  lines.push(`Total: ${formatCurrencyBRL(order.total)}`);
+  const paymentMethod = (order.paymentMethod || '').toString();
+  const isPix = order.paymentProvider === ORDER_PAYMENT_PROVIDER.pixRepasse || paymentMethod.toLowerCase().includes('pix');
+  if (paymentMethod) lines.push(`Pagamento: ${paymentMethod}`);
+  if (isPix) {
+    if (order.paymentStatus === ORDER_PAYMENT_STATUS.paid) {
+      lines.push('Status: PAGO VIA PIX');
+    } else {
+      lines.push('Status: PIX PENDENTE - NAO ENTREGAR SEM CONFIRMAR');
+    }
+  }
+  lines.push(divider);
+  lines.push('ASSINATURA CLIENTE:');
+  lines.push('_____________________________');
+  lines.push('ENTREGADOR: __________________');
+  lines.push(divider);
+  lines.push('Obrigado!');
 
   return `${lines.join('\n')}\n`;
 };
@@ -6479,6 +6591,62 @@ app.put('/api/orders/:id/status', async (req, res) => {
       await logError({
         source: 'server',
         message: 'failed to create print job on preparing',
+        stack: error?.stack,
+        context: { route: 'PUT /api/orders/:id/status', orderId: req.params.id }
+      });
+    }
+  }
+  if (resolvedStatus === 'DELIVERING' && orderType === 'DELIVERY') {
+    try {
+      if (orderRow.store_id) {
+        const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
+        const storeData = storeRows[0]?.data || null;
+        if (storeData?.merchantId) {
+          const { rows: existingPrint } = await query(
+            'SELECT 1 FROM print_jobs WHERE order_id = $1 AND kind = $2 LIMIT 1',
+            [req.params.id, PRINT_JOB_KIND.deliveryCourier]
+          );
+          if (existingPrint.length === 0) {
+            const orderPayload = {
+              id: req.params.id,
+              status: resolvedStatus,
+              createdAt: orderRow.created_at,
+              ...(orderData || {})
+            };
+            const flavorIds = Array.from(
+              new Set(
+                (orderPayload.lineItems || [])
+                  .flatMap((item) => item?.pizza?.flavors || [])
+                  .map((entry) => entry?.flavorId)
+                  .filter((id) => isValidUuid(String(id || '')))
+              )
+            );
+            const flavorMap = new Map();
+            if (flavorIds.length > 0) {
+              const { rows: flavorRows } = await query(
+                'SELECT id, data FROM pizza_flavors WHERE id = ANY($1::uuid[])',
+                [flavorIds]
+              );
+              flavorRows.forEach((row) => flavorMap.set(row.id, row.data?.name || row.data?.title || row.id));
+            }
+            const printText = buildDeliveryCourierPrintText({
+              order: orderPayload,
+              store: storeData,
+              flavorMap
+            });
+            await createPrintJob({
+              merchantId: storeData.merchantId,
+              orderId: req.params.id,
+              kind: PRINT_JOB_KIND.deliveryCourier,
+              printText
+            });
+          }
+        }
+      }
+    } catch (error) {
+      await logError({
+        source: 'server',
+        message: 'failed to create courier print job',
         stack: error?.stack,
         context: { route: 'PUT /api/orders/:id/status', orderId: req.params.id }
       });
