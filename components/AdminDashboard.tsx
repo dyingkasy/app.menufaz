@@ -3646,15 +3646,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                                           </button>
                                                       );
                                                   })()}
-                                                  <button
-                                                      onClick={(event) => {
-                                                          event.stopPropagation();
-                                                          handlePrintOrder(order.id);
-                                                      }}
-                                                      className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 text-xs font-bold rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
-                                                  >
-                                                      Imprimir
-                                                  </button>
                                                   {order.status !== 'COMPLETED' && order.status !== 'CANCELLED' && (
                                                       <button
                                                           onClick={(event) => {
