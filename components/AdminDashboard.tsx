@@ -418,7 +418,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isSavingCategories, setIsSavingCategories] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY' | 'HOMOLOGATION'>(() => {
+  const [settingsTab, setSettingsTab] = useState<'STORE' | 'ADDRESS' | 'DELIVERY' | 'SCHEDULE' | 'PAYMENTS' | 'SECURITY' | 'HOMOLOGATION' | 'EXTRA'>(() => {
       const stored = getStoredDashboardState();
       return stored?.settingsTab || 'STORE';
   });
@@ -5230,7 +5230,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
           { id: 'SCHEDULE', label: 'Horarios', icon: Clock, desc: 'Expediente e janelas.' },
           { id: 'PAYMENTS', label: 'Pagamento', icon: Wallet, desc: 'Metodos aceitos e taxas.' },
           { id: 'SECURITY', label: 'Seguranca', icon: ShieldCheck, desc: 'Protecao e confirmacoes.' },
-          { id: 'HOMOLOGATION', label: 'Homologacao', icon: ShieldCheck, desc: 'Merchant ID para integracoes.' }
+          { id: 'HOMOLOGATION', label: 'Homologacao', icon: ShieldCheck, desc: 'Merchant ID para integracoes.' },
+          { id: 'EXTRA', label: 'Configuracoes Adicionais', icon: ShieldCheck, desc: 'Ajustes extras da operacao.' }
       ];
       const canConfigurePrinter = userRole === 'BUSINESS' || userRole === 'ADMIN';
       const printDownloadUrl = storeProfile.merchantId
@@ -6555,6 +6556,30 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                >
                                    Revogar
                                </button>
+                           </div>
+                       </div>
+                   </div>
+               )}
+               {settingsTab === 'EXTRA' && (
+                   <div className="space-y-6">
+                       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-5">
+                           <div className="flex items-start justify-between gap-4">
+                               <div>
+                                   <h4 className="text-sm font-extrabold text-slate-800 dark:text-white">Impressao adicional</h4>
+                                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                       Imprime automaticamente a via do entregador quando o pedido entra em entrega.
+                                   </p>
+                               </div>
+                               <label className="relative inline-flex items-center cursor-pointer">
+                                   <input
+                                       type="checkbox"
+                                       className="sr-only peer"
+                                       checked={storeProfile.printDeliveryCourier === true}
+                                       onChange={(e) => setStoreProfile({ ...storeProfile, printDeliveryCourier: e.target.checked })}
+                                   />
+                                   <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-red-500/30 rounded-full peer dark:bg-slate-700 peer-checked:bg-red-600 transition-colors"></div>
+                                   <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow peer-checked:translate-x-5 transition-transform"></div>
+                               </label>
                            </div>
                        </div>
                    </div>

@@ -150,6 +150,7 @@ export interface Store {
   pix_identificacao_pdv?: string;
   pix_hashes_configured?: boolean;
   pixOnlineReady?: boolean;
+  printDeliveryCourier?: boolean;
 
   // Status de funcionamento
   isOpenNow?: boolean;

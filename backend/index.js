@@ -6545,7 +6545,7 @@ app.put('/api/orders/:id/status', async (req, res) => {
       if (orderRow.store_id) {
         const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
         const storeData = storeRows[0]?.data || null;
-        if (storeData?.merchantId) {
+        if (storeData?.merchantId && storeData?.printDeliveryCourier) {
           const { rows: existingPrint } = await query(
             'SELECT 1 FROM print_jobs WHERE order_id = $1 AND kind = $2 LIMIT 1',
             [req.params.id, PRINT_JOB_KIND.newOrder]
