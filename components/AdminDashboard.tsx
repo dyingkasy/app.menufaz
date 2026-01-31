@@ -5438,20 +5438,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Número</label><input type="text" value={addressForm.number} onChange={(e) => setAddressForm({...addressForm, number: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Bairro</label><input type="text" value={addressForm.district} onChange={(e) => setAddressForm({...addressForm, district: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
                        <div><label className="block text-xs font-bold text-gray-500 uppercase mb-1">Telefone / WhatsApp</label><input type="text" value={addressForm.phone} onChange={(e) => setAddressForm({...addressForm, phone: e.target.value})} className="w-full p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white" /></div>
-                       <div className="md:col-span-2">
-                           <label className="flex items-center gap-3 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                               <input
-                                   type="checkbox"
-                                   checked={addressForm.whatsappOrderRequired}
-                                   onChange={(e) => setAddressForm({ ...addressForm, whatsappOrderRequired: e.target.checked })}
-                                   className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
-                               />
-                               Obrigar envio do pedido via WhatsApp
-                           </label>
-                           <p className="text-xs text-gray-500 mt-1">
-                               Ao finalizar o pedido, o WhatsApp da loja será aberto automaticamente com os dados completos do pedido.
-                           </p>
-                       </div>
                    </div>
                )}
 
@@ -6125,53 +6111,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                    <div className="space-y-4">
                        <div className="grid md:grid-cols-2 gap-4">
                            <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/60 p-4 space-y-3">
-                               <div className="flex items-center justify-between gap-3">
-                                   <div>
-                                       <p className="text-xs font-bold text-gray-500 uppercase">Auto abertura</p>
-                                       <p className="text-sm text-gray-500 dark:text-gray-400">Abrir/fechar automaticamente conforme os horarios.</p>
+                               <div className="border-b border-gray-200 dark:border-slate-700 pb-3">
+                                   <p className="text-xs font-bold text-gray-500 uppercase">Status atual</p>
+                                   <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-gray-500 mt-2">
+                                       <span className={`px-3 py-1 rounded-full ${availability?.isOpen ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                                           {availability?.isOpen ? 'Loja aberta' : 'Loja fechada'}
+                                       </span>
+                                       <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                           {availability?.reason || (availabilityLoading ? 'Carregando...' : 'Sem status')}
+                                       </span>
+                                       <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                           Proxima mudanca: {availability?.nextChangeAt ? new Date(availability.nextChangeAt).toLocaleString('pt-BR') : '--'}
+                                       </span>
                                    </div>
-                                   <button
-                                       onClick={handleToggleAutoOpen}
-                                       className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
-                                           storeProfile.autoOpenClose ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
-                                       }`}
-                                   >
-                                       {storeProfile.autoOpenClose ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
-                                       {storeProfile.autoOpenClose ? 'Ativo' : 'Inativo'}
-                                   </button>
                                </div>
-                               <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-gray-500">
-                                   <span className={`px-3 py-1 rounded-full ${availability?.isOpen ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
-                                       {availability?.isOpen ? 'Loja aberta' : 'Loja fechada'}
-                                   </span>
-                                   <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
-                                       {availability?.reason || (availabilityLoading ? 'Carregando...' : 'Sem status')}
-                                   </span>
-                                   <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
-                                       Proxima mudanca: {availability?.nextChangeAt ? new Date(availability.nextChangeAt).toLocaleString('pt-BR') : '--'}
-                                   </span>
-                               </div>
-                           </div>
-
-                           <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/60 p-4 space-y-3">
-                               <div className="flex items-center justify-between gap-3">
-                                   <div>
-                                       <p className="text-xs font-bold text-gray-500 uppercase">Auto-aceite</p>
-                                       <p className="text-sm text-gray-500 dark:text-gray-400">Aceitar pedidos automaticamente ao receber.</p>
-                                   </div>
-                                   <button
-                                       onClick={handleToggleAutoAccept}
-                                       disabled={isAutoAcceptUpdating}
-                                       className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
-                                           isAutoAcceptEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
-                                       } ${isAutoAcceptUpdating ? 'opacity-70 cursor-not-allowed' : ''}`}
-                                   >
-                                       {isAutoAcceptEnabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
-                                       {isAutoAcceptEnabled ? 'Ativo' : 'Inativo'}
-                                   </button>
-                               </div>
-
-                               <div className="border-t border-gray-200 dark:border-slate-700 pt-3 space-y-2">
+                               <div className="space-y-2">
                                    <p className="text-xs font-bold text-gray-500 uppercase">Pausa/Fechar agora</p>
                                    <div className="grid grid-cols-2 gap-2">
                                        <input
@@ -6582,6 +6536,70 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                                    <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow peer-checked:translate-x-5 transition-transform"></div>
                                </label>
                            </div>
+                       </div>
+                       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-5 space-y-4">
+                           <div className="flex items-center justify-between gap-3">
+                               <div>
+                                   <p className="text-xs font-bold text-gray-500 uppercase">Auto abertura</p>
+                                   <p className="text-sm text-gray-500 dark:text-gray-400">Abrir/fechar automaticamente conforme os horarios.</p>
+                               </div>
+                               <button
+                                   onClick={handleToggleAutoOpen}
+                                   className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
+                                       storeProfile.autoOpenClose ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
+                                   }`}
+                               >
+                                   {storeProfile.autoOpenClose ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                                   {storeProfile.autoOpenClose ? 'Ativo' : 'Inativo'}
+                               </button>
+                           </div>
+                           <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-gray-500">
+                               <span className={`px-3 py-1 rounded-full ${availability?.isOpen ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+                                   {availability?.isOpen ? 'Loja aberta' : 'Loja fechada'}
+                               </span>
+                               <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                   {availability?.reason || (availabilityLoading ? 'Carregando...' : 'Sem status')}
+                               </span>
+                               <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                                   Proxima mudanca: {availability?.nextChangeAt ? new Date(availability.nextChangeAt).toLocaleString('pt-BR') : '--'}
+                               </span>
+                           </div>
+                       </div>
+
+                       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-5 space-y-4">
+                           <div className="flex items-center justify-between gap-3">
+                               <div>
+                                   <p className="text-xs font-bold text-gray-500 uppercase">Auto-aceite</p>
+                                   <p className="text-sm text-gray-500 dark:text-gray-400">Aceitar pedidos automaticamente ao receber.</p>
+                               </div>
+                               <button
+                                   onClick={handleToggleAutoAccept}
+                                   disabled={isAutoAcceptUpdating}
+                                   className={`flex items-center gap-2 px-3 py-2 rounded-full font-bold text-xs transition-all ${
+                                       isAutoAcceptEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 dark:bg-slate-800 text-gray-500'
+                                   } ${isAutoAcceptUpdating ? 'opacity-70 cursor-not-allowed' : ''}`}
+                               >
+                                   {isAutoAcceptEnabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                                   {isAutoAcceptEnabled ? 'Ativo' : 'Inativo'}
+                               </button>
+                           </div>
+                       </div>
+
+                       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-5">
+                           <label className="flex items-start gap-3 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                               <input
+                                   type="checkbox"
+                                   checked={addressForm.whatsappOrderRequired}
+                                   onChange={(e) => setAddressForm({ ...addressForm, whatsappOrderRequired: e.target.checked })}
+                                   className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 mt-1"
+                               />
+                               <span>
+                                   Obrigar envio do pedido via WhatsApp
+                                   <span className="block text-xs text-gray-500 mt-1 font-normal">
+                                       Ao finalizar o pedido, o WhatsApp da loja será aberto automaticamente com os dados completos do pedido.
+                                   </span>
+                               </span>
+                           </label>
                        </div>
                    </div>
                )}
