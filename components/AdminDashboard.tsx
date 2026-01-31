@@ -57,6 +57,7 @@ import {
     updateOrderStatus,
     updateOrderPayment,
     printOrder,
+    printDeliveryCourier,
     getCouponsByStore,
     saveCoupon,
     deleteCoupon,
@@ -3776,7 +3777,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
                               </button>
                               {selectedOrderDetails.type === 'DELIVERY' && (
                                   <button
-                                      onClick={() => handleUpdateStatus(selectedOrderDetails.id, 'DELIVERING')}
+                                      onClick={() => printDeliveryCourier(selectedOrderDetails.id)}
                                       className="px-4 py-2 rounded-xl border border-emerald-200 text-emerald-700 font-bold hover:bg-emerald-50"
                                   >
                                       Imprimir delivery

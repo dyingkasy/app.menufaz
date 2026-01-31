@@ -6454,6 +6454,79 @@ app.post('/api/orders/:id/print', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/orders/:id/print-delivery', async (req, res) => {
+  const authPayload = getAuthPayload(req);
+  if (!authPayload) return res.status(401).json({ error: 'unauthorized' });
+
+  const { rows } = await query(
+    'SELECT id, status, store_id, created_at, data FROM orders WHERE id = $1',
+    [req.params.id]
+  );
+  if (rows.length === 0) return res.status(404).json({ error: 'not found' });
+  const orderRow = rows[0];
+
+  if (authPayload.role !== 'ADMIN') {
+    const store = await getStoreByOwnerId(authPayload.sub);
+    if (!store || store.id !== orderRow.store_id) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+  }
+
+  const { rows: storeRows } = await query('SELECT data FROM stores WHERE id = $1', [orderRow.store_id]);
+  const storeData = storeRows[0]?.data || null;
+  if (!storeData?.merchantId) {
+    return res.status(400).json({ error: 'merchantId not configured for store' });
+  }
+
+  const orderPayload = {
+    id: orderRow.id,
+    status: orderRow.status,
+    createdAt: orderRow.created_at,
+    ...(orderRow.data || {})
+  };
+  const orderType = resolveOrderTypeFromData(orderPayload);
+  if (orderType !== 'DELIVERY') {
+    return res.status(400).json({ error: 'order is not delivery' });
+  }
+
+  const flavorIds = Array.from(
+    new Set(
+      (orderPayload.lineItems || [])
+        .flatMap((item) => item?.pizza?.flavors || [])
+        .map((entry) => entry?.flavorId)
+        .filter((id) => isValidUuid(String(id || '')))
+    )
+  );
+  const flavorMap = new Map();
+  if (flavorIds.length > 0) {
+    const { rows: flavorRows } = await query(
+      'SELECT id, data FROM pizza_flavors WHERE id = ANY($1::uuid[])',
+      [flavorIds]
+    );
+    flavorRows.forEach((row) => flavorMap.set(row.id, row.data?.name || row.data?.title || row.id));
+  }
+
+  const printText = buildDeliveryCourierPrintText({
+    order: orderPayload,
+    store: storeData,
+    flavorMap
+  });
+  await createPrintJob({
+    merchantId: storeData.merchantId,
+    orderId: orderRow.id,
+    kind: PRINT_JOB_KIND.deliveryCourier,
+    printText,
+    payload: {
+      manual: true,
+      orderId: orderRow.id,
+      storeId: orderRow.store_id,
+      merchantId: storeData.merchantId
+    }
+  });
+
+  res.json({ ok: true });
+});
+
 app.put('/api/orders/:id/assign', async (req, res) => {
   const { courierId } = req.body || {};
   if (!courierId) return res.status(400).json({ error: 'courierId required' });
