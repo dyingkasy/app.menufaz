@@ -36,6 +36,9 @@ const shouldIgnoreClientMessage = (message: string, context?: Record<string, unk
   const statusValue = typeof context?.status === 'number' ? context.status : Number(context?.status);
   if (statusValue === 401 || statusValue === 403) return true;
   if (/Failed to fetch/i.test(normalized)) return true;
+  if (/NetworkError when attempting to fetch resource/i.test(normalized)) return true;
+  if (/Load failed/i.test(normalized)) return true;
+  if (/Script error\.?/i.test(normalized)) return true;
   if (/Fetch \\d{3} error/i.test(normalized)) return true;
   if (/Request failed: \\d{3}/i.test(normalized)) return true;
   if (/unauthorized/i.test(normalized)) return true;
