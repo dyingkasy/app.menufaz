@@ -1,7 +1,7 @@
 {
   "name": "menufaz-print",
-  "version": "0.1.4",
-  "description": "Menufaz Print - local Windows app for automatic order printing",
+  "version": "0.1.9",
+  "description": "Menufaz Print - agente local Windows para impressao automatica com resiliencia operacional",
   "main": "src/main.js",
   "private": true,
   "scripts": {
@@ -26,8 +26,15 @@
       "package.json"
     ],
     "asar": true,
+    "asarUnpack": [
+      "node_modules/printer/**/*"
+    ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "deleteAppDataOnUninstall": true,
+      "include": "build/installer.nsh"
     }
   }
 }
