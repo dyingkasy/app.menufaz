@@ -9,7 +9,7 @@ uses
   Winapi.ShellAPI, System.Win.Registry, System.StrUtils,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
   Vcl.ComCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Menus, Vcl.Printers,
-  Vcl.Imaging.pngimage;
+  Vcl.Imaging.pngimage, AdvAppStyler;
 
 type
   TStation = record
@@ -50,6 +50,9 @@ type
     FCurrentStatus: string;
     FClosingToTray: Boolean;
     FMutex: THandle;
+
+    AdvAppStyler1: TAdvAppStyler;
+    AdvFormStyler1: TAdvFormStyler;
 
     TrayIcon: TTrayIcon;
     TrayMenu: TPopupMenu;
@@ -136,6 +139,8 @@ var
   FrmMain: TMainForm;
 
 implementation
+
+{$R *.dfm}
 
 const
   DEFAULT_API_URL = 'https://app.menufaz.com';
@@ -233,6 +238,8 @@ begin
   RootPanel.Parent := Self;
   RootPanel.Align := alClient;
   RootPanel.BorderStyle := bsNone;
+  RootPanel.Color := $00F8FAFC;
+  RootPanel.ParentColor := False;
   RootPanel.VertScrollBar.Tracking := True;
 
   Panel := TPanel.Create(Self);
@@ -240,6 +247,8 @@ begin
   Panel.Align := alTop;
   Panel.Height := 112;
   Panel.BevelOuter := bvNone;
+  Panel.Color := $00EAF2FF;
+  Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 14, 16, 10);
   with TLabel.Create(Self) do
   begin
@@ -267,6 +276,8 @@ begin
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
   Panel.Height := 110;
+  Panel.Color := clWhite;
+  Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
   LblStoreName := TLabel.Create(Self);
   AddInfoRow(Panel, 'Loja', LblStoreName);
@@ -279,6 +290,8 @@ begin
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
   Panel.Height := 168;
+  Panel.Color := clWhite;
+  Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
   with TLabel.Create(Self) do
   begin
@@ -325,6 +338,8 @@ begin
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
   Panel.Height := 148;
+  Panel.Color := clWhite;
+  Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
   with TLabel.Create(Self) do
   begin
@@ -372,12 +387,16 @@ begin
   StationPanel.Parent := RootPanel;
   StationPanel.Align := alTop;
   StationPanel.Height := 132;
+  StationPanel.Color := clWhite;
+  StationPanel.ParentBackground := False;
   StationPanel.Padding.SetBounds(16, 8, 16, 8);
 
   StatusPanel := TPanel.Create(Self);
   StatusPanel.Parent := RootPanel;
   StatusPanel.Align := alTop;
   StatusPanel.Height := 170;
+  StatusPanel.Color := clWhite;
+  StatusPanel.ParentBackground := False;
   StatusPanel.Padding.SetBounds(16, 8, 16, 8);
   LblConnected := TLabel.Create(Self);
   AddInfoRow(StatusPanel, 'Conectado', LblConnected);
@@ -394,6 +413,9 @@ begin
   PollTimer.Interval := POLL_INTERVAL_MS;
   PollTimer.Enabled := False;
   PollTimer.OnTimer := PollTimerTick;
+
+  if Assigned(AdvAppStyler1) then
+    AdvAppStyler1.ApplyStyle;
 end;
 
 procedure TMainForm.AddInfoRow(AParent: TWinControl; const ACaption: string; AValueLabel: TLabel);
