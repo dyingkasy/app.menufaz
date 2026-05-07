@@ -2547,7 +2547,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, userRole, targe
       if (!editingCoupon.code || !editingCoupon.discountValue) return;
       const couponToSave: Coupon = { id: editingCoupon.id || '', code: editingCoupon.code.toUpperCase(), discountType: editingCoupon.discountType || 'PERCENTAGE', discountValue: Number(editingCoupon.discountValue), minOrderValue: Number(editingCoupon.minOrderValue) || 0, isActive: editingCoupon.isActive ?? true, description: editingCoupon.description || '', usageCount: editingCoupon.usageCount || 0, usageLimit: editingCoupon.usageLimit ? Number(editingCoupon.usageLimit) : undefined, expiresAt: editingCoupon.expiresAt };
       try {
-          const payload = editingCoupon.id ? couponToSave : { ...couponToSave, id: undefined };
+          const payload = editingCoupon.id
+              ? { ...couponToSave, storeId }
+              : { ...couponToSave, id: undefined, storeId };
           const savedCoupon = await saveCoupon(payload as Coupon & { storeId?: string });
           if (editingCoupon.id) setCoupons(prev => prev.map(c => c.id === savedCoupon.id ? savedCoupon : c));
           else setCoupons(prev => [...prev, savedCoupon]);

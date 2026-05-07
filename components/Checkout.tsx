@@ -188,6 +188,7 @@ const Checkout: React.FC<CheckoutProps> = ({
   const [couponMessage, setCouponMessage] = useState('');
   const [allCoupons, setAllCoupons] = useState<Coupon[]>([]);
   const [selectedCoupon, setSelectedCoupon] = useState<Coupon | null>(null);
+  const [showCouponModal, setShowCouponModal] = useState(false);
   const [discount, setDiscount] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -570,26 +571,27 @@ const Checkout: React.FC<CheckoutProps> = ({
       if (!status.eligible) {
           setCouponMessage(status.reason);
           setSelectedCoupon(null);
-          return;
+          return false;
       }
       setSelectedCoupon(coupon);
       setCouponInput(coupon.code);
       setCouponMessage(`Cupom aplicado: ${coupon.code}. Voce economizou ${formatCurrencyBRL(calculateCouponDiscount(coupon))}.`);
+      return true;
   };
 
   const handleApplyCouponCode = () => {
       const code = couponInput.trim().toUpperCase();
       if (!code) {
           setCouponMessage('Informe um cupom.');
-          return;
+          return false;
       }
       const match = allCoupons.find((coupon) => coupon.code.toUpperCase() === code);
       if (!match) {
           setCouponMessage('Cupom nao encontrado para esta loja.');
           setSelectedCoupon(null);
-          return;
+          return false;
       }
-      handleApplyCoupon(match);
+      return handleApplyCoupon(match);
   };
 
   const handleRemoveCoupon = () => {
@@ -1153,94 +1155,25 @@ const Checkout: React.FC<CheckoutProps> = ({
                         </div>
                     )}
 
-                    {activeCoupons.length > 0 && (
-                        <div className="space-y-3">
-                            {activeCoupons.map((coupon) => {
-                                const status = couponStatus(coupon);
-                                const isSelected = selectedCoupon?.id === coupon.id;
-                                return (
-                                    <div
-                                        key={coupon.id}
-                                        className={`flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between ${
-                                            status.eligible
-                                                ? isSelected
-                                                    ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-900/20'
-                                                    : 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
-                                                : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400'
-                                        }`}
-                                    >
-                                        <div className="min-w-0">
-                                            <div className="flex flex-wrap items-center gap-2">
-                                                <p className={`font-black tracking-widest ${status.eligible ? 'text-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
-                                                    {coupon.code}
-                                                </p>
-                                                <span className={`rounded-full px-2 py-0.5 text-xs font-black ${
-                                                    status.eligible
-                                                        ? 'bg-emerald-600 text-white'
-                                                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
-                                                }`}>
-                                                    {formatCouponBenefit(coupon)}
-                                                </span>
-                                            </div>
-                                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                                                {coupon.description || 'Cupom disponível'}
-                                            </p>
-                                            <div className="text-xs text-slate-500 dark:text-slate-400 mt-1 flex flex-wrap gap-2">
-                                                {coupon.minOrderValue > 0 && (
-                                                    <span>Pedido minimo {formatCurrencyBRL(coupon.minOrderValue)}</span>
-                                                )}
-                                                {coupon.expiresAt && (
-                                                    <span>Válido até {new Date(coupon.expiresAt).toLocaleDateString()}</span>
-                                                )}
-                                            </div>
-                                            {!status.eligible && (
-                                                <p className="mt-2 text-xs font-bold text-slate-500 dark:text-slate-400">{status.reason}</p>
-                                            )}
-                                        </div>
-                                        <button
-                                            type="button"
-                                            disabled={!status.eligible}
-                                            onClick={() => handleApplyCoupon(coupon)}
-                                            className={`w-full rounded-xl px-4 py-2 text-sm font-bold sm:w-auto ${
-                                                isSelected
-                                                    ? 'bg-emerald-600 text-white'
-                                                    : 'bg-white border border-slate-200 text-slate-700 hover:border-emerald-400 dark:bg-slate-950 dark:border-slate-700 dark:text-slate-100'
-                                            } disabled:cursor-not-allowed disabled:opacity-50`}
-                                        >
-                                            {isSelected ? 'Aplicado' : 'Aplicar'}
-                                        </button>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-                    {activeCoupons.length === 0 && (
-                        <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
-                            Nenhum cupom disponível no momento.
-                        </p>
-                    )}
-
-                    <div className="rounded-2xl border border-dashed border-slate-200 p-3 dark:border-slate-700">
-                        <p className="mb-2 text-xs font-bold uppercase text-slate-500 dark:text-slate-400">
-                            Tenho um codigo de cupom
-                        </p>
-                        <div className="flex flex-col gap-2 sm:flex-row">
-                            <input
-                                type="text"
-                                value={couponInput}
-                                onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                                placeholder="Digite o codigo"
-                                className="min-w-0 flex-1 rounded-xl border bg-slate-50 p-3 text-sm font-bold uppercase tracking-wide dark:bg-slate-800 dark:border-slate-700 dark:text-white"
-                            />
-                            <button
-                                type="button"
-                                onClick={handleApplyCouponCode}
-                                className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:opacity-90 dark:bg-white dark:text-slate-900"
-                            >
-                                Aplicar codigo
-                            </button>
-                        </div>
-                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setShowCouponModal(true)}
+                        className="flex w-full items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-left text-emerald-800 hover:bg-emerald-100 dark:border-emerald-900/50 dark:bg-emerald-900/20 dark:text-emerald-200"
+                    >
+                        <span className="min-w-0">
+                            <span className="block text-sm font-black">
+                                Ver cupons disponiveis
+                            </span>
+                            <span className="block text-xs font-semibold opacity-80">
+                                {eligibleCoupons.length > 0
+                                    ? `${eligibleCoupons.length} cupom(ns) que voce pode usar agora`
+                                    : activeCoupons.length > 0
+                                        ? 'Veja quais cupons estao bloqueados para este pedido'
+                                        : 'Nenhum cupom ativo no momento'}
+                            </span>
+                        </span>
+                        <ChevronRight size={20} className="shrink-0" />
+                    </button>
 
                     {couponMessage && (
                         <p className={`text-sm font-semibold ${
@@ -1251,6 +1184,131 @@ const Checkout: React.FC<CheckoutProps> = ({
                     )}
                 </div>
             </section>
+        )}
+
+        {showCouponModal && !isTabletMode && orderType !== 'TABLE' && (
+            <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4">
+                <div className="max-h-[90vh] w-full overflow-hidden rounded-t-3xl bg-white shadow-2xl dark:bg-slate-950 sm:max-w-xl sm:rounded-3xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5 dark:border-slate-800">
+                        <div>
+                            <h3 className="text-lg font-black text-slate-900 dark:text-white">Cupons de desconto</h3>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Escolha um cupom e volte para finalizar o pedido.</p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowCouponModal(false)}
+                            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
+                            aria-label="Fechar cupons"
+                        >
+                            <X size={18} />
+                        </button>
+                    </div>
+                    <div className="max-h-[calc(90vh-96px)] overflow-y-auto p-5">
+                        <div className="space-y-3">
+                            {activeCoupons.length > 0 ? (
+                                activeCoupons.map((coupon) => {
+                                    const status = couponStatus(coupon);
+                                    const isSelected = selectedCoupon?.id === coupon.id;
+                                    return (
+                                        <div
+                                            key={coupon.id}
+                                            className={`rounded-2xl border p-4 ${
+                                                status.eligible
+                                                    ? isSelected
+                                                        ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-900/20'
+                                                        : 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
+                                                    : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400'
+                                            }
+                                            `}
+                                        >
+                                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                <div className="min-w-0">
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <p className={`font-black tracking-widest ${status.eligible ? 'text-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                            {coupon.code}
+                                                        </p>
+                                                        <span className={`rounded-full px-2 py-0.5 text-xs font-black ${
+                                                            status.eligible
+                                                                ? 'bg-emerald-600 text-white'
+                                                                : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                                        }`}>
+                                                            {formatCouponBenefit(coupon)}
+                                                        </span>
+                                                    </div>
+                                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                                        {coupon.description || 'Cupom disponivel'}
+                                                    </p>
+                                                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
+                                                        {coupon.minOrderValue > 0 && (
+                                                            <span>Pedido minimo {formatCurrencyBRL(coupon.minOrderValue)}</span>
+                                                        )}
+                                                        {coupon.expiresAt && (
+                                                            <span>Valido ate {new Date(coupon.expiresAt).toLocaleDateString()}</span>
+                                                        )}
+                                                    </div>
+                                                    {!status.eligible && (
+                                                        <p className="mt-2 text-xs font-bold text-slate-500 dark:text-slate-400">{status.reason}</p>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    disabled={!status.eligible}
+                                                    onClick={() => {
+                                                        if (handleApplyCoupon(coupon)) setShowCouponModal(false);
+                                                    }}
+                                                    className={`w-full rounded-xl px-4 py-2 text-sm font-bold sm:w-auto ${
+                                                        isSelected
+                                                            ? 'bg-emerald-600 text-white'
+                                                            : 'bg-white border border-slate-200 text-slate-700 hover:border-emerald-400 dark:bg-slate-950 dark:border-slate-700 dark:text-slate-100'
+                                                    } disabled:cursor-not-allowed disabled:opacity-50`}
+                                                >
+                                                    {isSelected ? 'Aplicado' : 'Aplicar'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            ) : (
+                                <p className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-900 dark:text-slate-400">
+                                    Nenhum cupom ativo no momento.
+                                </p>
+                            )}
+                        </div>
+
+                        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 p-3 dark:border-slate-700">
+                            <p className="mb-2 text-xs font-bold uppercase text-slate-500 dark:text-slate-400">
+                                Tenho um codigo de cupom
+                            </p>
+                            <div className="flex flex-col gap-2 sm:flex-row">
+                                <input
+                                    type="text"
+                                    value={couponInput}
+                                    onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                                    placeholder="Digite o codigo"
+                                    className="min-w-0 flex-1 rounded-xl border bg-slate-50 p-3 text-sm font-bold uppercase tracking-wide dark:bg-slate-900 dark:border-slate-700 dark:text-white"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (handleApplyCouponCode()) setShowCouponModal(false);
+                                    }}
+                                    className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:opacity-90 dark:bg-white dark:text-slate-900"
+                                >
+                                    Aplicar codigo
+                                </button>
+                            </div>
+                        </div>
+
+                        {couponMessage && (
+                            <p className={`mt-3 text-sm font-semibold ${
+                                selectedCoupon && discount > 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-600 dark:text-slate-300'
+                            }`}>
+                                {couponMessage}
+                            </p>
+                        )}
+                    </div>
+                </div>
+            </div>
         )}
 
         {/* Contact Phone */}
