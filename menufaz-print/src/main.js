@@ -21,6 +21,23 @@ try {
 }
 
 
+const APP_TIMEZONE = 'America/Sao_Paulo';
+
+const formatDateTimePtBr = (value, timezone = APP_TIMEZONE) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '');
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: timezone,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(date);
+};
+
 const DEFAULT_API_URL_PROD = 'https://app.menufaz.com';
 const DEFAULT_API_URL_DEV = 'http://localhost:3001';
 const getDefaultApiUrl = () => (app && app.isPackaged ? DEFAULT_API_URL_PROD : DEFAULT_API_URL_DEV);
@@ -40,6 +57,8 @@ const PROCESSED_JOB_TTL_MS = 6 * 60 * 60 * 1000;
 const ESC_POS_CHARSET_CP860 = Buffer.from([0x1b, 0x74, 0x03]);
 const ESC_POS_CUT = Buffer.from([0x1d, 0x56, 0x00]);
 const PRINT_WRAP_COLUMNS = 48;
+const PRINT_BACKEND_NATIVE = 'native';
+const PRINT_BACKEND_ELECTRON = 'electron';
 
 let mainWindow = null;
 let tray = null;
@@ -335,11 +354,15 @@ const resolveConfig = (rawConfig = {}) => {
   }
   const stations = normalizePrinterStations(rawConfig.printerStations);
   const assignedStationIds = normalizeAssignedStationIds(rawConfig.assignedStationIds, stations);
+  const rawPrintBackend = String(rawConfig.printBackend || '').trim().toLowerCase();
+  const printBackend = rawPrintBackend === PRINT_BACKEND_ELECTRON ? PRINT_BACKEND_ELECTRON : PRINT_BACKEND_NATIVE;
   return {
     config: {
       ...rawConfig,
       merchantId,
       apiUrl,
+      useStationRouting: rawConfig.useStationRouting !== false,
+      printBackend,
       printerStations: stations,
       assignedStationIds,
       stationPrinters: normalizeStationPrinterMap(rawConfig.stationPrinters, stations)
@@ -497,7 +520,7 @@ const registerMachine = async (config) => {
   const payload = {
     merchantId: config.merchantId,
     machineId: config.machineId,
-    stationIds: config.assignedStationIds || []
+    stationIds: config.useStationRouting ? config.assignedStationIds || [] : []
   };
   logInfo('registering machine', {
     merchantId: config.merchantId,
@@ -637,6 +660,23 @@ const formatPrintPayload = (job) => {
   return { data: Buffer.concat([ESC_POS_CHARSET_CP860, encoded, ESC_POS_CUT]), totalLines, feedLines };
 };
 
+const canPrintNativeRaw = () => printer && typeof printer.printDirect === 'function';
+
+const printViaNativeRaw = async (printerName, payload) => {
+  if (!canPrintNativeRaw()) {
+    throw new Error(`native raw printer backend unavailable${printerLoadError ? `: ${printerLoadError}` : ''}`);
+  }
+  await new Promise((resolve, reject) => {
+    printer.printDirect({
+      data: payload.data,
+      printer: printerName,
+      type: 'RAW',
+      success: (jobId) => resolve(jobId),
+      error: (error) => reject(error)
+    });
+  });
+};
+
 const validatePrinterName = async (printerName) => {
   if (!printerName) return false;
   const printers = await getPrintersAsync();
@@ -658,6 +698,9 @@ const validatePrinterName = async (printerName) => {
 };
 
 const resolveJobPrinterName = (config, job) => {
+  if (config.useStationRouting === false) {
+    return config.printerName || '';
+  }
   const stationId = normalizeStationId(job?.stationId || '');
   if (stationId) {
     const mapped = (config.stationPrinters || {})[stationId];
@@ -748,31 +791,31 @@ const printJob = async (config, job) => {
     throw new Error('printer not found');
   }
   const payload = formatPrintPayload(job);
-  const backend = printer && typeof printer.printDirect === 'function' ? 'native' : 'electron';
+  const preferredBackend =
+    String(config?.printBackend || PRINT_BACKEND_NATIVE).trim().toLowerCase() === PRINT_BACKEND_ELECTRON
+      ? PRINT_BACKEND_ELECTRON
+      : PRINT_BACKEND_NATIVE;
+  const backend = preferredBackend === PRINT_BACKEND_ELECTRON && !canPrintNativeRaw()
+    ? PRINT_BACKEND_ELECTRON
+    : PRINT_BACKEND_NATIVE;
   logInfo('printing job', {
     jobId: job.id,
     stationId: job.stationId || '',
     printerName,
     backend,
+    preferredBackend,
     totalLines: payload.totalLines,
     feedLines: payload.feedLines
   });
   if (backend === 'native') {
-    await new Promise((resolve, reject) => {
-      printer.printDirect({
-        data: payload.data,
-        printer: printerName,
-        type: 'RAW',
-        success: (jobId) => resolve(jobId),
-        error: (error) => reject(error)
-      });
-    });
+    await printViaNativeRaw(printerName, payload);
     return;
   }
   if (printerLoadError) {
-    logError('native printer module unavailable, using electron fallback', { error: printerLoadError });
+    logError('native raw printer module unavailable, using electron driver fallback', { error: printerLoadError });
     printerLoadError = '';
   }
+  logInfo('using electron driver fallback; thermal RAW printers may print encoded data if their Windows driver is text-only');
   await printViaElectron(printerName, job);
 };
 
@@ -1058,6 +1101,9 @@ const ensureConfig = () => {
   if (typeof nextConfig.autoLaunchEnabled !== 'boolean') {
     nextConfig.autoLaunchEnabled = false;
   }
+  if (typeof nextConfig.useStationRouting !== 'boolean') {
+    nextConfig.useStationRouting = true;
+  }
   if (app.isPackaged && apiUrlSource === 'default' && isLocalhostUrl(rawConfig?.apiUrl || '')) {
     logInfo('overrode localhost apiUrl with production default', {
       previousApiUrl: rawConfig.apiUrl,
@@ -1208,6 +1254,7 @@ ipcMain.handle('reset-config', async () => {
     merchantId: current.merchantId || '',
     machineId: current.machineId || randomUUID(),
     apiUrl: getDefaultApiUrl(),
+    printBackend: PRINT_BACKEND_NATIVE,
     autoLaunchEnabled: Boolean(current.autoLaunchEnabled)
   };
   saveConfig(nextConfig);
@@ -1264,6 +1311,19 @@ ipcMain.handle('set-assigned-stations', (_event, payload) => {
   return { success: true, config: nextConfig };
 });
 
+ipcMain.handle('set-print-mode', async (_event, payload) => {
+  const config = ensureConfig();
+  const useStationRouting = payload?.mode === 'station';
+  const nextConfig = {
+    ...config,
+    useStationRouting
+  };
+  saveConfig(nextConfig);
+  logInfo('print mode updated', { mode: useStationRouting ? 'station' : 'printer' });
+  await initialize();
+  return { success: true, config: ensureConfig() };
+});
+
 ipcMain.handle('get-auto-launch', () => {
   const config = ensureConfig();
   return { enabled: Boolean(config.autoLaunchEnabled) };
@@ -1296,7 +1356,7 @@ ipcMain.handle('test-print', async () => {
       '*** TESTE DE IMPRESSAO MENUFAZ ***',
       storeName,
       config.merchantId || '',
-      new Date().toLocaleString(),
+      formatDateTimePtBr(new Date()),
       '',
       'Feijão',
       'Açúcar',

@@ -1,6 +1,6 @@
 {
   "name": "menufaz-print",
-  "version": "0.1.9",
+  "version": "0.1.13",
   "description": "Menufaz Print - agente local Windows para impressao automatica com resiliencia operacional",
   "main": "src/main.js",
   "private": true,
