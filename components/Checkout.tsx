@@ -1,15 +1,21 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils, Lock } from 'lucide-react';
+import { ArrowLeft, MapPin, ChevronRight, CreditCard, Banknote, ShoppingBag, Bike, Loader2, CheckCircle, User, Utensils, Lock, QrCode, Tag, X } from 'lucide-react';
 import { CartItem, Store, Address, Coupon, Coordinates } from '../types';
 import { createOrder, getCouponsByStore } from '../services/db';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCurrencyBRL } from '../utils/format';
 import { imageKitUrl } from '../utils/imagekit';
 import { searchAddress, calculateDistance, isPointInPolygon } from '../utils/geo';
+import { extractNeighborhoodName, findDeliveryNeighborhood } from '../utils/neighborhood';
+import { isValidCpf } from '../utils/cpf';
+import { appAlert } from '../utils/appDialogs';
+import { OrderPricingMode } from '../utils/productPricing';
 
 interface CheckoutProps {
   store: Store;
   cartItems: CartItem[];
+  orderType: OrderPricingMode;
+  onOrderTypeChange: (value: OrderPricingMode) => void;
   address: Address | null;
   onBack: () => void;
   onOrderPlaced: () => void;
@@ -22,24 +28,6 @@ interface CheckoutProps {
   isTabletMode?: boolean;
 }
 
-// --- Validation Helpers ---
-const isValidCPF = (cpf: string) => {
-    cpf = cpf.replace(/[^\d]+/g, '');
-    if (cpf.length !== 11 || !!cpf.match(/(\d)\1{10}/)) return false;
-    let sum = 0;
-    let remainder;
-    for (let i = 1; i <= 9; i++) sum = sum + parseInt(cpf.substring(i - 1, i)) * (11 - i);
-    remainder = (sum * 10) % 11;
-    if ((remainder === 10) || (remainder === 11)) remainder = 0;
-    if (remainder !== parseInt(cpf.substring(9, 10))) return false;
-    sum = 0;
-    for (let i = 1; i <= 10; i++) sum = sum + parseInt(cpf.substring(i - 1, i)) * (12 - i);
-    remainder = (sum * 10) % 11;
-    if ((remainder === 10) || (remainder === 11)) remainder = 0;
-    if (remainder !== parseInt(cpf.substring(10, 11))) return false;
-    return true;
-};
-
 const normalizeCoords = (coords?: Coordinates | null): Coordinates | null => {
     if (!coords) return null;
     const lat = Number(coords.lat);
@@ -48,26 +36,34 @@ const normalizeCoords = (coords?: Coordinates | null): Coordinates | null => {
     return { lat, lng };
 };
 
-const normalizeNeighborhoodName = (value: string) =>
+const normalizeScheduleDay = (value: string) =>
     (value || '')
         .toString()
         .toLowerCase()
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
         .trim();
 
-const extractNeighborhoodName = (district?: string) => {
-    const raw = (district || '').toString().trim();
-    if (!raw) return '';
-    const dashSplit = raw.split(' - ');
-    const commaSplit = raw.split(',');
-    return (dashSplit[0] || commaSplit[0] || raw).trim();
+const parseTimeToMinutes = (value?: string | null) => {
+    if (!value) return null;
+    const [hours, minutes] = value.split(':').map((part) => Number(part));
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return hours * 60 + minutes;
+};
+
+const isWithinRange = (now: number, start: number | null, end: number | null) => {
+    if (start === null || end === null) return false;
+    if (start <= end) return now >= start && now <= end;
+    return now >= start || now <= end;
 };
 
 const Checkout: React.FC<CheckoutProps> = ({ 
   store, 
   cartItems, 
+  orderType,
+  onOrderTypeChange,
   address, 
   onBack, 
   onOrderPlaced,
@@ -150,17 +146,10 @@ const Checkout: React.FC<CheckoutProps> = ({
       if (pixAvailable) return 'PIX';
       return 'MONEY';
   });
-  const [orderType, setOrderType] = useState<'DELIVERY' | 'PICKUP' | 'TABLE'>(() => {
-    if (tableContext) return 'TABLE';
-    if (store.acceptsDelivery === false) {
-      if (store.acceptsPickup) return 'PICKUP';
-      if (store.acceptsTableOrders) return 'TABLE';
-    }
-    return 'DELIVERY';
-  });
   const [tableNumber, setTableNumber] = useState(tableContext?.tableNumber || '');
   const [customerName, setCustomerName] = useState('');
   const [customerNameError, setCustomerNameError] = useState('');
+  const customerNameHydratedRef = useRef(false);
   const [cpf, setCpf] = useState('');
   const [showCpf, setShowCpf] = useState(false);
   const [cpfError, setCpfError] = useState('');
@@ -204,8 +193,25 @@ const Checkout: React.FC<CheckoutProps> = ({
   const [isSuccess, setIsSuccess] = useState(false);
   const [moneyChange, setMoneyChange] = useState('');
   const isStoreClosed = store.isOpenNow === false;
+  const [nowInSaoPaulo, setNowInSaoPaulo] = useState<Date>(
+      () => new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+  );
 
   // --- EFFECTS ---
+  useEffect(() => {
+      if (typeof window === 'undefined') return;
+      window.scrollTo({ top: 0, behavior: 'auto' });
+      if (document?.documentElement) document.documentElement.scrollTop = 0;
+      if (document?.body) document.body.scrollTop = 0;
+  }, []);
+
+  useEffect(() => {
+      const tick = () => {
+          setNowInSaoPaulo(new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })));
+      };
+      const interval = setInterval(tick, 60000);
+      return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
       if (user) {
@@ -216,15 +222,17 @@ const Checkout: React.FC<CheckoutProps> = ({
           if ((user as any).phone && !phone && !isTabletMode) {
               setPhone((user as any).phone);
           }
-          if ((user as any).name && !customerName) {
+          if ((user as any).name && !customerName && !customerNameHydratedRef.current) {
               setCustomerName((user as any).name);
+              customerNameHydratedRef.current = true;
           }
       }
-      if (isTabletMode && tabletNameKey && !customerName) {
+      if (isTabletMode && tabletNameKey && !customerName && !customerNameHydratedRef.current) {
           try {
               const storedName = localStorage.getItem(tabletNameKey) || '';
               if (storedName) {
                   setCustomerName(storedName);
+                  customerNameHydratedRef.current = true;
               }
           } catch {}
       }
@@ -234,29 +242,62 @@ const Checkout: React.FC<CheckoutProps> = ({
       if (!pixAvailable && paymentMethod === 'PIX') {
           const fallbackMethod = canUseCard ? 'CREDIT' : 'MONEY';
           setPaymentMethod(fallbackMethod);
-          alert('PIX não está disponível para esta loja.');
+          void appAlert('PIX não está disponível para esta loja.');
       }
   }, [paymentMethod, pixAvailable, canUseCard]);
+
+  const deliveryScheduleStatus = useMemo(() => {
+      const schedule = store.schedule || [];
+      if (!Array.isArray(schedule) || schedule.length === 0) {
+          return { allowed: true, reason: '' };
+      }
+      const dayNames = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+      const todayName = dayNames[nowInSaoPaulo.getDay()] || '';
+      const entry =
+          schedule.find((item) => normalizeScheduleDay(item.day) === normalizeScheduleDay(todayName)) ||
+          schedule[nowInSaoPaulo.getDay()] ||
+          null;
+      if (!entry) return { allowed: true, reason: '' };
+      const nowMinutes = nowInSaoPaulo.getHours() * 60 + nowInSaoPaulo.getMinutes();
+      const morningOpen = parseTimeToMinutes(entry.morningOpenTime);
+      const morningClose = parseTimeToMinutes(entry.morningCloseTime);
+      const afternoonOpen = parseTimeToMinutes(entry.afternoonOpenTime);
+      const afternoonClose = parseTimeToMinutes(entry.afternoonCloseTime);
+
+      if (entry.isMorningOpen && isWithinRange(nowMinutes, morningOpen, morningClose)) {
+          if (entry.allowDeliveryMorning === false) {
+              return { allowed: false, reason: 'A loja não faz entregas neste horário.' };
+          }
+      }
+
+      if (entry.isAfternoonOpen && isWithinRange(nowMinutes, afternoonOpen, afternoonClose)) {
+          if (entry.allowDeliveryAfternoon === false) {
+              return { allowed: false, reason: 'A loja não faz entregas neste horário.' };
+          }
+      }
+
+      return { allowed: true, reason: '' };
+  }, [store.schedule, nowInSaoPaulo]);
 
   useEffect(() => {
       if (isTableFlow) return;
       if (store.acceptsDelivery === false && orderType === 'DELIVERY') {
-          setOrderType(store.acceptsPickup ? 'PICKUP' : store.acceptsTableOrders ? 'TABLE' : 'DELIVERY');
+          onOrderTypeChange(store.acceptsPickup ? 'PICKUP' : store.acceptsTableOrders ? 'TABLE' : 'DELIVERY');
       }
       if (!store.acceptsPickup && orderType === 'PICKUP') {
-          setOrderType(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsTableOrders ? 'TABLE' : 'PICKUP');
+          onOrderTypeChange(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsTableOrders ? 'TABLE' : 'PICKUP');
       }
       if (!store.acceptsTableOrders && orderType === 'TABLE') {
-          setOrderType(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsPickup ? 'PICKUP' : 'DELIVERY');
+          onOrderTypeChange(store.acceptsDelivery !== false ? 'DELIVERY' : store.acceptsPickup ? 'PICKUP' : 'DELIVERY');
       }
-  }, [store.acceptsDelivery, store.acceptsPickup, store.acceptsTableOrders, orderType, isTableFlow]);
+  }, [store.acceptsDelivery, store.acceptsPickup, store.acceptsTableOrders, orderType, isTableFlow, onOrderTypeChange]);
 
   useEffect(() => {
       if (tableContext) {
-          setOrderType('TABLE');
+          onOrderTypeChange('TABLE');
           setTableNumber(tableContext.tableNumber);
       }
-  }, [tableContext]);
+  }, [tableContext, onOrderTypeChange]);
 
   useEffect(() => {
       if (!canUseCard && paymentMethod === 'CREDIT') {
@@ -317,10 +358,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           setNeighborhoodError('Informe o endereço completo com bairro.');
           return;
       }
-      const normalized = normalizeNeighborhoodName(district);
-      const match = deliveryNeighborhoods.find(
-          (item) => normalizeNeighborhoodName(item.name) === normalized
-      );
+      const match = findDeliveryNeighborhood(deliveryNeighborhoods, district);
       if (!match || match.active === false) {
           setNeighborhoodError(`Esta empresa não entrega no seu bairro: ${district}.`);
           return;
@@ -441,12 +479,7 @@ const Checkout: React.FC<CheckoutProps> = ({
       if (deliveryFeeMode !== 'BY_NEIGHBORHOOD') return null;
       const candidate = extractNeighborhoodName(address?.district);
       if (!candidate) return null;
-      const normalized = normalizeNeighborhoodName(candidate);
-      return (
-          deliveryNeighborhoods.find(
-              (item) => normalizeNeighborhoodName(item.name) === normalized
-          ) || null
-      );
+      return findDeliveryNeighborhood(deliveryNeighborhoods, candidate);
   }, [deliveryFeeMode, address?.district, deliveryNeighborhoods]);
   const isNeighborhoodBlocked =
       orderType === 'DELIVERY' &&
@@ -473,7 +506,6 @@ const Checkout: React.FC<CheckoutProps> = ({
   const canPlaceOrder =
       !isProcessing &&
       !isStoreClosed &&
-      !isBelowDeliveryMin &&
       !(
           orderType === 'DELIVERY' &&
           ((deliveryFeeMode === 'BY_NEIGHBORHOOD' && isNeighborhoodBlocked) ||
@@ -491,10 +523,24 @@ const Checkout: React.FC<CheckoutProps> = ({
           return { eligible: false, reason: 'Cupom esgotado.' };
       }
       if (coupon.minOrderValue > 0 && subtotal < coupon.minOrderValue) {
-          return { eligible: false, reason: `Pedido minimo R$ ${coupon.minOrderValue}.` };
+          const missing = Math.max(0, coupon.minOrderValue - subtotal);
+          return { eligible: false, reason: `Faltam ${formatCurrencyBRL(missing)} para usar.` };
       }
       return { eligible: true, reason: '' };
   };
+
+  const calculateCouponDiscount = (coupon: Coupon) => {
+      const baseDiscount =
+          coupon.discountType === 'PERCENTAGE'
+              ? (subtotal * coupon.discountValue) / 100
+              : coupon.discountValue;
+      return Math.min(Math.max(0, baseDiscount), subtotal);
+  };
+
+  const formatCouponBenefit = (coupon: Coupon) =>
+      coupon.discountType === 'PERCENTAGE'
+          ? `${coupon.discountValue}% OFF`
+          : `${formatCurrencyBRL(coupon.discountValue)} OFF`;
 
   const activeCoupons = useMemo(() => allCoupons.filter((coupon) => coupon.isActive), [allCoupons]);
   const eligibleCoupons = useMemo(
@@ -514,11 +560,7 @@ const Checkout: React.FC<CheckoutProps> = ({
           setCouponMessage(status.reason);
           return;
       }
-      const baseDiscount =
-          selectedCoupon.discountType === 'PERCENTAGE'
-              ? (subtotal * selectedCoupon.discountValue) / 100
-              : selectedCoupon.discountValue;
-      const applied = Math.min(baseDiscount, subtotal);
+      const applied = calculateCouponDiscount(selectedCoupon);
       setDiscount(applied);
       setCouponCode(selectedCoupon.code);
   }, [selectedCoupon, subtotal]);
@@ -532,7 +574,7 @@ const Checkout: React.FC<CheckoutProps> = ({
       }
       setSelectedCoupon(coupon);
       setCouponInput(coupon.code);
-      setCouponMessage(`Cupom ${coupon.code} aplicado.`);
+      setCouponMessage(`Cupom aplicado: ${coupon.code}. Voce economizou ${formatCurrencyBRL(calculateCouponDiscount(coupon))}.`);
   };
 
   const handleApplyCouponCode = () => {
@@ -543,7 +585,7 @@ const Checkout: React.FC<CheckoutProps> = ({
       }
       const match = allCoupons.find((coupon) => coupon.code.toUpperCase() === code);
       if (!match) {
-          setCouponMessage('Cupom não encontrado.');
+          setCouponMessage('Cupom nao encontrado para esta loja.');
           setSelectedCoupon(null);
           return;
       }
@@ -558,18 +600,22 @@ const Checkout: React.FC<CheckoutProps> = ({
 
   const handlePlaceOrder = async () => {
     if (orderType === 'DELIVERY' && store.acceptsDelivery === false) {
-      alert('Esta loja não aceita pedidos para entrega.');
+      await appAlert('Esta loja não aceita pedidos para entrega.');
+      return;
+    }
+    if (orderType === 'DELIVERY' && deliveryScheduleStatus.allowed === false) {
+      await appAlert(deliveryScheduleStatus.reason || 'Esta loja não entrega nesse horário.');
       return;
     }
     if (orderType === 'DELIVERY' && deliveryFeeMode === 'BY_NEIGHBORHOOD') {
       if (isNeighborhoodBlocked) {
-        alert(neighborhoodError || 'Esta empresa não entrega no seu bairro.');
+        await appAlert(neighborhoodError || 'Esta empresa não entrega no seu bairro.');
         return;
       }
     }
     if (orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS') {
       if (resolvedZone?.error) {
-        alert(resolvedZone.error);
+        await appAlert(resolvedZone.error);
         return;
       }
     }
@@ -577,29 +623,35 @@ const Checkout: React.FC<CheckoutProps> = ({
       onChangeAddress();
       return;
     }
+    if (isBelowDeliveryMin) {
+      await appAlert(
+        `Para entrega, o valor total do pedido precisa ser a partir de ${formatCurrencyBRL(deliveryMinValue)}.`
+      );
+      return;
+    }
     if (!customerName.trim()) {
       setCustomerNameError('Informe o nome do cliente.');
       return;
     }
     if (orderType === 'TABLE' && !tableNumber.trim()) {
-      alert('Informe o número da mesa.');
+      await appAlert('Informe o número da mesa.');
       return;
     }
     const phoneDigits = isTabletMode ? '' : phone.replace(/\D/g, '');
-    if (!isTabletMode) {
+    if (!isTabletMode && orderType !== 'TABLE') {
       if (!phoneDigits) {
-        alert('Informe um telefone para contato.');
+        await appAlert('Informe um telefone para contato.');
         return;
       }
       if (phoneDigits.length < 10 || phoneDigits.length > 11) {
-        alert('Telefone inválido. Informe DDD + número.');
+        await appAlert('Telefone inválido. Informe DDD + número.');
         return;
       }
     }
 
     // Validação CPF
-    if (showCpf && cpf && !isValidCPF(cpf)) {
-        alert('CPF inválido. Verifique os números.');
+    if (orderType !== 'TABLE' && showCpf && cpf && !isValidCpf(cpf)) {
+        await appAlert('CPF inválido. Verifique os números.');
         return;
     }
 
@@ -607,19 +659,19 @@ const Checkout: React.FC<CheckoutProps> = ({
     
     try {
         let deliveryCoords = resolvedDeliveryCoords || normalizeCoords(address?.coordinates);
-        if (orderType === 'DELIVERY' && address && !deliveryCoords) {
+        if (orderType === 'DELIVERY' && deliveryFeeMode === 'BY_RADIUS' && address && !deliveryCoords) {
             const queryParts = [address.street, address.number, address.district, address.city, address.state]
                 .map((value) => String(value || '').trim())
                 .filter(Boolean);
             const queryText = queryParts.join(', ');
             if (!queryText) {
-                alert('Endereço incompleto. Confirme rua, número e cidade.');
+                await appAlert('Endereço incompleto. Confirme rua, número e cidade.');
                 setIsProcessing(false);
                 return;
             }
             const results = await searchAddress(queryText);
             if (!results.length) {
-                alert('Não foi possível localizar o endereço para entrega.');
+                await appAlert('Não foi possível localizar o endereço para entrega.');
                 setIsProcessing(false);
                 return;
             }
@@ -634,12 +686,14 @@ const Checkout: React.FC<CheckoutProps> = ({
         const paymentContext =
             orderType === 'DELIVERY' ? 'na entrega' : orderType === 'PICKUP' ? 'na retirada' : 'na mesa';
         let paymentDescription = '';
-        if (paymentMethod === 'CREDIT') {
-            paymentDescription = `Cartão ${paymentContext}`;
-        } else if (paymentMethod === 'PIX') {
-            paymentDescription = pixOnlineEnabled ? 'PIX (Online)' : 'Pix';
-        } else {
-            paymentDescription = `Dinheiro ${paymentContext}${moneyChange ? ` (Troco p/ ${moneyChange})` : ''}`;
+        if (orderType !== 'TABLE') {
+            if (paymentMethod === 'CREDIT') {
+                paymentDescription = `Cartão ${paymentContext}`;
+            } else if (paymentMethod === 'PIX') {
+                paymentDescription = pixOnlineEnabled ? 'PIX (Online)' : 'Pix';
+            } else {
+                paymentDescription = `Dinheiro ${paymentContext}${moneyChange ? ` (Troco p/ ${moneyChange})` : ''}`;
+            }
         }
 
         const tableValue = tableNumber.trim();
@@ -670,7 +724,7 @@ const Checkout: React.FC<CheckoutProps> = ({
         const storePhoneRaw = store.whatsapp || store.phone || '';
         const whatsappNumber = normalizeWhatsappNumber(storePhoneRaw);
         if (store.whatsappOrderRequired && !whatsappNumber) {
-            alert('Esta loja exige envio pelo WhatsApp, mas não possui número configurado.');
+            await appAlert('Esta loja exige envio pelo WhatsApp, mas não possui número configurado.');
             setIsProcessing(false);
             return;
         }
@@ -704,7 +758,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             notes: orderType === 'PICKUP' ? 'RETIRADA NO BALCÃO' : orderType === 'TABLE' ? `MESA ${tableValue}` : '', 
             paymentMethod: paymentDescription,
             paymentProvider:
-                paymentMethod === 'PIX' && pixOnlineEnabled
+                orderType !== 'TABLE' && paymentMethod === 'PIX' && pixOnlineEnabled
                     ? 'PIX_REPASSE'
                     : undefined,
             refundStatus: 'NONE',
@@ -726,11 +780,11 @@ const Checkout: React.FC<CheckoutProps> = ({
             pickup: orderType === 'PICKUP',
             tableNumber: orderType === 'TABLE' ? tableValue : undefined,
             tableSessionId: orderType === 'TABLE' ? tableContext?.sessionId : undefined,
-            cpf: showCpf ? cpf : '',
-            customerPhone: phoneDigits || undefined,
-            couponCode: selectedCoupon?.code,
-            couponId: selectedCoupon?.id,
-            couponDiscount: discount > 0 ? discount : undefined
+            cpf: orderType !== 'TABLE' && showCpf ? cpf : '',
+            customerPhone: orderType !== 'TABLE' ? phoneDigits || undefined : undefined,
+            couponCode: orderType !== 'TABLE' ? selectedCoupon?.code : undefined,
+            couponId: orderType !== 'TABLE' ? selectedCoupon?.id : undefined,
+            couponDiscount: orderType !== 'TABLE' && discount > 0 ? discount : undefined
         });
         if (createdOrder?.customerId) {
             localStorage.setItem('customerId', createdOrder.customerId);
@@ -801,7 +855,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             error instanceof Error && error.message
                 ? error.message
                 : "Erro ao realizar pedido. Tente novamente.";
-        alert(message);
+        await appAlert(message);
     } finally {
         setIsProcessing(false);
     }
@@ -871,26 +925,37 @@ const Checkout: React.FC<CheckoutProps> = ({
           <section className="bg-white dark:bg-slate-900 p-1.5 rounded-2xl shadow-sm border border-gray-200 dark:border-slate-800 flex">
               {store.acceptsDelivery !== false && (
                   <button 
-                      onClick={() => setOrderType('DELIVERY')}
+                      onClick={() => onOrderTypeChange('DELIVERY')}
                       className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'DELIVERY' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'}`}
                   >
                       <Bike size={18} /> Entrega
                   </button>
               )}
               <button 
-                  onClick={() => store.acceptsPickup && setOrderType('PICKUP')}
+                  onClick={() => store.acceptsPickup && onOrderTypeChange('PICKUP')}
                   disabled={!store.acceptsPickup}
                   className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'PICKUP' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'} disabled:opacity-50`}
               >
                   <ShoppingBag size={18} /> Retirada
               </button>
               <button 
-                  onClick={() => store.acceptsTableOrders && setOrderType('TABLE')}
+                  onClick={() => store.acceptsTableOrders && onOrderTypeChange('TABLE')}
                   disabled={!store.acceptsTableOrders}
                   className={`flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${orderType === 'TABLE' ? 'bg-red-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-slate-800'} disabled:opacity-50`}
               >
                   <Utensils size={18} /> Mesa
               </button>
+          </section>
+        )}
+        {!isTableFlow && orderType === 'DELIVERY' && deliveryScheduleStatus.allowed === false && (
+          <section className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-2xl flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+                  <Lock size={18} />
+              </div>
+              <div>
+                  <p className="font-bold">Entrega indisponível agora</p>
+                  <p className="text-sm">{deliveryScheduleStatus.reason || 'A loja não faz entregas neste horário.'}</p>
+              </div>
           </section>
         )}
 
@@ -1019,16 +1084,10 @@ const Checkout: React.FC<CheckoutProps> = ({
                             <span>Subtotal</span>
                             <span>{formatCurrencyBRL(subtotal)}</span>
                         </div>
-                        {orderType === 'DELIVERY' && deliveryMinValue > 0 && (
-                            <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-                                <span>Pedido mínimo entrega</span>
-                                <span>{formatCurrencyBRL(deliveryMinValue)}</span>
-                            </div>
-                        )}
-                        <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
-                            <span>Taxa de Entrega</span>
-                            {orderType === 'DELIVERY' ? (
-                                deliveryFeeMode === 'BY_NEIGHBORHOOD' ? (
+                        {orderType === 'DELIVERY' && (
+                            <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400">
+                                <span>Taxa de Entrega</span>
+                                {deliveryFeeMode === 'BY_NEIGHBORHOOD' ? (
                                     isNeighborhoodBlocked ? (
                                         <span className="text-red-600 font-semibold">Indisponível</span>
                                     ) : (
@@ -1042,21 +1101,13 @@ const Checkout: React.FC<CheckoutProps> = ({
                                     )
                                 ) : (
                                     <span>{deliveryFee === 0 ? 'Grátis' : formatCurrencyBRL(deliveryFee)}</span>
-                                )
-                            ) : (
-                                <span className="text-green-600 font-bold">Grátis (Retirada)</span>
-                            )}
-                        </div>
+                                )}
+                            </div>
+                        )}
                         {discount > 0 && (
                             <div className="flex justify-between text-sm text-green-600 font-bold">
                                 <span>Desconto</span>
                                 <span>- {formatCurrencyBRL(discount)}</span>
-                            </div>
-                        )}
-                        {isBelowDeliveryMin && (
-                            <div className="text-xs text-rose-600 font-bold">
-                                Pedido mínimo para entrega: {formatCurrencyBRL(deliveryMinValue)}. Falta{' '}
-                                {formatCurrencyBRL(Math.max(0, deliveryMinValue - deliverySubtotal))} para concluir.
                             </div>
                         )}
                         <div className="flex justify-between text-xl font-extrabold text-slate-800 dark:text-white pt-3 mt-2 border-t border-gray-100 dark:border-slate-800">
@@ -1068,87 +1119,135 @@ const Checkout: React.FC<CheckoutProps> = ({
             </section>
         )}
 
-        {!isTabletMode && (
+        {!isTabletMode && orderType !== 'TABLE' && (
             <section>
                 <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-                    Cupom
+                    <Tag size={16} /> Cupons de desconto
                 </h3>
-                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-5 space-y-4">
-                    <div className="flex flex-col sm:flex-row gap-2">
-                        <input
-                            type="text"
-                            value={couponInput}
-                            onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                            placeholder="Digite o cupom"
-                            className="flex-1 p-3 border rounded-xl bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-white"
-                        />
-                        <button
-                            type="button"
-                            onClick={handleApplyCouponCode}
-                            className="px-4 py-3 rounded-xl font-bold text-sm bg-slate-900 text-white hover:opacity-90"
-                        >
-                            Aplicar
-                        </button>
-                        {selectedCoupon && (
-                            <button
-                                type="button"
-                                onClick={handleRemoveCoupon}
-                                className="px-4 py-3 rounded-xl font-bold text-sm border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200"
-                            >
-                                Remover
-                            </button>
-                        )}
-                    </div>
-                    {couponMessage && (
-                        <p className="text-sm text-slate-600 dark:text-slate-300">{couponMessage}</p>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm p-4 sm:p-5 space-y-4">
+                    {selectedCoupon && discount > 0 && (
+                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/50 dark:bg-emerald-900/20">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-xs font-black uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                                        Cupom aplicado
+                                    </p>
+                                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                                        <span className="rounded-lg bg-white px-2.5 py-1 text-sm font-black tracking-widest text-emerald-700 shadow-sm dark:bg-emerald-950 dark:text-emerald-200">
+                                            {selectedCoupon.code}
+                                        </span>
+                                        <span className="text-sm font-bold text-emerald-700 dark:text-emerald-200">
+                                            Voce economizou {formatCurrencyBRL(discount)}
+                                        </span>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleRemoveCoupon}
+                                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                                    aria-label="Remover cupom"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </div>
+                        </div>
                     )}
-                    {eligibleCoupons.length === 0 && (
-                        <p className="text-sm text-slate-500 dark:text-slate-400">Nenhum cupom disponível.</p>
-                    )}
+
                     {activeCoupons.length > 0 && (
-                        <div className="space-y-2">
+                        <div className="space-y-3">
                             {activeCoupons.map((coupon) => {
                                 const status = couponStatus(coupon);
+                                const isSelected = selectedCoupon?.id === coupon.id;
                                 return (
                                     <div
                                         key={coupon.id}
-                                        className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-xl border ${
+                                        className={`flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between ${
                                             status.eligible
-                                                ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
-                                                : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50'
+                                                ? isSelected
+                                                    ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-900/20'
+                                                    : 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10'
+                                                : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400'
                                         }`}
                                     >
-                                        <div>
-                                            <p className="font-bold text-slate-800 dark:text-white">{coupon.code}</p>
+                                        <div className="min-w-0">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <p className={`font-black tracking-widest ${status.eligible ? 'text-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {coupon.code}
+                                                </p>
+                                                <span className={`rounded-full px-2 py-0.5 text-xs font-black ${
+                                                    status.eligible
+                                                        ? 'bg-emerald-600 text-white'
+                                                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                                }`}>
+                                                    {formatCouponBenefit(coupon)}
+                                                </span>
+                                            </div>
                                             <p className="text-xs text-slate-500 dark:text-slate-400">
                                                 {coupon.description || 'Cupom disponível'}
                                             </p>
                                             <div className="text-xs text-slate-500 dark:text-slate-400 mt-1 flex flex-wrap gap-2">
-                                                <span>
-                                                    {coupon.discountType === 'PERCENTAGE'
-                                                        ? `${coupon.discountValue}% OFF`
-                                                        : `R$ ${coupon.discountValue} OFF`}
-                                                </span>
                                                 {coupon.minOrderValue > 0 && (
-                                                    <span>Pedido mínimo R$ {coupon.minOrderValue}</span>
+                                                    <span>Pedido minimo {formatCurrencyBRL(coupon.minOrderValue)}</span>
                                                 )}
                                                 {coupon.expiresAt && (
                                                     <span>Válido até {new Date(coupon.expiresAt).toLocaleDateString()}</span>
                                                 )}
                                             </div>
+                                            {!status.eligible && (
+                                                <p className="mt-2 text-xs font-bold text-slate-500 dark:text-slate-400">{status.reason}</p>
+                                            )}
                                         </div>
                                         <button
                                             type="button"
                                             disabled={!status.eligible}
                                             onClick={() => handleApplyCoupon(coupon)}
-                                            className="px-4 py-2 rounded-xl text-sm font-bold bg-white border border-slate-200 text-slate-700 hover:border-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className={`w-full rounded-xl px-4 py-2 text-sm font-bold sm:w-auto ${
+                                                isSelected
+                                                    ? 'bg-emerald-600 text-white'
+                                                    : 'bg-white border border-slate-200 text-slate-700 hover:border-emerald-400 dark:bg-slate-950 dark:border-slate-700 dark:text-slate-100'
+                                            } disabled:cursor-not-allowed disabled:opacity-50`}
                                         >
-                                            Aplicar
+                                            {isSelected ? 'Aplicado' : 'Aplicar'}
                                         </button>
                                     </div>
                                 );
                             })}
                         </div>
+                    )}
+                    {activeCoupons.length === 0 && (
+                        <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+                            Nenhum cupom disponível no momento.
+                        </p>
+                    )}
+
+                    <div className="rounded-2xl border border-dashed border-slate-200 p-3 dark:border-slate-700">
+                        <p className="mb-2 text-xs font-bold uppercase text-slate-500 dark:text-slate-400">
+                            Tenho um codigo de cupom
+                        </p>
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                            <input
+                                type="text"
+                                value={couponInput}
+                                onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                                placeholder="Digite o codigo"
+                                className="min-w-0 flex-1 rounded-xl border bg-slate-50 p-3 text-sm font-bold uppercase tracking-wide dark:bg-slate-800 dark:border-slate-700 dark:text-white"
+                            />
+                            <button
+                                type="button"
+                                onClick={handleApplyCouponCode}
+                                className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:opacity-90 dark:bg-white dark:text-slate-900"
+                            >
+                                Aplicar codigo
+                            </button>
+                        </div>
+                    </div>
+
+                    {couponMessage && (
+                        <p className={`text-sm font-semibold ${
+                            selectedCoupon && discount > 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-600 dark:text-slate-300'
+                        }`}>
+                            {couponMessage}
+                        </p>
                     )}
                 </div>
             </section>
@@ -1164,6 +1263,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                 placeholder="Nome completo"
                 value={customerName}
                 onChange={(e) => {
+                    customerNameHydratedRef.current = true;
                     setCustomerName(e.target.value);
                     if (e.target.value.trim()) setCustomerNameError('');
                 }}
@@ -1172,7 +1272,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             {customerNameError && <p className="text-xs text-red-600 mt-1 font-bold ml-1">{customerNameError}</p>}
         </section>
 
-        {!isTabletMode && (
+        {!isTabletMode && orderType !== 'TABLE' && (
             <section>
                 <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                     <User size={16} /> Telefone para contato
@@ -1200,7 +1300,7 @@ const Checkout: React.FC<CheckoutProps> = ({
             </section>
         )}
 
-        {!isTabletMode && (
+        {!isTabletMode && orderType !== 'TABLE' && (
         <section>
             <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <User size={16} /> CPF na Nota (Opcional)
@@ -1235,7 +1335,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                             v = v.replace(/(\d{3})(\d{1,2})$/, '$1-$2');
                             setCpf(v);
                             
-                            if(v && !isValidCPF(v)) setCpfError('CPF inválido');
+                            if(v && !isValidCpf(v)) setCpfError('CPF inválido');
                             else setCpfError('');
                         }}
                         className={`w-full p-4 bg-white dark:bg-slate-900 border rounded-2xl outline-none focus:ring-2 dark:text-white ${cpfError ? 'border-red-500 focus:ring-red-200' : 'border-gray-200 dark:border-slate-800 focus:ring-red-500'}`}
@@ -1246,7 +1346,7 @@ const Checkout: React.FC<CheckoutProps> = ({
         </section>
         )}
 
-        {!isTabletMode && (
+        {!isTabletMode && orderType !== 'TABLE' && (
         <section>
              <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
                 <Banknote size={16} /> Pagamento
@@ -1257,7 +1357,7 @@ const Checkout: React.FC<CheckoutProps> = ({
                         <button onClick={() => setPaymentMethod('CREDIT')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'CREDIT' ? 'text-red-600 bg-red-50 dark:bg-red-900/10 border-b-2 border-red-600' : 'text-gray-500'}`}><CreditCard size={18} /> Cartão</button>
                     )}
                     {pixAvailable && (
-                        <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><div className="w-4 h-4 rounded rotate-45 border-2 border-current"></div> Pix</button>
+                        <button onClick={() => setPaymentMethod('PIX')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'PIX' ? 'text-green-600 bg-green-50 dark:bg-green-900/10 border-b-2 border-green-600' : 'text-gray-500'}`}><QrCode size={18} /> Pix</button>
                     )}
                     <button onClick={() => setPaymentMethod('MONEY')} className={`flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 ${paymentMethod === 'MONEY' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/10 border-b-2 border-blue-600' : 'text-gray-500'}`}><Banknote size={18} /> Dinheiro</button>
                 </div>
