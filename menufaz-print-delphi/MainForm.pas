@@ -216,8 +216,8 @@ var
   StatusPanel: TPanel;
 begin
   Caption := 'Menufaz Print';
-  Width := 560;
-  Height := 760;
+  Width := 680;
+  Height := 820;
   Position := poScreenCenter;
   OnCloseQuery := FormCloseQuery;
   OnDestroy := FormDestroy;
@@ -270,6 +270,7 @@ begin
     Caption := 'Agente local Windows para impressao automatica RAW';
     Left := 18;
     Top := 50;
+    Width := 620;
   end;
   LblHealth := TLabel.Create(Self);
   LblHealth.Parent := Panel;
@@ -280,7 +281,7 @@ begin
   Panel := TPanel.Create(Self);
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
-  Panel.Height := 110;
+  Panel.Height := 120;
   Panel.Color := clWhite;
   Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
@@ -294,7 +295,7 @@ begin
   Panel := TPanel.Create(Self);
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
-  Panel.Height := 168;
+  Panel.Height := 176;
   Panel.Color := clWhite;
   Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
@@ -310,13 +311,13 @@ begin
   EdMerchant.Parent := Panel;
   EdMerchant.Left := 16;
   EdMerchant.Top := 36;
-  EdMerchant.Width := 500;
+  EdMerchant.Width := 620;
   EdMerchant.TextHint := 'Merchant ID';
   EdApi := TEdit.Create(Self);
   EdApi.Parent := Panel;
   EdApi.Left := 16;
   EdApi.Top := 66;
-  EdApi.Width := 500;
+  EdApi.Width := 620;
   EdApi.TextHint := DEFAULT_API_URL;
   BtnSave := TButton.Create(Self);
   BtnSave.Parent := Panel;
@@ -342,7 +343,7 @@ begin
   Panel := TPanel.Create(Self);
   Panel.Parent := RootPanel;
   Panel.Align := alTop;
-  Panel.Height := 148;
+  Panel.Height := 158;
   Panel.Color := clWhite;
   Panel.ParentBackground := False;
   Panel.Padding.SetBounds(16, 8, 16, 8);
@@ -359,26 +360,28 @@ begin
   RbMainPrinter.Caption := 'Usar somente a impressora principal';
   RbMainPrinter.Left := 16;
   RbMainPrinter.Top := 34;
+  RbMainPrinter.Width := 600;
   RbMainPrinter.OnClick := ModeClick;
   RbStationRouting := TRadioButton.Create(Self);
   RbStationRouting.Parent := Panel;
   RbStationRouting.Caption := 'Usar roteamento por estacao';
   RbStationRouting.Left := 16;
   RbStationRouting.Top := 58;
+  RbStationRouting.Width := 600;
   RbStationRouting.OnClick := ModeClick;
   CbPrinters := TComboBox.Create(Self);
   CbPrinters.Parent := Panel;
   CbPrinters.Left := 16;
   CbPrinters.Top := 88;
-  CbPrinters.Width := 350;
+  CbPrinters.Width := 470;
   CbPrinters.Style := csDropDownList;
   CbPrinters.OnChange := PrinterChange;
   BtnRefreshPrinters := TButton.Create(Self);
   BtnRefreshPrinters.Parent := Panel;
   BtnRefreshPrinters.Caption := 'Atualizar';
-  BtnRefreshPrinters.Left := 376;
+  BtnRefreshPrinters.Left := 500;
   BtnRefreshPrinters.Top := 86;
-  BtnRefreshPrinters.Width := 70;
+  BtnRefreshPrinters.Width := 96;
   BtnRefreshPrinters.OnClick := RefreshPrintersClick;
   BtnTest := TButton.Create(Self);
   BtnTest.Parent := Panel;
@@ -399,7 +402,7 @@ begin
   StatusPanel := TPanel.Create(Self);
   StatusPanel.Parent := RootPanel;
   StatusPanel.Align := alTop;
-  StatusPanel.Height := 170;
+  StatusPanel.Height := 184;
   StatusPanel.Color := clWhite;
   StatusPanel.ParentBackground := False;
   StatusPanel.Padding.SetBounds(16, 8, 16, 8);
@@ -438,9 +441,9 @@ begin
     Font.Style := [fsBold];
   end;
   AValueLabel.Parent := AParent;
-  AValueLabel.Left := 132;
+  AValueLabel.Left := 148;
   AValueLabel.Top := RowTop;
-  AValueLabel.Width := 380;
+  AValueLabel.Width := 490;
   AValueLabel.Caption := '-';
 end;
 
@@ -484,7 +487,7 @@ begin
   FLogPath := IncludeTrailingPathDelimiter(BaseDir) + 'app.log';
   FProcessedPath := IncludeTrailingPathDelimiter(BaseDir) + 'processed-jobs.json';
   FApiUrl := DEFAULT_API_URL;
-  FUseStationRouting := True;
+  FUseStationRouting := False;
   FHealth := 'DEGRADED';
   FCurrentStatus := 'Idle';
   FAssignedStations.Clear;
@@ -504,7 +507,7 @@ begin
         FStoreName := JsonString(Obj, 'storeName', '');
         FPrintToken := JsonString(Obj, 'printToken', '');
         FPrinterName := JsonString(Obj, 'printerName', '');
-        FUseStationRouting := JsonBool(Obj, 'useStationRouting', True);
+        FUseStationRouting := JsonBool(Obj, 'useStationRouting', False);
         FAutoLaunch := JsonBool(Obj, 'autoLaunchEnabled', AutoStartEnabled);
         Arr := Obj.GetValue('printerStations') as TJSONArray;
         if Arr <> nil then
@@ -739,6 +742,7 @@ begin
     Font.Style := [fsBold];
     Left := 16;
     Top := 10;
+    Width := 620;
   end;
   TopPos := 36;
   for I := 0 to High(FStations) do
@@ -748,7 +752,7 @@ begin
     Chk.Caption := FStations[I].Name;
     Chk.Left := 16;
     Chk.Top := TopPos;
-    Chk.Width := 150;
+    Chk.Width := 190;
     Chk.Checked := IsAssignedStation(FStations[I].Id);
     Chk.Enabled := FUseStationRouting;
     Chk.Tag := I;
@@ -756,9 +760,9 @@ begin
 
     Combo := TComboBox.Create(Self);
     Combo.Parent := StationPanel;
-    Combo.Left := 176;
+    Combo.Left := 226;
     Combo.Top := TopPos - 2;
-    Combo.Width := 340;
+    Combo.Width := 410;
     Combo.Style := csDropDownList;
     Combo.Enabled := FUseStationRouting;
     Combo.Items.Assign(CbPrinters.Items);
@@ -1246,7 +1250,7 @@ begin
   FPrintToken := '';
   FPrinterName := '';
   FApiUrl := DEFAULT_API_URL;
-  FUseStationRouting := True;
+  FUseStationRouting := False;
   FAssignedStations.Clear;
   FStationPrinters.Clear;
   EnsureDefaults;

@@ -2,8 +2,8 @@ object FrmMain: TMainForm
   Left = 0
   Top = 0
   Caption = 'Menufaz Print'
-  ClientHeight = 760
-  ClientWidth = 560
+  ClientHeight = 820
+  ClientWidth = 680
   Color = 16317180
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
