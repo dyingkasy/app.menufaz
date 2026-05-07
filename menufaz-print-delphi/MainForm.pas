@@ -58,6 +58,10 @@ type
     TrayMenu: TPopupMenu;
     PollTimer: TTimer;
     RootPanel: TScrollBox;
+    HeaderPanel: TPanel;
+    CommPanel: TPanel;
+    LblCommTitle: TLabel;
+    LblCommDetail: TLabel;
     LblStoreName: TLabel;
     LblMerchant: TLabel;
     LblApi: TLabel;
@@ -90,6 +94,7 @@ type
     procedure Log(const Level, Msg: string);
     procedure SetStatus(const CurrentStatus, Health, LastError: string; Connected: Boolean);
     procedure UpdateUi;
+    procedure UpdateCommunicationVisual;
     procedure RefreshPrinters;
     procedure RebuildStationPanel;
     procedure RegisterMachine;
@@ -247,36 +252,64 @@ begin
   RootPanel.ParentColor := False;
   RootPanel.VertScrollBar.Tracking := True;
 
-  Panel := TPanel.Create(Self);
-  Panel.Parent := RootPanel;
-  Panel.Align := alTop;
-  Panel.Height := 112;
-  Panel.BevelOuter := bvNone;
-  Panel.Color := $00EAF2FF;
-  Panel.ParentBackground := False;
-  Panel.Padding.SetBounds(16, 14, 16, 10);
+  HeaderPanel := TPanel.Create(Self);
+  HeaderPanel.Parent := RootPanel;
+  HeaderPanel.Align := alTop;
+  HeaderPanel.Height := 150;
+  HeaderPanel.BevelOuter := bvNone;
+  HeaderPanel.Color := $00EAF2FF;
+  HeaderPanel.ParentBackground := False;
+  HeaderPanel.Padding.SetBounds(16, 14, 16, 10);
   with TLabel.Create(Self) do
   begin
-    Parent := Panel;
+    Parent := HeaderPanel;
     Caption := 'Menufaz Print';
     Font.Size := 18;
     Font.Style := [fsBold];
+    Font.Color := $006B3F00;
     Left := 16;
     Top := 14;
   end;
   with TLabel.Create(Self) do
   begin
-    Parent := Panel;
+    Parent := HeaderPanel;
     Caption := 'Agente local Windows para impressao automatica RAW';
     Left := 18;
     Top := 50;
     Width := 620;
   end;
   LblHealth := TLabel.Create(Self);
-  LblHealth.Parent := Panel;
+  LblHealth.Parent := HeaderPanel;
   LblHealth.Left := 18;
-  LblHealth.Top := 76;
+  LblHealth.Top := 122;
   LblHealth.Font.Style := [fsBold];
+
+  CommPanel := TPanel.Create(Self);
+  CommPanel.Parent := HeaderPanel;
+  CommPanel.Left := 16;
+  CommPanel.Top := 78;
+  CommPanel.Width := 628;
+  CommPanel.Height := 34;
+  CommPanel.BevelOuter := bvNone;
+  CommPanel.Color := $00D1FAE5;
+  CommPanel.ParentBackground := False;
+
+  LblCommTitle := TLabel.Create(Self);
+  LblCommTitle.Parent := CommPanel;
+  LblCommTitle.Left := 12;
+  LblCommTitle.Top := 7;
+  LblCommTitle.Width := 190;
+  LblCommTitle.Caption := 'Comunicacao aguardando';
+  LblCommTitle.Font.Style := [fsBold];
+  LblCommTitle.Font.Color := $00065F46;
+
+  LblCommDetail := TLabel.Create(Self);
+  LblCommDetail.Parent := CommPanel;
+  LblCommDetail.Left := 210;
+  LblCommDetail.Top := 7;
+  LblCommDetail.Width := 400;
+  LblCommDetail.Caption := 'Informe o Merchant ID para registrar o agente.';
+  LblCommDetail.Font.Color := $00065F46;
 
   Panel := TPanel.Create(Self);
   Panel.Parent := RootPanel;
@@ -702,6 +735,7 @@ begin
   LblLastPrinted.Caption := IfThen(FLastPrintedAt <> '', FLastPrintedAt + ' (' + FLastPrintedId + ')', '-');
   LblLastError.Caption := IfThen(FLastError <> '', FLastError, '-');
   LblLog.Caption := FLogPath;
+  UpdateCommunicationVisual;
   for I := 0 to CbPrinters.Items.Count - 1 do
     if SameText(CbPrinters.Items[I], FPrinterName) then
     begin
@@ -709,6 +743,41 @@ begin
       Break;
     end;
   RebuildStationPanel;
+end;
+
+procedure TMainForm.UpdateCommunicationVisual;
+begin
+  if not Assigned(CommPanel) then
+    Exit;
+
+  if FConnected and SameText(FHealth, 'HEALTHY') and (FLastError = '') then
+  begin
+    CommPanel.Color := $00D1FAE5;
+    LblCommTitle.Caption := 'Menufaz conectado';
+    LblCommDetail.Caption := IfThen(FStoreName <> '', 'Comunicacao ativa com ' + FStoreName, 'API respondendo normalmente.');
+    LblCommTitle.Font.Color := $00065F46;
+    LblCommDetail.Font.Color := $00065F46;
+    LblHealth.Font.Color := $00065F46;
+    Exit;
+  end;
+
+  if SameText(FHealth, 'ERROR') or (FLastError <> '') then
+  begin
+    CommPanel.Color := $00E6D5FF;
+    LblCommTitle.Caption := 'Atencao na comunicacao';
+    LblCommDetail.Caption := IfThen(FLastError <> '', FLastError, 'Verifique conexao, Merchant ID ou impressora.');
+    LblCommTitle.Font.Color := $003B0764;
+    LblCommDetail.Font.Color := $003B0764;
+    LblHealth.Font.Color := $003B0764;
+    Exit;
+  end;
+
+  CommPanel.Color := $00FEF3C7;
+  LblCommTitle.Caption := 'Aguardando Menufaz';
+  LblCommDetail.Caption := IfThen(FMerchantId <> '', 'Tentando registrar e sincronizar com a API.', 'Informe o Merchant ID para registrar o agente.');
+  LblCommTitle.Font.Color := $00924516;
+  LblCommDetail.Font.Color := $00924516;
+  LblHealth.Font.Color := $00924516;
 end;
 
 procedure TMainForm.RefreshPrinters;
