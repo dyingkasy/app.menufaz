@@ -1,0 +1,10 @@
+{
+  "name": "Menufaz Print",
+  "filename": "menufaz-print.exe",
+  "version": "1.0.0-delphi-debug",
+  "runtime": "delphi-win32-debug",
+  "size": 3033600,
+  "sha256": "9aaad4a9d592fba15ce5854d2b2f3d426f7dcf722497335ecd1e699d8ea13196",
+  "updatedAt": "20260507T123525Z",
+  "source": "delphi-10.1-berlin-local-build"
+}
