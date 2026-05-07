@@ -9,7 +9,7 @@ uses
   Winapi.ShellAPI, System.Win.Registry, System.StrUtils,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls,
   Vcl.ComCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Menus, Vcl.Printers,
-  Vcl.Imaging.pngimage, AdvAppStyler;
+  Vcl.Imaging.pngimage, AdvAppStyler, AdvStyleIF;
 
 type
   TStation = record
@@ -195,6 +195,11 @@ begin
   FAssignedStations.CaseSensitive := False;
   FStationPrinters := TDictionary<string, string>.Create;
   FProcessedJobs := TDictionary<string, TDateTime>.Create;
+  AdvAppStyler1 := TAdvAppStyler.Create(Self);
+  AdvAppStyler1.Style := tsOffice2016White;
+  AdvFormStyler1 := TAdvFormStyler.Create(Self);
+  AdvFormStyler1.AppStyle := AdvAppStyler1;
+  AdvFormStyler1.Style := tsOffice2016White;
   BuildUi;
   LoadConfig;
   LoadProcessedJobs;
@@ -669,7 +674,7 @@ begin
     FHealth := Health;
   FLastError := LastError;
   FConnected := Connected;
-  TThread.Queue(nil,
+  TThread.Synchronize(nil,
     procedure
     begin
       UpdateUi;

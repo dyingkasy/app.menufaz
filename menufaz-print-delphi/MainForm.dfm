@@ -14,15 +14,4 @@ object FrmMain: TMainForm
   Position = poScreenCenter
   PixelsPerInch = 96
   TextHeight = 15
-  object AdvAppStyler1: TAdvAppStyler
-    Style = tsOffice2016White
-    Left = 440
-    Top = 24
-  end
-  object AdvFormStyler1: TAdvFormStyler
-    AppStyle = AdvAppStyler1
-    Style = tsOffice2016White
-    Left = 480
-    Top = 24
-  end
 end

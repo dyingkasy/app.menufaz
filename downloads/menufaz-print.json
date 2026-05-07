@@ -1,11 +1,11 @@
 {
   "name": "Menufaz Print",
   "filename": "menufaz-print.exe",
-  "version": "1.0.1-delphi-debug",
-  "runtime": "delphi-win32-debug-tms",
-  "size": 3055104,
-  "sha256": "63f58431b03bf060e5ebee5e0bf9b9bdd9c69851cdbd4e90ba75e97555f2d232",
-  "updatedAt": "20260507T124028Z",
+  "version": "1.0.2-delphi-debug",
+  "runtime": "delphi-win32-debug-tms-code-styler",
+  "size": 3068416,
+  "sha256": "c8233bbad4b14e4c99a434de22a108aba33cfa29574d2db41d9c048236b29260",
+  "updatedAt": "20260507T124500Z",
   "source": "delphi-10.1-berlin-local-build",
-  "ui": "tms-advappstyler-dfm"
+  "ui": "tms-created-in-code-dfm-safe"
 }
